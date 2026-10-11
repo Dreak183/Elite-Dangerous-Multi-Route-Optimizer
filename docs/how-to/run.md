@@ -46,3 +46,81 @@ journals into `$H` and pass their folder as `manual_journal_path`.
 
 From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
 against real data (`../architecture/patterns.md`). No test touches the network.
+
+## Manual live check of the external APIs
+
+API hardening spec A14. Tests never use the network, so this check is the only proof that Spansh,
+EDSM and EDAstro still answer in the shapes `edmrn/ext/` expects. Run it after changing
+`edmrn/ext/api.py`, `spansh.py` or `system_info.py`, and after an upstream merge that touches a
+call site.
+
+The test system is `Blae Phoe XT-A e1459` (768.375, -565.90625, 14325.34375). Spansh does not know
+it and EDSM does (`../../../knowledge/bulk-data.md`, "Spansh API").
+
+Save this script outside the repository, for example as `$H/live_check.py`:
+
+```python
+import os, sys
+sys.path.insert(0, os.getcwd())
+from types import SimpleNamespace
+from edmrn.ext.api import lookup_system, nearest_known_system
+from edmrn.ext.system_info import fetch_system_data
+from edmrn.custom_route import CustomRouteManager
+from edmrn.neutron import NeutronRouter
+from edmrn.galaxy_plotter import GalaxyPlotter
+
+BLAE = "Blae Phoe XT-A e1459"
+for name in (BLAE, "Sol", "Xqzzy Nonsense 404"):
+    r = lookup_system(name)
+    print("lookup", name, "->", r.coords, r.source, r.message)
+print("nearest 0,0,0 ->", nearest_known_system(0, 0, 0))
+mgr = CustomRouteManager(SimpleNamespace(journal_monitor=None))
+print("custom add", BLAE, "->", mgr.add_system(BLAE), mgr.systems[-1] if mgr.systems else mgr.lookup_errors)
+print("custom add nonsense ->", mgr.add_system("Xqzzy Nonsense 404"), mgr.lookup_errors)
+sol = fetch_system_data("Sol")
+print("system info Sol ->", sol.get("error"), sol.get("name"), len(sol.get("bodies", [])), "bodies", sol.get("notes"))
+print("system info nonsense ->", fetch_system_data("Xqzzy Nonsense 404"))
+n = NeutronRouter().calculate_route(BLAE, "Sol", 50.0, progress_callback=lambda m: print("  neutron:", m))
+print("neutron ->", n.get("success"), n.get("error"), n.get("note"), len(n.get("waypoints", [])), "waypoints")
+g = GalaxyPlotter().plot_route(BLAE, "Sol", ship_build="", range_ly=50.0, progress_callback=lambda m: print("  galaxy:", m.replace("\n", " | ")))
+print("galaxy ->", g.get("error"), g.get("note"), len(g.get("result", {}).get("system_jumps", [])), "jumps")
+os._exit(0)
+```
+
+Run it from the repository root with an isolated home (Git Bash):
+
+```
+H="$(mktemp -d)"
+# save the script above as "$H/live_check.py", then:
+HOME="$H" USERPROFILE="$H" APPDATA="$H" LOCALAPPDATA="$H" timeout 900 .venv/Scripts/python.exe -I -u "$H/live_check.py"
+```
+
+Expected (2026-10-11; waypoint and jump counts vary with Spansh's data):
+- `lookup Blae Phoe XT-A e1459 -> (768.375, -565.90625, 14325.34375) EDSM None`.
+- `lookup Sol -> (0.0, 0.0, 0.0) Spansh None`.
+- The nonsense name gives
+  `None None System 'Xqzzy Nonsense 404' was not found at Spansh or EDSM. Check the spelling.`
+- `nearest 0,0,0 -> ('Sol', 0.0)`.
+- Custom Route adds Blae Phoe with the EDSM coordinates; the nonsense name gives `False` and the
+  same sentence.
+- System Info for Sol: no error and about 40 bodies. For the nonsense name:
+  `{'error': "System 'Xqzzy Nonsense 404' is not known to EDSM."}`.
+- Neutron and Galaxy each succeed with the note
+  `Start system 'Blae Phoe XT-A e1459' is not known to Spansh yet - plotted from nearest known
+  system 'Blae Phoe SS-B d751' (10.6 ly away).`.
+
+A line that reads `... is overloaded (HTTP 502). Try again in a minute.` or `... did not answer
+within ...` is Spansh under load, not a defect: rerun later. Any `Traceback`, any HTML in a
+message, or a nonsense name reported as anything but "not found" is a defect.
+
+Then start the app isolated (section "Start it isolated" above) and check its output and the log
+under `$H/EDMRN_Route_Data/logs/` for `Traceback`.
+
+If someone can look at the window, also check by hand:
+- **Neutron and Galaxy:** plot from `Blae Phoe XT-A e1459` to `Sol`; both show the substitution
+  note. While Galaxy runs, its button is disabled.
+- **Typed unknown start:** Neutron from `Xqzzy Nonsense 404` shows
+  `Spansh rejected the request: Could not find starting system`.
+- **Custom Route:** add `Blae Phoe XT-A e1459`.
+- **System Info:** `Sol` loads; the nonsense name shows `System '…' is not known to EDSM.`
+- **Nearest:** `0,0,0` offers `Sol` at `0.00 LY`.

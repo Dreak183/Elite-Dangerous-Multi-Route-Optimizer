@@ -13,6 +13,8 @@ Layers, data flow and invariants of the system, each derived from a spec section
 ## Invariants
 
 - Journal and `Status.json` data enter only through upstream's journal layer (ADR-0001).
+- Every live external HTTP request goes through `edmrn/ext/api.py` (API hardening spec A1; rule
+  and guard test in `patterns.md`).
 
 ## Upstream hook points (ADR-0002)
 
