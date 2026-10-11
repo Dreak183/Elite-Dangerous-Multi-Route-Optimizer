@@ -1,0 +1,222 @@
+from types import SimpleNamespace
+
+import pytest
+
+from edmrn.ext.neutron_resume import Decision, NeutronAutosave, decide_resume, resume_route
+from edmrn.ext.store import RouteMeta, Store
+
+SYSTEMS = ["Sol", "A", "B", "C", "Colonia"]
+
+
+@pytest.mark.parametrize("current,expected", [
+    (None, Decision("continue", 2)),
+    ("  ", Decision("continue", 2)),
+    ("A", Decision("continue", 2)),
+    ("b", Decision("continue", 2)),
+    (" C ", Decision("advance", 3)),
+    ("Colonia", Decision("advance", 4)),
+    ("Sol", Decision("ask", 2)),
+    ("Elsewhere", Decision("ask", 2)),
+])
+def test_decide_resume(current, expected):
+    assert decide_resume(SYSTEMS, 2, current) == expected
+
+
+def test_decide_resume_at_start_index_zero():
+    assert decide_resume(SYSTEMS, 0, "Sol") == Decision("continue", 0)
+
+
+class Var:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def waypoint(system, status="unvisited"):
+    return {"system": system, "type": "Normal", "distance": 10.0, "jumps": 1, "status": status}
+
+
+def make_app(route=None, index=0, last_request=None):
+    router = SimpleNamespace(last_route=route or [], current_waypoint_index=index)
+    if last_request is not None:
+        router.last_request = last_request
+    calls = []
+    manager = SimpleNamespace(
+        update_neutron_navigation=lambda: calls.append("nav"),
+        handle_neutron_system_jump=lambda name: calls.append(("jump", name)),
+        copy_current_neutron_system=lambda auto=False: calls.append("copy"),
+        get_current_system_from_journal=lambda: None)
+    app = SimpleNamespace(
+        root=SimpleNamespace(after=lambda ms, fn: calls.append(("after", ms))),
+        neutron_router=router, neutron_manager=manager,
+        neutron_range_var=Var("70"), neutron_boost_var=Var("x4 (Normal)"),
+        neutron_from_autocomplete=Var(), neutron_to_autocomplete=Var(),
+        _calculate_neutron_route=lambda: calls.append("calculate"))
+    return app, calls
+
+
+@pytest.fixture
+def store(tmp_path):
+    s = Store(tmp_path / "edmrn.db")
+    yield s
+    s.close()
+
+
+def test_new_route_inserted_once_with_last_request(store):
+    route = [waypoint("Nearest"), waypoint("Colonia")]
+    app, _ = make_app(route, last_request={"from": "Nearest", "to": "Colonia", "range": 65.5, "boost": "x6"})
+    autosave = NeutronAutosave(app, store)
+    autosave.check()
+    autosave.check()
+    [summary] = store.list_neutron_routes()
+    assert (summary.from_system, summary.to_system, summary.range_ly, summary.boost) == ("Nearest", "Colonia", 65.5, "x6")
+
+
+def test_meta_falls_back_to_waypoints_and_tab_fields(store):
+    app, _ = make_app([waypoint("Sol"), waypoint("Colonia")])
+    app.neutron_range_var.set("48.2")
+    app.neutron_boost_var.set("x6 (Caspian)")
+    NeutronAutosave(app, store).check()
+    [summary] = store.list_neutron_routes()
+    assert (summary.from_system, summary.to_system, summary.range_ly, summary.boost) == ("Sol", "Colonia", 48.2, "x6")
+
+
+def test_stale_last_request_for_other_destination_is_ignored(store):
+    app, _ = make_app([waypoint("Sol"), waypoint("Colonia")],
+                      last_request={"from": "X", "to": "Beagle Point", "range": 30.0, "boost": "x4"})
+    NeutronAutosave(app, store).check()
+    assert store.list_neutron_routes()[0].to_system == "Colonia"
+
+
+def test_progress_change_updates_row_and_completes(store):
+    route = [waypoint("Sol"), waypoint("Colonia")]
+    app, _ = make_app(route)
+    autosave = NeutronAutosave(app, store)
+    autosave.check()
+    route[0]["status"] = "visited"
+    app.neutron_router.current_waypoint_index = 1
+    autosave.check()
+    rid = store.list_neutron_routes()[0].id
+    assert store.load_neutron_route(rid).current_index == 1
+    route[1]["status"] = "visited"
+    autosave.check()
+    assert store.load_neutron_route(rid).state == "completed"
+    assert len(store.list_neutron_routes()) == 1
+
+
+def test_upstream_backup_with_odd_values_is_normalised(store):
+    route = [{"system": "Sol", "type": "Neutron", "distance": "n/a", "jumps": None, "status": "skipped"},
+             {"system": "Colonia", "status": "visited"}]
+    app, _ = make_app(route)
+    NeutronAutosave(app, store).check()
+    saved = store.load_neutron_route(store.list_neutron_routes()[0].id)
+    assert [w["status"] for w in saved.waypoints] == ["unvisited", "visited"]
+    assert saved.waypoints[0]["distance"] == 0.0 and saved.waypoints[0]["jumps"] == 0
+
+
+def test_unsaveable_route_is_logged_once_not_retried(store, monkeypatch):
+    app, _ = make_app([waypoint("Sol")])
+    app.neutron_range_var.set("not a number")
+    autosave = NeutronAutosave(app, store)
+    errors = []
+    monkeypatch.setattr("edmrn.ext.neutron_resume.logger.error", lambda msg: errors.append(msg))
+    autosave.check()
+    autosave.check()
+    assert store.list_neutron_routes() == [] and len(errors) == 1
+
+
+def test_store_failure_is_retried_next_tick(store, monkeypatch):
+    app, _ = make_app([waypoint("Sol"), waypoint("Colonia")])
+    autosave = NeutronAutosave(app, store)
+    original = store.add_neutron_route
+    attempts = []
+
+    def flaky(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            import sqlite3
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "add_neutron_route", flaky)
+    autosave._tick()
+    autosave._tick()
+    assert len(store.list_neutron_routes()) == 1
+
+
+def test_tick_reschedules_itself(store):
+    app, calls = make_app()
+    autosave = NeutronAutosave(app, store)
+    autosave.start()
+    autosave._tick()
+    assert calls.count(("after", 2000)) == 2
+
+
+def _saved(store, index=1):
+    return store.add_neutron_route(RouteMeta("Sol", "Colonia", 70.0, "x4"),
+                                   [waypoint("Sol", "visited"), waypoint("A"), waypoint("Colonia")], index)
+
+
+def test_resume_continue_does_not_duplicate(store):
+    rid = _saved(store)
+    app, calls = make_app()
+    autosave = NeutronAutosave(app, store)
+    decision = resume_route(app, store, autosave, rid, ask=lambda *a: pytest.fail("no ask expected"))
+    autosave.check()
+    resume_route(app, store, autosave, rid, ask=lambda *a: None)
+    autosave.check()
+    assert decision.kind == "continue" and "nav" in calls
+    assert app.neutron_router.current_waypoint_index == 1
+    assert len(store.list_neutron_routes()) == 1
+
+
+def test_resume_advance_uses_upstream_jump_handler(store):
+    rid = _saved(store)
+    app, calls = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Colonia"
+    resume_route(app, store, NeutronAutosave(app, store), rid, ask=lambda *a: pytest.fail("no ask"))
+    assert ("jump", "Colonia") in calls
+
+
+def test_resume_ask_back_copies_waypoint(store):
+    rid = _saved(store)
+    app, calls = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Elsewhere"
+    resume_route(app, store, NeutronAutosave(app, store), rid, ask=lambda *a: "back")
+    assert "copy" in calls and "calculate" not in calls
+
+
+def test_resume_ask_replot_replaces_saved_route(store):
+    rid = _saved(store)
+    app, calls = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Elsewhere"
+    autosave = NeutronAutosave(app, store)
+    resume_route(app, store, autosave, rid, ask=lambda *a: "replot")
+    assert "calculate" in calls
+    assert (app.neutron_from_autocomplete.get(), app.neutron_to_autocomplete.get()) == ("Elsewhere", "Colonia")
+    assert app.neutron_range_var.get() == "70" and app.neutron_boost_var.get() == "x4 (Normal)"
+
+    app.neutron_router.last_route = [waypoint("Elsewhere"), waypoint("B"), waypoint("Colonia")]
+    app.neutron_router.current_waypoint_index = 0
+    app.neutron_router.last_request = {"from": "Elsewhere", "to": "Colonia", "range": 70.0, "boost": "x4"}
+    autosave.check()
+
+    [summary] = store.list_neutron_routes()
+    assert summary.id == rid and summary.from_system == "Elsewhere" and summary.total == 3
+
+
+def test_failed_replot_does_not_hijack_unrelated_route(store):
+    rid = _saved(store)
+    app, _ = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Elsewhere"
+    autosave = NeutronAutosave(app, store)
+    resume_route(app, store, autosave, rid, ask=lambda *a: "replot")
+    app.neutron_router.last_route = [waypoint("Sol"), waypoint("Beagle Point")]
+    autosave.check()
+    assert len(store.list_neutron_routes()) == 2
+    assert store.load_neutron_route(rid).meta.to_system == "Colonia"
