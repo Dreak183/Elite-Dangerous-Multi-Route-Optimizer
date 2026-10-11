@@ -72,6 +72,7 @@ from edmrn.platform_detector import get_platform_detector
 from edmrn.gui import ManualWindow, AboutWindow, BackupSelectionWindow
 from edmrn.theme_editor import ThemeEditor
 from edmrn.neutron import NeutronRouter
+from edmrn.ext.spansh import journal_start_coords
 logger = get_logger('App')
 
 class EDMRN_App:
@@ -2788,6 +2789,8 @@ class EDMRN_App:
         self.galaxy_output.insert("1.0", "Submitting route to Spansh API...\n\n")
         self.galaxy_output.insert("end", "⏳ Calculating route...\n\n")
         self.galaxy_output.configure(state="disabled")
+        self.galaxy_calculate_btn.configure(state="disabled")
+        options = dict(already_supercharged=self.galaxy_already_supercharged.get(), use_injections=self.galaxy_use_injections.get(), exclude_secondary=self.galaxy_exclude_secondary.get(), refuel_every_scoopable=self.galaxy_refuel_every.get(), routing_algorithm=self.galaxy_algorithm_var.get())
         def progress_callback(message: str):
             self.galaxy_output.configure(state="normal")
             self.galaxy_output.insert("end", f"{message}\n")
@@ -2801,14 +2804,11 @@ class EDMRN_App:
                     ship_build=ship_build,
                     cargo=cargo,
                     reserve_fuel=reserve_fuel,
-                    already_supercharged=self.galaxy_already_supercharged.get(),
                     use_supercharge=use_supercharge,
-                    use_injections=self.galaxy_use_injections.get(),
-                    exclude_secondary=self.galaxy_exclude_secondary.get(),
-                    refuel_every_scoopable=self.galaxy_refuel_every.get(),
-                    routing_algorithm=self.galaxy_algorithm_var.get(),
+                    **options,
                     progress_callback=lambda msg: self.root.after(0, lambda: progress_callback(msg)),
-                    range_ly=jump_range
+                    range_ly=jump_range,
+                    start_coords=journal_start_coords(self.journal_monitor, source)
                 )
                 self.root.after(0, lambda: self._display_galaxy_route_result(result))
             except Exception as e:
@@ -2820,11 +2820,12 @@ class EDMRN_App:
 
     
     def _display_galaxy_route_result(self, result):
+        self.galaxy_calculate_btn.configure(state="normal")
         self.galaxy_output.configure(state="normal")
         self.galaxy_output.delete("1.0", "end")
         
         if not result or "result" not in result:
-            self.galaxy_output.insert("1.0", "No route data returned.\n")
+            self.galaxy_output.insert("1.0", f"❌ {result['error']}\n" if isinstance(result, dict) and result.get('error') else "No route data returned.\n")
             self.galaxy_output.configure(state="disabled")
             self.galaxy_current_btn.configure(text="No route calculated")
             self.galaxy_prev_btn.configure(state="disabled")
@@ -2839,6 +2840,9 @@ class EDMRN_App:
         summary = self.galaxy_plotter.format_route_summary(result)
         self.galaxy_output.insert("1.0", "=== ROUTE SUMMARY ===\n")
         self.galaxy_output.insert("end", summary + "\n\n")
+        if result.get('note'):
+            self.galaxy_output.insert("end", f"{result['note']}\n\n")
+            self._log(f"Galaxy Plotter: {result['note']}")
         
         self.galaxy_route_waypoints = self.galaxy_plotter.extract_system_jumps(result)
         self.galaxy_current_waypoint_index = 0

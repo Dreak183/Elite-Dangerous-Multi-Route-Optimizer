@@ -3,6 +3,8 @@ import json
 import time
 from typing import Optional, Dict, Any, Callable, List
 from edmrn.logger import get_logger
+from edmrn.ext.api import ApiError, ApiFailure
+from edmrn.ext.spansh import submit_route_job as submit_spansh_job, poll_route_result
 
 logger = get_logger('GalaxyPlotter')
 
@@ -29,7 +31,8 @@ class GalaxyPlotter:
                         use_injections: bool = False,
                         exclude_secondary: bool = False,
                         refuel_every_scoopable: bool = True,
-                        progress_callback: Optional[Callable[[str], None]] = None) -> Optional[str]:
+                        progress_callback: Optional[Callable[[str], None]] = None,
+                        start_coords=None):
         try:
             if progress_callback:
                 progress_callback(f"Submitting route calculation to Spansh API...")
@@ -55,39 +58,20 @@ class GalaxyPlotter:
             }
             params = {k: v for k, v in params.items() if v not in [None, "", False] or k in ["from", "to", "range", "efficiency", "supercharge_multiplier"]}
             logger.info(f"[SPNSH-REQ] Submitting route params: {json.dumps(params, ensure_ascii=False)}")
-            response = requests.post(
-                self.route_api,
-                params=params,
-                timeout=60,
-                headers={'User-Agent': "EDMRN 3.3"}
+            submission = submit_spansh_job(
+                self.route_api, params, start_coords=start_coords, timeout=60,
+                on_retry=lambda n, failure: progress_callback(f"{failure} Retrying ({n}/2)...") if progress_callback else None
             )
+            response = submission.response
             logger.info(f"[SPNSH-RESP] Status: {response.status_code}, Body: {response.text[:1000]}")
-            if response.status_code != 202:
-                error_msg = response.text
-                logger.error(f"Failed to submit route job: {response.status_code} - {error_msg}")
-                if progress_callback:
-                    progress_callback(f"Error: {error_msg}")
-                return None
-            data = response.json()
-            job_id = data.get("job")
-            if not job_id:
-                logger.error(f"No job ID in response: {data}")
-                if progress_callback:
-                    progress_callback("Error: No job ID received from Spansh")
-                return None
+            job_id = submission.job_id()
             logger.info(f"Route job submitted: {job_id}")
-            return job_id
-            
-        except requests.RequestException as e:
-            logger.error(f"Network error submitting route: {e}")
-            if progress_callback:
-                progress_callback(f"Network error: {e}")
-            return None
+            return job_id, submission.note
+        except ApiError:
+            raise
         except Exception as e:
-            logger.error(f"Error submitting route: {e}")
-            if progress_callback:
-                progress_callback(f"Error: {e}")
-            return None
+            logger.exception(f"Error submitting route: {e}")
+            raise ApiError(ApiFailure("Spansh", "unexpected"))
     
     def _simplify_ship_build(self, ship_build: str) -> str:
         try:
@@ -147,54 +131,10 @@ class GalaxyPlotter:
                           job_id: str,
                           max_wait: int = 300,
                           progress_callback: Optional[Callable[[str], None]] = None) -> Optional[Dict[str, Any]]:
-        try:
-            if progress_callback:
-                progress_callback(f"Waiting for route calculation...\nJob ID: {job_id}")
-            
-            results_url = f"{self.results_api}/{job_id}"
-            elapsed = 0
-            poll_interval = 1
-            
-            while elapsed < max_wait:
-                try:
-                    response = requests.get(results_url, timeout=30)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        logger.info(f"Route calculation complete")
-                        return data
-                    
-                    elif response.status_code == 202:
-                        elapsed += poll_interval
-                        if progress_callback:
-                            progress_callback(f"Calculating route...\nElapsed: {elapsed}s")
-                        time.sleep(poll_interval)
-                        poll_interval = min(5, poll_interval + 0.5)
-                        continue
-                    
-                    else:
-                        error_msg = response.text
-                        logger.error(f"Error polling route: {response.status_code} - {error_msg}")
-                        if progress_callback:
-                            progress_callback(f"Error: {error_msg}")
-                        return None
-                
-                except requests.RequestException as e:
-                    logger.error(f"Network error polling route: {e}")
-                    if progress_callback:
-                        progress_callback(f"Network error: {e}")
-                    return None
-            
-            logger.error(f"Route calculation timeout after {max_wait}s")
-            if progress_callback:
-                progress_callback(f"Timeout: Route calculation took too long")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error polling route: {e}")
-            if progress_callback:
-                progress_callback(f"Error: {e}")
-            return None
+        if progress_callback:
+            progress_callback(f"Waiting for route calculation...\nJob ID: {job_id}")
+        on_progress = (lambda elapsed: progress_callback(f"Calculating route...\nElapsed: {elapsed:.0f}s")) if progress_callback else None
+        return poll_route_result(job_id, max_wait=max_wait, on_progress=on_progress)
     
     def plot_route(self,
                    source_system: str,
@@ -209,11 +149,12 @@ class GalaxyPlotter:
                    refuel_every_scoopable: bool = True,
                    routing_algorithm: str = "optimistic",
                    progress_callback: Optional[Callable[[str], None]] = None,
-                   range_ly: float = None) -> Optional[Dict[str, Any]]:
+                   range_ly: float = None,
+                   start_coords=None) -> Optional[Dict[str, Any]]:
         try:
             logger.info(f"[SPNSH-REQ] plot_route params: source={source_system}, dest={destination_system}, ship_build={ship_build}, cargo={cargo}, reserve_fuel={reserve_fuel}, already_supercharged={already_supercharged}, use_supercharge={use_supercharge}, use_injections={use_injections}, exclude_secondary={exclude_secondary}, refuel_every_scoopable={refuel_every_scoopable}, routing_algorithm={routing_algorithm}, range_ly={range_ly}")
             efficiency = 60 if routing_algorithm == "optimistic" else 80
-            job_id = self.submit_route_job(
+            job_id, note = self.submit_route_job(
                 source_system, destination_system,
                 range_ly=range_ly,
                 efficiency=efficiency,
@@ -225,18 +166,19 @@ class GalaxyPlotter:
                 use_injections=use_injections,
                 exclude_secondary=exclude_secondary,
                 refuel_every_scoopable=refuel_every_scoopable,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                start_coords=start_coords
             )
-            if not job_id:
-                return None
             route_data = self.poll_route_results(job_id, max_wait=300, progress_callback=progress_callback)
+            route_data["note"] = note
             logger.info(f"[SPNSH-RESP] route_data: {json.dumps(route_data)[:1000]}")
             return route_data
+        except ApiError as e:
+            logger.warning(f"Galaxy route failed: {e.failure!r}")
+            return {"error": str(e.failure)}
         except Exception as e:
-            logger.error(f"Error plotting route: {e}")
-            if progress_callback:
-                progress_callback(f"Error: {e}")
-            return None
+            logger.exception(f"Error plotting route: {e}")
+            return {"error": str(ApiFailure("Spansh", "unexpected"))}
     
     def extract_system_jumps(self, route_data: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not route_data:

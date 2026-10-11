@@ -128,3 +128,21 @@ def poll_route_result(job_id, *, max_wait, on_progress=None, call=call, clock=ti
             on_progress(elapsed)
         sleep(interval)
         interval = min(MAX_POLL_INTERVAL, interval + 0.5)
+
+
+def journal_start_coords(journal_monitor, name) -> Optional[tuple]:
+    """Journal coordinates of `name` when it is the commander's current system, else None.
+
+    Reads upstream's JournalMonitor getters (ADR-0001); never raises.
+    """
+    if not journal_monitor or not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        current = journal_monitor.get_current_system()
+        if not isinstance(current, str) or current.strip().casefold() != name.strip().casefold():
+            return None
+        coords = journal_monitor.get_current_coordinates()
+    except Exception as e:
+        logger.debug(f"Journal coordinates unavailable: {e}")
+        return None
+    return tuple(float(v) for v in coords) if _is_coords(coords) else None
