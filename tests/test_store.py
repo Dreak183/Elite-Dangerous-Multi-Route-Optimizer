@@ -1,3 +1,5 @@
+import hashlib
+import os
 import sqlite3
 
 import pytest
@@ -71,6 +73,8 @@ def test_delete_cascades(store, tmp_path):
     RouteMeta("Sol", "Colonia", 0.0, "x4"),
     RouteMeta("Sol", "Colonia", 70.0, "x5"),
     RouteMeta("Sol", None, 70.0, "x4"),
+    RouteMeta("Sol", "Colonia", float("nan"), "x4"),
+    RouteMeta("Sol", "Colonia", float("inf"), "x4"),
 ])
 def test_invalid_meta_rejected(store, meta):
     with pytest.raises(ValueError):
@@ -84,6 +88,10 @@ def test_invalid_meta_rejected(store, meta):
     [wp("Sol", status="skipped")],
     [wp("Sol", distance="far")],
     [wp("Sol", jumps=True)],
+    [wp("Sol", distance=float("nan"))],
+    [wp("Sol", distance=float("inf"))],
+    [wp("Sol", jumps=2**70)],
+    [wp("Sol", jumps=-1)],
     ["Sol"],
 ])
 def test_invalid_waypoints_rejected(store, bad):
@@ -114,12 +122,45 @@ def test_newer_schema_raises(tmp_path):
     raw.close()
     with pytest.raises(StoreError, match="schema 99"):
         Store(tmp_path / "edmrn.db")
+    os.remove(tmp_path / "edmrn.db")
 
 
 def test_corrupt_file_raises(tmp_path):
-    (tmp_path / "edmrn.db").write_bytes(b"this is not a database" * 100)
+    path = tmp_path / "edmrn.db"
+    path.write_bytes(b"this is not a database" * 100)
+    before = _sha(path)
     with pytest.raises(StoreError):
-        Store(tmp_path / "edmrn.db")
+        Store(path)
+    assert _sha(path) == before
+    os.remove(path)
+
+
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_damaged_body_with_intact_header_raises(tmp_path):
+    path = tmp_path / "edmrn.db"
+    s = Store(path)
+    s.add_neutron_route(META, [wp("Sol")])
+    s.close()
+    data = path.read_bytes()
+    path.write_bytes(data[:100] + bytes([255]) * (len(data) - 100))
+    before = _sha(path)
+    with pytest.raises(StoreError):
+        Store(path)
+    assert _sha(path) == before
+    os.remove(path)
+
+
+def test_version1_file_without_tables_raises(tmp_path):
+    path = tmp_path / "edmrn.db"
+    raw = sqlite3.connect(path)
+    raw.execute("PRAGMA user_version = 1")
+    raw.close()
+    with pytest.raises(StoreError):
+        Store(path)
+    os.remove(path)
 
 
 def test_open_default_uses_isolated_app_data_dir(isolated_home):

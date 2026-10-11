@@ -1,13 +1,14 @@
 """SQLite store for EDMRN fork data (ADR-0003: one connection, rollback journal, bound values)."""
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 class StoreError(Exception):
@@ -83,6 +84,10 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_finite_number(value: Any) -> bool:
+    return _is_number(value) and math.isfinite(value)
+
+
 def _validate_meta(meta: Any) -> RouteMeta:
     if not isinstance(meta, RouteMeta):
         raise ValueError("meta must be a RouteMeta")
@@ -90,7 +95,7 @@ def _validate_meta(meta: Any) -> RouteMeta:
         value = getattr(meta, name)
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{name} must be a non-empty string")
-    if not _is_number(meta.range_ly) or meta.range_ly <= 0:
+    if not _is_finite_number(meta.range_ly) or meta.range_ly <= 0:
         raise ValueError("range_ly must be a positive number")
     if meta.boost not in BOOSTS:
         raise ValueError(f"boost must be one of {BOOSTS}")
@@ -110,9 +115,9 @@ def _validate_waypoints(waypoints: Any) -> list[tuple]:
             raise ValueError(f"waypoint {seq}: system must be a non-empty string")
         if not isinstance(type_, str):
             raise ValueError(f"waypoint {seq}: type must be a string")
-        if not _is_number(distance):
+        if not _is_finite_number(distance):
             raise ValueError(f"waypoint {seq}: distance must be a number")
-        if not isinstance(jumps, int) or isinstance(jumps, bool):
+        if not isinstance(jumps, int) or isinstance(jumps, bool) or not 0 <= jumps < 2**63:
             raise ValueError(f"waypoint {seq}: jumps must be an integer")
         if status not in STATUSES:
             raise ValueError(f"waypoint {seq}: status must be one of {STATUSES}")
@@ -136,10 +141,17 @@ class Store:
         self._lock = threading.RLock()
         try:
             self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
-            self._conn.execute('PRAGMA foreign_keys = ON')
-            self._migrate()
         except sqlite3.DatabaseError as e:
             raise StoreError(f"Cannot open {self.path}: {e}") from e
+        try:
+            self._conn.execute('PRAGMA foreign_keys = ON')
+            self._migrate()
+            self._probe()
+        except BaseException as e:
+            self._conn.close()
+            if isinstance(e, sqlite3.DatabaseError):
+                raise StoreError(f"Cannot open {self.path}: {e}") from e
+            raise
 
     @classmethod
     def open_default(cls) -> 'Store':
@@ -160,6 +172,11 @@ class Store:
                 self._conn.execute('ROLLBACK')
                 raise
             self._conn.execute('COMMIT')
+
+    def _probe(self) -> None:
+        if self._conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+            raise StoreError(f"{self.path} failed its integrity check")
+        self._conn.execute('SELECT count(*) FROM neutron_routes').fetchone()
 
     def _migrate(self) -> None:
         version = self._conn.execute('PRAGMA user_version').fetchone()[0]
