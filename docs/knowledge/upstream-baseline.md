@@ -87,6 +87,53 @@ exchange. It also lists the upstream defects that our features would sit on top 
   Reloading happens only as part of "Load from backup", which lists folders that contain a CSV
   **[community]**.
 
+## External APIs
+
+Survey of 2026-10-11 (an agent read every `requests` call). The four marked **[probe]** were checked
+against the live services.
+
+- Live call sites:
+  - EDSM: System Info (`app.fetch_edsm_system_data`) and the Custom Route fallback.
+  - Spansh:
+    - Galaxy Plotter (`galaxy_plotter.py`, via `app._calculate_galaxy_route`);
+    - Neutron;
+    - Nearest by coordinates (`app._find_nearest_system_by_coordinates`);
+    - Custom Route coordinates (`custom_route._fetch_coordinates`);
+    - autocomplete (`system_autocomplete.py`, with an EDSM fallback).
+  - EDAstro: in System Info.
+  - GitHub: the updater.
+
+  Only Neutron retries (`23903c2`). User-Agents differ per site, and some send none **[community]**.
+- Dead copies: nothing in the UI reaches `galaxy_handler.py` or `journal_handler.py`. The live Galaxy
+  code is in `app.py` **[community]**.
+- **Defect — Custom Route never uses Spansh:** it reads `result`/`coords`, but the search answers
+  `results[]` with top-level `x,y,z`. Every lookup therefore falls through to EDSM, and every
+  failure shows "System Not Found" **[probe]**.
+- **Defect — Galaxy Plotter hides the reason:**
+  - It writes Spansh's error into the output box, then `_display_galaxy_route_result(None)` clears
+    it and shows "No route data returned." **[community]**.
+  - Its source defaults to the journal system with no fallback.
+  - One 502 or timeout while polling aborts a job that is still running on Spansh.
+  - The Calculate button is never disabled **[community]**.
+- **Defect — Nearest distance is always 0:** `_show_nearest_results` reads a top-level `distance`.
+  Spansh nests it in `system`, and `limit` is ignored **[probe]**.
+- **Defects in System Info:**
+  - EDSM URLs interpolate the raw system name, so `&`, `#` and `+` break the request.
+  - An unknown system (`[]`, **[probe]**) is reported as fetched.
+  - A failure in any of the five requests discards all of them, and network errors are written to
+    `edmrn_crash.log`.
+  - A list-shaped factions body raises **[community]**.
+- **Autocomplete:** failures are not cached, so each keystroke during an outage waits up to 5 s +
+  5 s. The Custom Route tab builds a new autocompleter, and with it an empty cache, per keystroke
+  **[community]**.
+- **Updater:** a failed manual check reports "already up to date" **[community]**.
+- **Tk from worker threads:**
+  - The Neutron `calculation_done` configures widgets.
+  - The Galaxy thread reads Tk variables.
+  - Autocomplete callbacks reach widgets.
+
+  All three run on worker threads **[community]**.
+
 ## Bookmarks
 
 - There is no bookmark feature. `visit_history` keeps
