@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from edmrn.ext.store import RouteMeta, SavedRoute, Store, StoreError
@@ -249,9 +250,27 @@ def ask_resume_choice(app, saved: SavedRoute, current: Optional[str]) -> Optiona
     return result['choice']
 
 
+def format_updated(iso: str) -> str:
+    """UTC ISO timestamp from the store as local 'YYYY-MM-DD HH:MM'; the raw text if unparsable."""
+    try:
+        moment = datetime.strptime(iso, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+        return moment.astimezone().strftime('%Y-%m-%d %H:%M')
+    except (ValueError, TypeError):
+        return str(iso)
+
+
 def open_saved_routes_dialog(app) -> None:
     import customtkinter as ctk
+    previous = getattr(app, '_edmrn_saved_routes_dialog', None)
+    try:
+        if previous is not None and previous.winfo_exists():
+            previous.lift()
+            previous.focus()
+            return
+    except Exception:
+        pass
     dialog = ctk.CTkToplevel(app.root)
+    app._edmrn_saved_routes_dialog = dialog
     dialog.title("Saved neutron routes")
     dialog.geometry("640x420")
     dialog.transient(app.root)
@@ -282,7 +301,7 @@ def open_saved_routes_dialog(app) -> None:
             state = "done" if summary.state == 'completed' else f"{summary.visited}/{summary.total}"
             ctk.CTkLabel(row, anchor="w", text=(
                 f"{summary.from_system} → {summary.to_system}   {state}   "
-                f"{summary.range_ly:g} ly {summary.boost}   {summary.updated_at}")
+                f"{summary.range_ly:g} ly {summary.boost}   {format_updated(summary.updated_at)}")
             ).pack(side="left", padx=8, fill="x", expand=True)
             ctk.CTkButton(row, text="Delete", width=70,
                           command=lambda rid=summary.id: delete(rid)).pack(side="right", padx=4)
@@ -293,8 +312,9 @@ def open_saved_routes_dialog(app) -> None:
         try:
             resume_route(app, store, autosave, route_id, ask=ask_resume_choice)
         except Exception as e:
-            logger.error(f"Resume failed: {e}")
-            ctk.CTkLabel(body, text=f"Resume failed: {e}").pack(anchor="w")
+            logger.error(f"Resume failed: {e!r}")
+            message = "This route no longer exists." if isinstance(e, KeyError) else f"Resume failed: {e}"
+            ctk.CTkLabel(body, text=message).pack(anchor="w")
             return
         dialog.destroy()
 
@@ -303,6 +323,9 @@ def open_saved_routes_dialog(app) -> None:
             store.delete_neutron_route(route_id)
         except Exception as e:
             logger.error(f"Delete failed: {e}")
+            refresh()
+            ctk.CTkLabel(body, text=f"Delete failed: {e}").pack(anchor="w")
+            return
         refresh()
 
     refresh()

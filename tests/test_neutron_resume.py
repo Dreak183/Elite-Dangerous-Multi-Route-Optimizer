@@ -306,3 +306,12 @@ def test_install_with_corrupt_database_disables_feature(isolated_home, monkeypat
     app, _ = make_app()
     assert install(app) is None
     assert app.neutron_autosave is None and "edmrn.db" in app.edmrn_store_error
+
+
+def test_format_updated_local_and_fallback():
+    from datetime import datetime, timezone
+    from edmrn.ext.neutron_resume import format_updated
+    expected = datetime(2026, 10, 11, 22, 49, 38, tzinfo=timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M')
+    assert format_updated('2026-10-11T22:49:38Z') == expected
+    assert format_updated('not a date') == 'not a date'
+    assert format_updated(None) == 'None'
