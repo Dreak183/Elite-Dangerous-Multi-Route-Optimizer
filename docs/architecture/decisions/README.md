@@ -7,3 +7,4 @@ that links back. Template: `_template.md`.
 |---|---|
 | [0001](0001-journal-data-from-upstream-layer.md) | Journal data comes from upstream's journal layer, not EDJournalData |
 | [0002](0002-stay-close-to-upstream.md) | Stay mergeable with upstream; own code lives in `edmrn/ext/` |
+| [0003](0003-sqlite-for-local-storage.md) | Local fork data lives in one SQLite database, one connection, rollback journal |
