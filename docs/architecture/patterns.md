@@ -23,9 +23,14 @@ Rule (API hardening spec A1–A3):
 - Failures become one `ApiFailure` sentence. "Not found" stays distinct from "service failed":
   `lookup_system` returns not found only when every service answered.
 - Code that shows a result in Tk receives it through `root.after`.
-- Tests inject `call`/`transport`, `sleep` and `clock`; no test uses the network.
-- `tests/test_http_path.py` fails when any module other than `api.py` calls `requests` or
-  `urlopen` directly. The dead copies `galaxy_handler.py` and `journal_handler.py` are exempt.
+- Tests inject `call`/`transport`, `sleep` and `clock`; patch the name the calling module
+  imported, or pass `call=`; `call=`/`transport=` defaults are bound at import. An autouse fixture
+  in `tests/conftest.py` makes `socket.connect`, `getaddrinfo` and `create_connection` raise, so a
+  test that reaches the network fails.
+- `tests/test_http_path.py` fails when any module other than `api.py` uses the direct forms
+  `requests.<verb>(`, `requests.Session(` or `urlopen(`. Aliased imports (`from requests import
+  get`, `import requests as ...`) and `http.client` are not detected; review catches them. The
+  dead copies `galaxy_handler.py` and `journal_handler.py` are exempt.
 
 Defect it prevents (`../knowledge/upstream-baseline.md`, "External APIs"):
 - Each call site had its own User-Agent, timeout and error handling, and only Neutron retried.

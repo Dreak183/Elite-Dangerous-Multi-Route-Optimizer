@@ -103,7 +103,7 @@ against the live services.
   - EDAstro: in System Info.
   - GitHub: the updater.
 
-  Only Neutron retries (`23903c2`). User-Agents differ per site, and some send none **[community]**.
+  Nothing retries. User-Agents differ per site, and some send none **[community]**.
 - Dead copies: nothing in the UI reaches `galaxy_handler.py` or `journal_handler.py`. The live Galaxy
   code is in `app.py` **[community]**.
 - **Defect — Custom Route never uses Spansh:** it reads `result`/`coords`, but the search answers

@@ -52,6 +52,18 @@ def test_success_passes_start_coords_and_carries_note(monkeypatch):
     assert polled == {"job_id": "j1", "max_wait": 300}
 
 
+def test_retry_progress_text_is_the_neutron_wording(monkeypatch):
+    def fake_submit(url, params, **kwargs):
+        kwargs["on_retry"](1, ApiFailure("Spansh", "overloaded", 502))
+        return RouteSubmission(FakeResponse(202, {"job": "j1"}), None, "Far Sys")
+
+    monkeypatch.setattr(gp, "submit_spansh_job", fake_submit)
+    shown = []
+    gp.GalaxyPlotter().submit_route_job("Far Sys", "Sol", ship_build="", range_ly=50.0,
+                                        progress_callback=shown.append)
+    assert "Spansh busy, retrying (1/2)..." in shown
+
+
 def test_poll_timeout_reason(monkeypatch):
     monkeypatch.setattr(gp, "submit_spansh_job",
                         lambda url, params, **k: RouteSubmission(FakeResponse(202, {"job": "j1"}), None, "A"))

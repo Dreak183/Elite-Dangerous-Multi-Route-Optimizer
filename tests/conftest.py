@@ -17,6 +17,19 @@ import pytest  # noqa: E402  (must follow the redirect)
 
 
 @pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    import socket
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("network access in tests is forbidden")
+
+    for name in ("connect", "connect_ex"):
+        monkeypatch.setattr(socket.socket, name, refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+
+
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()

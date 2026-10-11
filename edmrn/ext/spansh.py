@@ -59,7 +59,8 @@ def submit_route_job(url, params, *, start_coords=None, coords_lookup=lookup_sys
     """Submit a route job. If Spansh does not know the start, plot once more from the nearest
     system it knows (A5): coordinates come from start_coords, else from coords_lookup(from).
 
-    Returns the final response; 4xx responses are returned, service failures raise ApiError.
+    Returns a RouteSubmission (final response, substitution note, start actually used); 4xx
+    responses are returned, service failures raise ApiError.
     """
     original = params.get("from")
     response = call("POST", url, service="Spansh", params=params, timeout=timeout, on_retry=on_retry)

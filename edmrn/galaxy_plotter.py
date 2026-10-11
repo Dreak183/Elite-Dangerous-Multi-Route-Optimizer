@@ -60,7 +60,7 @@ class GalaxyPlotter:
             logger.info(f"[SPNSH-REQ] Submitting route params: {json.dumps(params, ensure_ascii=False)}")
             submission = submit_spansh_job(
                 self.route_api, params, start_coords=start_coords, timeout=60,
-                on_retry=lambda n, failure: progress_callback(f"{failure} Retrying ({n}/2)...") if progress_callback else None
+                on_retry=lambda n, failure: progress_callback(f"Spansh busy, retrying ({n}/2)...") if progress_callback else None
             )
             response = submission.response
             logger.info(f"[SPNSH-RESP] Status: {response.status_code}, Body: {response.text[:1000]}")

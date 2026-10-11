@@ -70,6 +70,17 @@ def test_connection_error_then_200():
     assert response.status_code == 200 and sleeps == [2.0]
 
 
+def test_chunked_encoding_error_then_200_is_retried_like_a_connection_error():
+    transport = Script(requests.exceptions.ChunkedEncodingError("connection broken"), FakeResponse(200, {}))
+    response, sleeps = run(transport)
+    assert response.status_code == 200 and sleeps == [2.0]
+
+
+def test_content_decoding_error_stays_unexpected():
+    error, sleeps = run(Script(requests.exceptions.ContentDecodingError("bad gzip")))
+    assert error.failure.kind == "unexpected" and sleeps == []
+
+
 def test_connection_error_three_times_is_offline():
     transport = Script(*[requests.exceptions.ConnectionError() for _ in range(3)])
     error, _ = run(transport)

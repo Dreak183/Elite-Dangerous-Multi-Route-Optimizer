@@ -151,6 +151,16 @@ def test_transient_twice_then_200():
     assert poll(fake)[0] == {"result": {}}
 
 
+def test_chunked_encoding_error_during_polling_is_tolerated():
+    import requests
+    from edmrn.ext import api
+    transport = Script(requests.exceptions.ChunkedEncodingError("connection broken"),
+                       FakeResponse(200, {"result": {}}))
+    real_call = lambda *a, **k: api.call(*a, transport=transport, sleep=lambda s: None, **k)  # noqa: E731
+    assert poll(real_call)[0] == {"result": {}}
+    assert len(transport.calls) == 2
+
+
 def test_three_transient_tolerated_fourth_fails():
     assert poll(Script(overloaded(), overloaded(), overloaded(), FakeResponse(200, {"r": 1})))[0] == {"r": 1}
     with pytest.raises(ApiError) as info:

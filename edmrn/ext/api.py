@@ -118,7 +118,7 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
         except requests.exceptions.Timeout as exc:
             logger.debug(f"{service} {method} {url}: {exc!r}")
             failure = ApiFailure(service, "timeout", None, f"{timeout:g} s")
-        except requests.exceptions.ConnectionError as exc:
+        except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
             logger.debug(f"{service} {method} {url}: {exc!r}")
             failure = ApiFailure(service, "offline")
         except Exception:
