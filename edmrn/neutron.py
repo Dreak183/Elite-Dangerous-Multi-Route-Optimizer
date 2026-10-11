@@ -5,7 +5,8 @@ import json
 from typing import Dict, List, Optional, Callable
 from edmrn.logger import get_logger
 from edmrn.icons import Icons
-from edmrn.ext.spansh import submit_route_job, spansh_error, TRANSIENT_STATUSES
+from edmrn.ext.spansh import submit_route_job, poll_route_result
+from edmrn.ext.api import ApiError
 
 logger = get_logger('Neutron')
 
@@ -32,7 +33,7 @@ class NeutronRouter:
             supercharge_multiplier = 6 if fsd_boost == "x6" else 4
             if progress_callback:
                 progress_callback("Connecting to Spansh API...")
-            response, start_note, used_from = submit_route_job(
+            submission = submit_route_job(
                 self.route_api_url,
                 params={
                     "efficiency": 60,
@@ -41,17 +42,12 @@ class NeutronRouter:
                     "to": to_system,
                     "supercharge_multiplier": supercharge_multiplier
                 },
-                headers={'User-Agent': "EDMRN 3.0"},
                 timeout=30,
                 start_coords=start_coords,
                 on_retry=lambda n, why: progress_callback(f"Spansh busy, retrying ({n}/2)...") if progress_callback else None
             )
-            if response.status_code != 202:
-                return {"success": False, "error": f"API Error {response.status_code}: {spansh_error(response)}"}
-            data = response.json()
-            job_id = data.get("job")
-            if not job_id:
-                return {"success": False, "error": "No job ID received"}
+            start_note, used_from = submission.note, submission.used_from
+            job_id = submission.job_id()
             if progress_callback:
                 progress_callback("Waiting for route calculation...")
             result_data = self._wait_for_result(job_id, progress_callback)
@@ -70,50 +66,19 @@ class NeutronRouter:
                 "note": start_note,
                 "start_system": used_from
             }
-        except requests.exceptions.Timeout:
-            return {"success": False, "error": "Request timeout - Spansh API not responding"}
-        except requests.exceptions.ConnectionError:
-            return {"success": False, "error": "Connection error - Check internet connection"}
+        except ApiError as e:
+            return {"success": False, "error": str(e.failure)}
         except Exception as e:
-            logger.error(f"Neutron route calculation error: {e}")
-            return {"success": False, "error": f"Calculation error: {str(e)}"}
+            logger.exception(f"Neutron route calculation error: {e}")
+            return {"success": False, "error": "Unexpected error talking to Spansh."}
         finally:
             self.is_calculating = False
     def _wait_for_result(self, job_id: str, progress_callback: Callable = None) -> Dict:
-        max_attempts = 20
-        attempt = 0
-        transient_failures = 0
-        while attempt < max_attempts:
-            try:
-                try:
-                    response = requests.get(f"{self.results_api_url}/{job_id}", timeout=10)
-                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                    transient_failures += 1
-                    if transient_failures >= 3:
-                        return {"success": False, "error": f"Result API Error: {e}"}
-                    time.sleep(1)
-                    attempt += 1
-                    continue
-                if response.status_code in TRANSIENT_STATUSES:
-                    transient_failures += 1
-                    if transient_failures >= 3:
-                        return {"success": False, "error": f"Result API Error: {response.status_code}"}
-                    time.sleep(1)
-                    attempt += 1
-                    continue
-                transient_failures = 0
-                if response.status_code == 200:
-                    data = response.json()
-                    return {"success": True, "data": data}
-                elif response.status_code != 202:
-                    return {"success": False, "error": f"Result API Error {response.status_code}: {spansh_error(response)}"}
-                if progress_callback:
-                    progress_callback(f"Calculating... ({attempt + 1}/20)")
-                time.sleep(1)
-                attempt += 1
-            except Exception as e:
-                return {"success": False, "error": f"Result check error: {str(e)}"}
-        return {"success": False, "error": "Calculation timeout"}
+        on_progress = (lambda elapsed: progress_callback(f"Calculating... ({elapsed:.0f} s)")) if progress_callback else None
+        try:
+            return {"success": True, "data": poll_route_result(job_id, max_wait=180, on_progress=on_progress)}
+        except ApiError as e:
+            return {"success": False, "error": str(e.failure)}
     def _process_route_data(self, data: Dict, from_system: str, to_system: str) -> Dict:
         waypoints = []
         total_distance = 0.0

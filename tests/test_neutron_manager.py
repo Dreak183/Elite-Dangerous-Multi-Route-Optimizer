@@ -114,3 +114,16 @@ def test_substitution_note_is_shown_logged_and_from_field_updated(errors, monkey
     assert app.neutron_info_label.text.endswith("\nNOTE TEXT")
     assert "NOTE TEXT" in log
     assert app.neutron_from_autocomplete.get() == "Near Sys"
+
+
+def test_calculation_done_runs_on_the_tk_loop(errors, monkeypatch):
+    from fakes import Root
+    result = {"success": False, "error": "Spansh is overloaded (HTTP 502). Try again in a minute."}
+    app, _ = make_app(result=result)
+    app.root = Root()
+    nm.NeutronManager(app).calculate_neutron_route()
+    assert errors == [] and app.neutron_calculate_btn.text == "Calculating..."
+    app.root.run()
+    assert app.neutron_calculate_btn.text == "🚀 Calculate Neutron Route"
+    assert app.neutron_info_label.text == "❌ Error: Spansh is overloaded (HTTP 502). Try again in a minute."
+    assert errors == ["Failed to calculate route:\nSpansh is overloaded (HTTP 502). Try again in a minute."]

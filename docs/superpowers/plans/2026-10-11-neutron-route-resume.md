@@ -545,11 +545,13 @@ Claude-Session: https://claude.ai/code/session_016pAbHYEXvYT1Q3mcpjvXFa"
 from types import SimpleNamespace
 
 import edmrn.neutron as neutron
+from edmrn.ext.spansh import RouteSubmission
 
 
 def _fake_submit(status, from_used="Sol"):
-    response = SimpleNamespace(status_code=status, json=lambda: {"job": "J1"}, text="", reason="")
-    return lambda *a, **k: (response, None, from_used)
+    body = {"job": "J1"} if status == 202 else {"error": "Could not find starting system"}
+    response = SimpleNamespace(status_code=status, json=lambda: body, text="", reason="")
+    return lambda *a, **k: RouteSubmission(response, None, from_used)
 
 
 def test_last_request_set_on_success(monkeypatch):
@@ -568,7 +570,6 @@ def test_last_request_set_on_success(monkeypatch):
 
 def test_last_request_untouched_on_failure(monkeypatch):
     monkeypatch.setattr(neutron, "submit_route_job", _fake_submit(400))
-    monkeypatch.setattr(neutron, "spansh_error", lambda r: "Could not find starting system")
     router = neutron.NeutronRouter()
     router.last_request = {"keep": True}
 

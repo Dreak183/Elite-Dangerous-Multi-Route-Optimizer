@@ -1,252 +1,202 @@
-"""Spansh error reasons, transient retries and nearest-start fallback. No network."""
+"""edmrn.ext.spansh: route job submission with start fallback (A5) and polling (A6). No network."""
 import pytest
-import requests
 
-from edmrn.ext.spansh import (
-    is_unknown_start, nearest_known_system, post_with_retry, spansh_error, submit_route_job,
-)
+from edmrn.ext.api import ApiError, ApiFailure, Lookup
+from edmrn.ext.spansh import RouteSubmission, is_unknown_start, poll_route_result, submit_route_job
+from fakes import Clock, FakeResponse, Script
 
+URL = "https://spansh.co.uk/api/route"
 UNKNOWN = {"error": "Could not find starting system"}
+PARAMS = {"efficiency": 60, "range": 40.0, "from": "Unknown Sys", "to": "Sol", "supercharge_multiplier": 4}
+NEAREST_OK = FakeResponse(200, {"system": {"name": "Blae Phoe SS-B d751", "x": 1, "y": 2, "z": 3,
+                                           "distance": 10.6}})
+NOTE = ("Start system 'Unknown Sys' is not known to Spansh yet - plotted from nearest known system "
+        "'Blae Phoe SS-B d751' (10.6 ly away).")
 
 
-class FakeResponse:
-    def __init__(self, status_code, body=None, text=None, reason=""):
-        self.status_code = status_code
-        self._body = body
-        self.reason = reason
-        self.text = text if text is not None else ("" if body is None else str(body))
+class Lookups:
+    """Fake coords_lookup that records names."""
 
-    def json(self):
-        if self._body is None:
-            raise ValueError("not json")
-        return self._body
+    def __init__(self, result):
+        self.result, self.names = result, []
+
+    def __call__(self, name, *, call):
+        self.names.append(name)
+        return self.result
 
 
-class Script:
-    """Callable that records calls and replays queued responses or exceptions."""
-
-    def __init__(self, *items):
-        self.items = list(items)
-        self.calls = []
-
-    def __call__(self, url, **kwargs):
-        self.calls.append((url, kwargs))
-        item = self.items.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
+def no_lookup(name, *, call):
+    raise AssertionError("coords_lookup must not be called")
 
 
-class Sleeps(list):
-    def __call__(self, seconds):
-        self.append(seconds)
+def submit(fake, coords=(1.0, 2.0, 3.0), coords_lookup=no_lookup, params=None):
+    return submit_route_job(URL, dict(params or PARAMS), start_coords=coords, coords_lookup=coords_lookup,
+                            timeout=30, call=fake)
 
 
-PARAMS = {"efficiency": 60, "range": 40.0, "from": "Unknown Sys", "to": "Sol",
-          "supercharge_multiplier": 4}
-HEADERS = {"User-Agent": "EDMRN 3.0"}
-NEAREST_OK = FakeResponse(200, {"system": {"name": "Blae Phoe SS-B d751", "distance": 10.6}})
+# --- RouteSubmission.job_id ------------------------------------------------
+
+def test_job_id_of_accepted_submission():
+    assert RouteSubmission(FakeResponse(202, {"job": "j1", "status": "queued"}), None, "A").job_id() == "j1"
 
 
-# --- spansh_error -----------------------------------------------------------
+@pytest.mark.parametrize("response,text", [
+    (FakeResponse(400, UNKNOWN), "Spansh rejected the request: Could not find starting system"),
+    (FakeResponse(400, {"error": "range must be greater than 10 LY"}),
+     "Spansh rejected the request: range must be greater than 10 LY"),
+    (FakeResponse(202, {"status": "queued"}), "Unexpected error talking to Spansh (HTTP 202)."),
+    (FakeResponse(202, text="<html>"), "Unexpected error talking to Spansh (HTTP 202)."),
+])
+def test_job_id_failures_are_readable(response, text):
+    with pytest.raises(ApiError) as info:
+        RouteSubmission(response, None, "A").job_id()
+    assert str(info.value) == text
 
-def test_spansh_error_reads_json_error():
-    assert spansh_error(FakeResponse(400, UNKNOWN)) == "Could not find starting system"
-
-
-def test_spansh_error_html_body_falls_back_to_status():
-    r = FakeResponse(502, None, text="<html>Bad Gateway</html>", reason="Bad Gateway")
-    assert spansh_error(r) == "HTTP 502 Bad Gateway"
-
-
-def test_spansh_error_empty_body_without_reason():
-    assert spansh_error(FakeResponse(500)) == "HTTP 500"
-
-
-# --- post_with_retry --------------------------------------------------------
-
-def test_client_error_is_returned_without_retry():
-    post, sleep = Script(FakeResponse(400, UNKNOWN)), Sleeps()
-    r = post_with_retry("u", PARAMS, HEADERS, 30, post=post, sleep=sleep)
-    assert r.status_code == 400 and len(post.calls) == 1 and sleep == []
-
-
-def test_transient_then_success():
-    post, sleep, seen = Script(FakeResponse(502), FakeResponse(502), FakeResponse(202)), Sleeps(), []
-    r = post_with_retry("u", PARAMS, HEADERS, 30, on_retry=lambda n, why: seen.append((n, why)),
-                        post=post, sleep=sleep)
-    assert r.status_code == 202
-    assert sleep == [2.0, 5.0]
-    assert [n for n, _ in seen] == [1, 2]
-    assert post.calls[0][1]["params"] == PARAMS and post.calls[0][1]["timeout"] == 30
-
-
-def test_all_attempts_transient_returns_last_response():
-    last = FakeResponse(502, reason="last")
-    post = Script(FakeResponse(502), FakeResponse(503), last)
-    assert post_with_retry("u", PARAMS, HEADERS, 30, post=post, sleep=Sleeps()) is last
-
-
-def test_all_attempts_timeout_raises():
-    post = Script(*[requests.exceptions.Timeout() for _ in range(3)])
-    with pytest.raises(requests.exceptions.Timeout):
-        post_with_retry("u", PARAMS, HEADERS, 30, post=post, sleep=Sleeps())
-    assert len(post.calls) == 3
-
-
-def test_connection_error_then_success():
-    post = Script(requests.exceptions.ConnectionError(), FakeResponse(202))
-    assert post_with_retry("u", PARAMS, HEADERS, 30, post=post, sleep=Sleeps()).status_code == 202
-
-
-# --- is_unknown_start / nearest_known_system --------------------------------
 
 def test_is_unknown_start_only_for_that_400():
     assert is_unknown_start(FakeResponse(400, {"error": "could not find starting SYSTEM"}))
     assert not is_unknown_start(FakeResponse(400, {"error": "range must be greater than 10 LY"}))
-    assert not is_unknown_start(FakeResponse(502, UNKNOWN))
+    assert not is_unknown_start(FakeResponse(200, UNKNOWN))
 
 
-def test_nearest_known_system_parses_body():
-    get = Script(NEAREST_OK)
-    assert nearest_known_system(1.0, 2.0, 3.0, get=get) == ("Blae Phoe SS-B d751", 10.6)
-    url, kw = get.calls[0]
-    assert url == "https://spansh.co.uk/api/nearest"
-    assert kw["params"] == {"x": 1.0, "y": 2.0, "z": 3.0}
-    assert "User-Agent" in kw["headers"]
+# --- submit_route_job --------------------------------------------------------
+
+def test_known_start_is_submitted_once_with_params_and_timeout():
+    fake = Script(FakeResponse(202, {"job": "j"}))
+    result = submit(fake)
+    assert result.response.status_code == 202 and result.note is None and result.used_from == "Unknown Sys"
+    args, kwargs = fake.calls[0]
+    assert args == ("POST", URL)
+    assert kwargs["params"] == PARAMS and kwargs["timeout"] == 30 and kwargs["service"] == "Spansh"
 
 
-@pytest.mark.parametrize("item", [
-    FakeResponse(200, {"nope": 1}), FakeResponse(200, None, text="<html>"),
-    FakeResponse(500, {"system": {"name": "X", "distance": 1}}),
-    requests.exceptions.ConnectionError(),
-])
-def test_nearest_known_system_bad_input_is_none(item):
-    assert nearest_known_system(1, 2, 3, get=Script(item)) is None
+def test_unknown_start_with_journal_coords_uses_nearest():
+    fake = Script(FakeResponse(400, UNKNOWN), NEAREST_OK, FakeResponse(202, {"job": "j"}))
+    result = submit(fake)
+    assert result.job_id() == "j" and result.note == NOTE and result.used_from == "Blae Phoe SS-B d751"
+    assert fake.calls[1][1]["params"] == {"x": 1.0, "y": 2.0, "z": 3.0}
+    assert fake.calls[2][1]["params"] == {**PARAMS, "from": "Blae Phoe SS-B d751"}
 
 
-# --- submit_route_job -------------------------------------------------------
-
-def submit(post, get=None, coords=(1.0, 2.0, 3.0), params=None):
-    return submit_route_job("u", params if params is not None else PARAMS, HEADERS, 30,
-                            start_coords=coords, post=post, get=get or Script(),
-                            sleep=Sleeps())
-
-
-def test_unknown_start_falls_back_to_nearest():
-    params = dict(PARAMS)
-    post = Script(FakeResponse(400, UNKNOWN), FakeResponse(202, {"job": "j"}))
-    response, note, used = submit(post, Script(NEAREST_OK), params=params)
-    assert response.status_code == 202
-    assert post.calls[1][1]["params"]["from"] == "Blae Phoe SS-B d751"
-    assert used == "Blae Phoe SS-B d751"
-    assert note == ("Start system 'Unknown Sys' is not known to Spansh yet - plotted from "
-                    "nearest known system 'Blae Phoe SS-B d751' (10.6 ly away).")
-    assert params == PARAMS and params["from"] == "Unknown Sys"
+def test_typed_unknown_start_uses_looked_up_coords():
+    lookups = Lookups(Lookup("Unknown Sys", (7.0, 8.0, 9.0), "EDSM"))
+    fake = Script(FakeResponse(400, UNKNOWN), NEAREST_OK, FakeResponse(202, {"job": "j"}))
+    result = submit(fake, coords=None, coords_lookup=lookups)
+    assert lookups.names == ["Unknown Sys"] and result.note == NOTE
+    assert fake.calls[1][1]["params"] == {"x": 7.0, "y": 8.0, "z": 9.0}
 
 
-def test_unknown_start_without_coords_does_not_look_up():
-    get = Script()
-    response, note, used = submit(Script(FakeResponse(400, UNKNOWN)), get, coords=None)
-    assert response.status_code == 400 and note is None and used == "Unknown Sys"
-    assert get.calls == []
+def test_lookup_not_found_keeps_original_400():
+    fake = Script(FakeResponse(400, UNKNOWN))
+    result = submit(fake, coords=None, coords_lookup=Lookups(Lookup.not_found("Unknown Sys")))
+    assert result.response.status_code == 400 and result.note is None and result.used_from == "Unknown Sys"
+    assert len(fake.calls) == 1
 
 
-def test_unknown_start_nearest_fails_returns_original_400():
-    post = Script(FakeResponse(400, UNKNOWN))
-    response, note, used = submit(post, Script(requests.exceptions.Timeout()))
-    assert response.status_code == 400 and note is None and used == "Unknown Sys"
-    assert len(post.calls) == 1
+def test_nearest_is_the_same_system_is_not_resubmitted():
+    same = FakeResponse(200, {"system": {"name": "unknown sys", "x": 1, "y": 2, "z": 3, "distance": 0.5}})
+    fake = Script(FakeResponse(400, UNKNOWN), same)
+    result = submit(fake)
+    assert result.response.status_code == 400 and result.note is None and len(fake.calls) == 2
 
 
-def test_nearest_same_name_is_not_resubmitted():
-    same = FakeResponse(200, {"system": {"name": "unknown sys", "distance": 0.5}})
-    post = Script(FakeResponse(400, UNKNOWN))
-    response, note, _ = submit(post, Script(same))
-    assert response.status_code == 400 and note is None and len(post.calls) == 1
+def test_nearest_failure_keeps_original_400():
+    fake = Script(FakeResponse(400, UNKNOWN), ApiError(ApiFailure("Spansh", "timeout", None, "10 s")))
+    result = submit(fake)
+    assert result.response.status_code == 400 and result.note is None
 
 
 def test_other_400_has_no_fallback():
-    get = Script()
-    post = Script(FakeResponse(400, {"error": "range must be greater than 10 LY"}))
-    response, note, _ = submit(post, get)
-    assert response.status_code == 400 and note is None and get.calls == []
+    fake = Script(FakeResponse(400, {"error": "range must be greater than 10 LY"}))
+    result = submit(fake)
+    assert result.note is None and len(fake.calls) == 1
 
 
-# --- NeutronRouter ----------------------------------------------------------
-
-@pytest.fixture
-def router(monkeypatch):
-    import edmrn.neutron as neutron
-    monkeypatch.setattr(neutron.time, "sleep", lambda s: None)
-    return neutron.NeutronRouter()
+def test_service_failure_on_submit_raises():
+    fake = Script(ApiError(ApiFailure("Spansh", "overloaded", 502)))
+    with pytest.raises(ApiError):
+        submit(fake)
 
 
-def test_router_shows_spansh_error_reason(router, monkeypatch):
-    import edmrn.neutron as neutron
-    monkeypatch.setattr(neutron, "submit_route_job",
-                        lambda *a, **k: (FakeResponse(400, UNKNOWN), None, "A"))
-    result = router.calculate_route("A", "B", 40.0)
-    assert result == {"success": False,
-                      "error": "API Error 400: Could not find starting system"}
+# --- poll_route_result -------------------------------------------------------
+
+def poll(fake, max_wait=180, clock=None, progress=None):
+    clock = clock or Clock()
+    return poll_route_result("job-1", max_wait=max_wait, on_progress=progress, call=fake,
+                             clock=clock, sleep=clock.sleep), clock
 
 
-def test_router_success_carries_note_and_start_system(router, monkeypatch):
-    import edmrn.neutron as neutron
-    seen = {}
-
-    def fake_submit(url, params, headers, timeout, start_coords=None, on_retry=None):
-        seen.update(params=params, coords=start_coords)
-        return FakeResponse(202, {"job": "j1"}), "NOTE", "Near Sys"
-
-    done = FakeResponse(200, {"result": {"system_jumps": [
-        {"system": "Near Sys", "distance_jumped": 0.0, "jumps": 1, "neutron_star": False},
-        {"system": "Sol", "distance_jumped": 100.0, "jumps": 3, "neutron_star": True}]}})
-    monkeypatch.setattr(neutron, "submit_route_job", fake_submit)
-    monkeypatch.setattr(neutron.requests, "get", lambda *a, **k: done)
-    result = router.calculate_route("Far Sys", "Sol", 40.0, start_coords=(1.0, 2.0, 3.0))
-    assert result["success"] and result["note"] == "NOTE" and result["start_system"] == "Near Sys"
-    assert seen["params"]["from"] == "Far Sys" and seen["coords"] == (1.0, 2.0, 3.0)
+def overloaded():
+    return ApiError(ApiFailure("Spansh", "overloaded", 502))
 
 
-def test_router_unsubstituted_start_has_no_note(router, monkeypatch):
-    import edmrn.neutron as neutron
-    monkeypatch.setattr(neutron, "submit_route_job",
-                        lambda *a, **k: (FakeResponse(202, {"job": "j"}), None, "A"))
-    monkeypatch.setattr(neutron.requests, "get",
-                        lambda *a, **k: FakeResponse(200, {"result": {"system_jumps": []}}))
-    result = router.calculate_route("A", "B", 40.0)
-    assert result["success"] and result["note"] is None and result["start_system"] == "A"
+def test_202_then_200_returns_body_and_polls_without_retries():
+    done = {"status": "ok", "result": {"system_jumps": []}}
+    fake, seen = Script(FakeResponse(202, {}), FakeResponse(202, {}), FakeResponse(200, done)), []
+    body, clock = poll(fake, progress=seen.append)
+    assert body == done and clock.sleeps == [1.0, 1.5] and seen == [0.0, 1.0]
+    args, kwargs = fake.calls[0]
+    assert args == ("GET", "https://spansh.co.uk/api/results/job-1") and kwargs["retries"] == 0
 
 
-def test_wait_tolerates_transient_failures(router, monkeypatch):
-    import edmrn.neutron as neutron
-    get = Script(FakeResponse(502), requests.exceptions.Timeout(), FakeResponse(202),
-                 FakeResponse(200, {"result": {}}))
-    monkeypatch.setattr(neutron.requests, "get", get)
-    result = router._wait_for_result("j")
-    assert result["success"] is True and len(get.calls) == 4
+def test_job_id_is_quoted_into_the_path():
+    fake = Script(FakeResponse(200, {"result": {}}))
+    poll_route_result("a/b?c", max_wait=180, call=fake, clock=Clock(), sleep=lambda s: None)
+    assert fake.calls[0][0][1] == "https://spansh.co.uk/api/results/a%2Fb%3Fc"
 
 
-def test_wait_gives_up_after_three_consecutive_transient(router, monkeypatch):
-    import edmrn.neutron as neutron
-    get = Script(FakeResponse(502), FakeResponse(503), FakeResponse(504))
-    monkeypatch.setattr(neutron.requests, "get", get)
-    result = router._wait_for_result("j")
-    assert result == {"success": False, "error": "Result API Error: 504"}
+def test_transient_twice_then_200():
+    fake = Script(overloaded(), ApiError(ApiFailure("Spansh", "timeout", None, "15 s")),
+                  FakeResponse(200, {"result": {}}))
+    assert poll(fake)[0] == {"result": {}}
 
 
-def test_wait_counter_resets_on_202(router, monkeypatch):
-    import edmrn.neutron as neutron
-    get = Script(FakeResponse(502), FakeResponse(502), FakeResponse(202), FakeResponse(502),
-                 FakeResponse(502), FakeResponse(200, {"result": {}}))
-    monkeypatch.setattr(neutron.requests, "get", get)
-    assert router._wait_for_result("j")["success"] is True
+def test_three_transient_tolerated_fourth_fails():
+    assert poll(Script(overloaded(), overloaded(), overloaded(), FakeResponse(200, {"r": 1})))[0] == {"r": 1}
+    with pytest.raises(ApiError) as info:
+        poll(Script(overloaded(), overloaded(), overloaded(), overloaded()))
+    assert info.value.failure.kind == "overloaded"
 
 
-def test_wait_other_status_is_fatal_with_reason(router, monkeypatch):
-    import edmrn.neutron as neutron
-    monkeypatch.setattr(neutron.requests, "get",
-                        Script(FakeResponse(404, {"error": "Job not found"})))
-    assert router._wait_for_result("j") == {
-        "success": False, "error": "Result API Error 404: Job not found"}
+def test_202_resets_the_transient_count():
+    fake = Script(overloaded(), overloaded(), overloaded(), FakeResponse(202, {}),
+                  overloaded(), overloaded(), overloaded(), FakeResponse(200, {"r": 1}))
+    assert poll(fake)[0] == {"r": 1}
+
+
+def test_other_status_is_fatal_with_reason():
+    with pytest.raises(ApiError) as info:
+        poll(Script(FakeResponse(404, {"error": "Job not found"})))
+    assert str(info.value) == "Spansh rejected the request: Job not found"
+
+
+def test_unexpected_failure_is_not_tolerated():
+    with pytest.raises(ApiError):
+        poll(Script(ApiError(ApiFailure("Spansh", "unexpected", 500)), FakeResponse(200, {})))
+
+
+def test_finished_job_with_error_is_a_rejection():
+    with pytest.raises(ApiError) as info:
+        poll(Script(FakeResponse(200, {"status": "failed", "error": "No route found\nbetween systems"})))
+    assert str(info.value) == "Spansh rejected the request: No route found between systems"
+
+
+def test_wall_clock_timeout_mentions_the_website():
+    class Always202:
+        calls = 0
+
+        def __call__(self, *a, **k):
+            Always202.calls += 1
+            return FakeResponse(202, {})
+
+    with pytest.raises(ApiError) as info:
+        poll(Always202(), max_wait=180)
+    assert str(info.value) == ("Spansh did not answer within 180 s; the job may still finish on "
+                               "Spansh's website.")
+    assert 55 < Always202.calls < 70
+
+
+def test_poll_interval_stays_between_1_and_3_seconds():
+    fake = Script(*[FakeResponse(202, {}) for _ in range(8)], FakeResponse(200, {}))
+    _, clock = poll(fake)
+    assert clock.sleeps == [1.0, 1.5, 2.0, 2.5, 3.0, 3.0, 3.0, 3.0]

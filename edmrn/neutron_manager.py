@@ -103,7 +103,7 @@ class NeutronManager:
             start_coords = None
         self.app.neutron_router.calculate_route_async(
             from_system, to_system, jump_range, fsd_boost,
-            calculation_done, progress_update, start_coords=start_coords
+            lambda result: self.app.root.after(0, lambda: calculation_done(result)), progress_update, start_coords=start_coords
         )
     def neutron_prev_waypoint(self):
         if self.app.neutron_router.prev_waypoint():
