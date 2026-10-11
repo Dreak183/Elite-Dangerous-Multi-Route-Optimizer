@@ -73,6 +73,7 @@ from edmrn.gui import ManualWindow, AboutWindow, BackupSelectionWindow
 from edmrn.theme_editor import ThemeEditor
 from edmrn.neutron import NeutronRouter
 from edmrn.ext.spansh import journal_start_coords
+from edmrn.ext.system_info import fetch_system_data
 logger = get_logger('App')
 
 class EDMRN_App:
@@ -421,91 +422,7 @@ class EDMRN_App:
 
     def fetch_edsm_system_data(self, system_name):
         """Fetch full system details from EDSM API (traffic, factions, permit, gmp included)."""
-        import traceback
-        headers = {'User-Agent': 'EDMRN 3.3'}
-        try:
-            url_basic = (
-                f'https://www.edsm.net/api-v1/system?systemName={system_name}'
-                f'&showInformation=1&showCoordinates=1&showPrimaryStar=1&showTraffic=1&showPermit=1&showId=1'
-            )
-            response_basic = requests.get(url_basic, headers=headers, timeout=10)
-            if response_basic.status_code != 200:
-                return {"error": f"EDSM API error: {response_basic.status_code}"}
-            data = response_basic.json()
-            if isinstance(data, list):
-                data = {"bodies": data}
-
-            url_bodies = f'https://www.edsm.net/api-system-v1/bodies?systemName={system_name}'
-            response_bodies = requests.get(url_bodies, headers=headers, timeout=10)
-            if response_bodies.status_code == 200:
-                bodies_data = response_bodies.json()
-                if isinstance(bodies_data, list):
-                    data['bodies'] = bodies_data
-                elif 'bodies' in bodies_data:
-                    data['bodies'] = bodies_data['bodies']
-                else:
-                    data['bodies'] = []
-            else:
-                data['bodies'] = []
-
-            url_stations = f'https://www.edsm.net/api-system-v1/stations?systemName={system_name}'
-            response_stations = requests.get(url_stations, headers=headers, timeout=10)
-            if response_stations.status_code == 200:
-                stations_data = response_stations.json()
-                if isinstance(stations_data, list):
-                    data['stations'] = stations_data
-                elif 'stations' in stations_data:
-                    data['stations'] = stations_data['stations']
-                else:
-                    data['stations'] = []
-            else:
-                data['stations'] = []
-
-            url_factions = f'https://www.edsm.net/api-system-v1/factions?systemName={system_name}'
-            response_factions = requests.get(url_factions, headers=headers, timeout=10)
-            if response_factions.status_code == 200:
-                factions_data = response_factions.json()
-                if 'factions' in factions_data:
-                    data['factions'] = factions_data['factions']
-
-            try:
-                system_id64 = data.get('id64')
-                if system_id64:
-                    gec_url = f'https://edastro.com/gec/json/id64/{system_id64}'
-                    response_gec = requests.get(gec_url, headers=headers, timeout=15)
-                    if response_gec.status_code == 200:
-                        gec_data = response_gec.json()
-                        if gec_data and isinstance(gec_data, dict) and gec_data.get('name'):
-                            gmp_text = f"{gec_data.get('name', '')}\nType: {gec_data.get('type', '')}\nRegion: {gec_data.get('region', '')}\n\n{gec_data.get('summary', '')}\n\n{gec_data.get('descriptionMardown', '')}"
-                            poi_url = gec_data.get('poiUrl', '')
-                            if poi_url:
-                                gmp_text += f"\n\nLink: {poi_url}"
-                            data['gmp'] = gmp_text.strip()
-                        else:
-                            data['gmp'] = ""
-                    else:
-                        data['gmp'] = ""
-                else:
-                    data['gmp'] = ""
-            except Exception as e:
-                logger.warning(f"Failed to fetch GEC data for {system_name}: {e}")
-                data['gmp'] = ""
-
-            if data.get("id"):
-                data['url'] = f'https://www.edsm.net/en/system/id/{data.get("id")}/name/{system_name.replace(" ", "+")}'
-            else:
-                data['url'] = f'https://www.edsm.net/en/system?systemName={system_name.replace(" ", "+")}'
-
-            return data
-        except Exception as e:
-            tb = traceback.format_exc()
-            try:
-                with open("edmrn_crash.log", "a", encoding="utf-8") as f:
-                    f.write(f"[fetch_edsm_system_data] Exception: {str(e)}\n{tb}\n")
-                    f.flush()
-            except Exception:
-                pass
-            return {"error": str(e)}
+        return fetch_system_data(system_name)
     
     def _create_root_window(self):
         self.root = ctk.CTk()
@@ -1282,7 +1199,7 @@ class EDMRN_App:
                         logger.warning(f"[_system_info_fetch_callback] Error in system_data: Unexpected type {type(system_data).__name__}, expected dict.")
                         return
                     if "error" in system_data:
-                        status_label.configure(text=f"Error: {system_data['error']}", text_color="#FF6B6B")
+                        status_label.configure(text=system_data['error'], text_color="#FF6B6B")
                         logger.warning(f"[_system_info_fetch_callback] Error in system_data: {system_data['error']}")
                         return
                     try:
@@ -1291,7 +1208,7 @@ class EDMRN_App:
                         self.system_info_section.update_stations(stations)
                         self.system_info_section.update_gmp(gmp)
                         self.system_info_section.update_trivia(trivia_data)
-                        status_label.configure(text=f"Data fetched for {system_name}", text_color="#4CAF50")
+                        status_label.configure(text="\n".join([f"Data fetched for {system_name}", *system_data.get('notes', [])]), text_color="#4CAF50")
                     except Exception as ex:
                         logger.warning(f"[_system_info_fetch_callback] Error in update_ui: {ex}")
                         status_label.configure(text=f"Error updating UI: {ex}", text_color="#FF6B6B")
