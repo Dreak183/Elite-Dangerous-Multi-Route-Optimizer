@@ -198,7 +198,7 @@ class Lookup:
 
 def _spansh_coords(name: str, call) -> Optional[tuple]:
     response = call("POST", SPANSH_SEARCH_URL, service="Spansh", timeout=10,
-                    json={"filters": {"name": {"value": name}}, "sort": [{"name": {"order": "asc"}}],
+                    json={"filters": {"name": {"value": name}},
                           "size": 50})
     if response.status_code != 200:
         raise ApiError(failure_from_response(response, "Spansh"))

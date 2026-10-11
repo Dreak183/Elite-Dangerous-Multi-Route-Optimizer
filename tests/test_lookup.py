@@ -19,6 +19,7 @@ def test_lookup_spansh_hit_sends_json_search():
     assert args == ("POST", "https://spansh.co.uk/api/systems/search")
     assert kwargs["service"] == "Spansh" and kwargs["json"]["filters"] == {"name": {"value": "Sol"}}
     assert kwargs.get("params") is None
+    assert "sort" not in kwargs["json"]
 
 
 def test_lookup_name_match_is_exact_and_case_insensitive():
