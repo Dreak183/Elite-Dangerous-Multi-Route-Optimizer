@@ -99,14 +99,22 @@ the endpoints nor the range.
     - a route that answers a pending "new route from here" replaces the waypoints of the pending row.
   - **Same object, changed index or statuses:** `update_neutron_progress`; `state` becomes
     `completed` when the last waypoint is visited.
-  - A store error is logged and retried at the next tick. It is never raised into Tk.
+  - A transient store error (`sqlite3.OperationalError`, e.g. a locked file) is logged and retried
+    at the next tick. A permanent one (`ValueError`, or `KeyError` because the row was deleted while
+    the route is loaded) is logged once and unmaps the route; its further progress is not saved and
+    the row is not re-created, so a deletion by the commander stands. A pending replace whose row
+    was deleted saves the new route as a new row. Nothing is raised into Tk.
 
 ### Resume decision: a pure function in `neutron_resume.py`
 
 `decide_resume(systems: list[str], saved_index: int, current: str | None) -> Decision`
 - `kind` is one of:
-  - `continue`: current is unknown, or on the route at `saved_index - 1` or `saved_index`;
-  - `advance`: current is on the route after `saved_index`; `index` is that position;
+  - `continue`: current is unknown, or on the route at `saved_index - 1`;
+  - `advance`: current is on the route at or after `saved_index`; `index` is that position.
+    Upstream's jump handler marks every waypoint up to it visited. At `saved_index` this matters:
+    the Next button leaves the index on an unvisited target, so a commander resuming while standing
+    on it, at the destination in particular, would otherwise never get it marked visited, and the
+    route could never complete (N5);
   - `ask`: anything else.
 - The name comparison ignores case and surrounding whitespace.
 
@@ -153,7 +161,7 @@ pytest. Every database lives in `tmp_path`, and the conftest home redirect stays
   - a resumed route is not duplicated;
   - a pending replace updates the row instead of inserting;
   - a store error is swallowed and retried.
-- **`decide_resume`:** unknown current; at `saved_index - 1`; at `saved_index`; ahead; behind;
+- **`decide_resume`:** unknown current; at `saved_index - 1` (continue); at `saved_index` (advance); ahead; behind;
   not on route; case and whitespace differences.
 - **NeutronRouter:** `last_request` is set on success and not on failure.
 - **UI:** one isolated smoke start (`../../how-to/run.md`). Plot is not possible offline, so the list
