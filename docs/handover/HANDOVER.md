@@ -2,41 +2,61 @@
 
 ## Where things stand
 
-`main` is upstream `1e8cda4` (v3.3.0) plus our commits. 37 tests pass
-(`.venv/Scripts/python.exe -m pytest`). No linter is configured. `.venv` is Python 3.13
-(`../how-to/run.md`).
+Branch `feature/api-hardening` (not yet merged into `main`) holds the API hardening, 12 commits on
+top of `1018269`. 144 tests pass (`.venv/Scripts/python.exe -m pytest`); the tests block network
+access. No linter is configured.
 
-Done or ready:
-- **Spansh fix for Neutron** (`23903c2`): readable errors, retries, nearest-known start when the
-  journal start is unknown. Verified live.
-- **API hardening for every live call site:** spec Draft,
-  `../superpowers/specs/2026-10-11-api-hardening-design.md`. The design was approved in chat
-  (English messages; Tk-thread fixes in the touched flows). The commander has been asked to review
-  the written spec. The survey of call sites is in `../knowledge/upstream-baseline.md`
-  ("External APIs").
-- **Neutron save/resume:** spec Accepted, plan
-  `../superpowers/plans/2026-10-11-neutron-route-resume.md`, ADR-0003 (SQLite). Not executed.
+Done:
+- **API hardening** (spec `../superpowers/specs/2026-10-11-api-hardening-design.md`, plan
+  `../superpowers/plans/2026-10-11-api-hardening.md`):
+  - Every live external call goes through `edmrn/ext/api.py` (binding rule in
+    `../architecture/patterns.md`).
+  - Neutron and Galaxy plot from the nearest known system when the start is unknown to Spansh.
+  - Readable failures everywhere.
+  - Verified live on 2026-10-12 with the procedure in `../how-to/run.md`; the GUI was not looked
+    at.
+- **Neutron save/resume:** spec Accepted, plan `../superpowers/plans/2026-10-11-neutron-route-resume.md`,
+  ADR-0003. Not executed. Its Task 2 test is already adapted to the rebuilt `calculate_route`.
 - **Location, feature 1:** spec Accepted, plan `../superpowers/plans/2026-10-11-journal-location.md`.
   Not executed.
 
-Order agreed with the commander: API hardening → neutron save/resume → location.
-
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002/0003 (`../architecture/decisions/`) and
-   `../knowledge/upstream-baseline.md`.
-2. If the API-hardening spec is approved, set its Status to Accepted, run `superpowers:writing-plans`
-   for it, and execute subagent-driven. It rebuilds `edmrn/ext/spansh.py` on a new `ext/api.py`.
-3. Then execute the neutron plan; its Task 2 tells the implementer to adapt to the rebuilt
-   `calculate_route`. Then execute the location plan.
+1. Read `../../CLAUDE.md`, ADR-0001/0002/0003 (`../architecture/decisions/`),
+   `../architecture/overview.md` (the upstream hook points) and `../knowledge/upstream-baseline.md`.
+2. Ask the commander whether to merge `feature/api-hardening` into `main`. There is no `origin`,
+   so a PR is not possible.
+3. Execute the neutron plan, then the location plan, subagent-driven, on a branch.
 
 ## Open decisions
 
-- **API-hardening spec review** (above).
+- **Merge of `feature/api-hardening`** (above).
 - **Transport for the friend exchange.** Research first (`../cowork/BACKLOG.md` items 1–3, not
   started), then an ADR. No transport code before that ADR.
-- **Own GitHub fork as `origin`.** The commander provides it later. The upstream PRs (rows marked
-  "yes" in `../architecture/overview.md`) and the updater's target wait for it.
+- **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
+  in `../architecture/overview.md`) and the updater's target wait for it.
+
+## Follow-ups from the API-hardening reviews (deferred, none blocking)
+
+- Autocomplete still sends upstream's ineffective `sort` (`system_autocomplete.py`). Spansh then
+  ranks long procedural prefixes badly (`../../../knowledge/bulk-data.md`).
+- `api.call`:
+  - a tuple or `None` timeout raises a raw `TypeError`;
+  - huge JSON ints raise `OverflowError` in `_is_number`.
+- An EDAstro 4xx is hidden like a 404. It should note everything except 404.
+- System Info runs its sub-requests with retries one after another, about 3 min worst case.
+  Consider `retries=0` for the sub-parts.
+- Raw exception text remains on hard-to-reach upstream paths:
+  - the Galaxy worker exception (also relabels the button "🚀 Calculate Exact Route");
+  - Nearest's outer `Failed to search` and `Failed to display results`;
+  - `update_ui` with non-dict list elements.
+- The updater:
+  - an unparseable `tag_name` still says "up to date";
+  - the auto and manual checks share state across threads.
+- The text "Unexpected error talking to …" is hard-coded in `app.py`, `neutron.py` and `updater.py`.
+  Use `str(ApiFailure(service, "unexpected"))`.
+- `neutron_manager` has its own journal-coords check; it should use `spansh.journal_start_coords`.
+- The live-check expectations assume that Spansh does not know `Blae Phoe XT-A e1459`.
 
 ## Traps
 
@@ -45,6 +65,7 @@ Order agreed with the commander: API hardening → neutron save/resume → locat
   `HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` (`../how-to/run.md`).
 - `galaxy_handler.py` and `journal_handler.py` are dead copies; the live Galaxy code is in
   `app.py`. Fixes in the dead files have no effect.
+- Importing `edmrn.app` replaces `sys.excepthook`; tests that import it restore the hook.
 - Spansh is slow and returns 502s under load (`../../../knowledge/bulk-data.md`). Live checks may
   need several minutes and retries; unit tests must never use the network.
 - The Neutron tab is built by `ui_components.create_neutron_tab`; `app._create_neutron_tab` is dead
