@@ -12,6 +12,8 @@ from edmrn.logger import get_logger
 from edmrn.autocomplete_entry import AutocompleteEntry
 from edmrn.minimap import MiniMapFrame
 from edmrn.gui import InfoDialog, WarningDialog, ErrorDialog
+from edmrn.ext.api import lookup_system
+from edmrn.ext.spansh import journal_start_coords
 
 logger = get_logger('CustomRoute')
 
@@ -30,6 +32,8 @@ class CustomRouteManager:
         self.starting_system = None
         self.ending_system = None
         self._optimize_lock = threading.Lock()
+        self.lookup_errors = {}
+        self.optimize_error = None
 
     def detect_current_system(self) -> Optional[str]:
         try:
@@ -105,6 +109,7 @@ class CustomRouteManager:
             self.is_optimized = False
 
     def optimize_route(self, mode: str = 'distance', boost_multiplier: float = 6.0) -> bool:
+        self.optimize_error = None
         if len(self.systems) < 1:
             return False
         acquired = self._optimize_lock.acquire(blocking=True, timeout=5)
@@ -131,6 +136,9 @@ class CustomRouteManager:
                             'x': coords[0], 'y': coords[1], 'z': coords[2],
                             'added_order': -1
                         }
+                    else:
+                        self.optimize_error = self.lookup_errors.pop(self.starting_system.strip().casefold(), None) or f"Could not look up '{self.starting_system}'."
+                        return False
 
             if self.ending_system:
                 for s in self.systems:
@@ -146,6 +154,9 @@ class CustomRouteManager:
                             'x': coords[0], 'y': coords[1], 'z': coords[2],
                             'added_order': 999999
                         }
+                    else:
+                        self.optimize_error = self.lookup_errors.pop(self.ending_system.strip().casefold(), None) or f"Could not look up '{self.ending_system}'."
+                        return False
 
             if middle_systems:
                 logger.info(f"TSP optimization: {len(middle_systems)} middle systems")
@@ -334,39 +345,13 @@ class CustomRouteManager:
             return False
 
     def _fetch_coordinates(self, system_name: str) -> Optional[tuple]:
-        try:
-            import requests
-            resp = requests.post(
-                'https://spansh.co.uk/api/systems/search',
-                json={'filters': {'name': {'value': [system_name]}}, 'size': 1},
-                headers={'User-Agent': 'EDMRN 3.3'},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                results = data.get('result', [])
-                if results:
-                    coords = results[0].get('coords', {})
-                    return (coords.get('x', 0), coords.get('y', 0), coords.get('z', 0))
-        except Exception:
-            pass
-
-        try:
-            import requests
-            resp = requests.get(
-                f'https://edsm.net/api-v1/system?systemName={system_name}&showCoordinates=1',
-                headers={'User-Agent': 'EDMRN 3.3'},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                coords = data.get('coords', {})
-                if coords:
-                    return (coords.get('x', 0), coords.get('y', 0), coords.get('z', 0))
-        except Exception:
-            pass
-
-        return None
+        coords = journal_start_coords(getattr(self.app, 'journal_monitor', None), system_name)
+        if coords:
+            return coords
+        found = lookup_system(system_name)
+        if not found.found:
+            self.lookup_errors[system_name.strip().casefold()] = found.message
+        return found.coords
 
 
 def solve_tsp(distance_matrix):
@@ -695,9 +680,10 @@ class CustomRouteTab:
             if success:
                 self.app.root.after(0, lambda: self._refresh_ui())
             else:
+                message = self.manager.lookup_errors.pop(name.strip().casefold(), None) or f"Could not find system: {name}\n\nCheck the spelling and try again."
                 self.app.root.after(0, lambda: WarningDialog(
-                    self.app, "System Not Found",
-                    f"Could not find system: {name}\n\nCheck the spelling and try again."
+                    self.app, "System Lookup",
+                    message
                 ))
         threading.Thread(target=add, daemon=True).start()
 
@@ -798,6 +784,8 @@ class CustomRouteTab:
             self._ensure_overlay_started()
         else:
             self.app._log("Route optimization failed")
+            if self.manager.optimize_error:
+                WarningDialog(self.app, "Route Optimization", self.manager.optimize_error)
 
     def _ensure_overlay_started(self):
         try:
