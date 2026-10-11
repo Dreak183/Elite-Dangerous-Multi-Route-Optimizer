@@ -1,6 +1,6 @@
 # API hardening for every external lookup and plotter — design
 
-Status: Draft, awaiting review
+Status: Accepted (2026-10-11)
 Date: 2026-10-11
 Rules: ADR-0002 (fixes in upstream files are minimal and offered upstream). Facts:
 `../../../../knowledge/bulk-data.md` ("Spansh API") and `../../../../knowledge/edsm-api.md`.
