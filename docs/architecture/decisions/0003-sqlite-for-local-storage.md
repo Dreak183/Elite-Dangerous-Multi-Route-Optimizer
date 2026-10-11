@@ -1,6 +1,6 @@
 # ADR-0003: Local fork data lives in one SQLite database, one connection, rollback journal
 
-Status: Accepted
+Status: Superseded by ADR-0004
 Date: 2026-10-11
 
 ## Context

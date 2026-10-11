@@ -2,7 +2,7 @@
 
 Status: Accepted (2026-10-11)
 Date: 2026-10-11
-Rules: ADR-0002 (upstream hook points only), ADR-0003 (SQLite store). Upstream facts:
+Rules: ADR-0002 (upstream hook points only), ADR-0004 (SQLite store; supersedes ADR-0003). Upstream facts:
 `../../knowledge/upstream-baseline.md` ("Neutron Highway and Spansh").
 
 ## Purpose
