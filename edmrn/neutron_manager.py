@@ -40,10 +40,10 @@ class NeutronManager:
             return
         try:
             jump_range = float(self.app.neutron_range_var.get())
-            if jump_range <= 0:
-                raise ValueError("Jump range must be positive")
+            if jump_range <= 10:
+                raise ValueError("Jump range must be greater than 10 LY")
         except ValueError:
-            ErrorDialog(self.app, "Error", "Please enter a valid jump range")
+            ErrorDialog(self.app, "Error", "Please enter a jump range greater than 10 LY")
             return
         boost_text = self.app.neutron_boost_var.get()
         fsd_boost = "x6" if "x6" in boost_text else "x4"
@@ -86,13 +86,24 @@ class NeutronManager:
                 except Exception:
                     pass
                 self.app._log(f"Neutron route calculated: {from_system} → {to_system}")
+                if result.get('note'):
+                    self.app.neutron_info_label.configure(
+                        text=f"✅ Route calculated: {total_jumps} jumps ({neutron_jumps} neutron), {total_distance} LY\n{result['note']}")
+                    self.app._log(result['note'])
+                    self.app.neutron_from_autocomplete.set(result['start_system'])
             else:
                 error_msg = result.get('error', 'Unknown error')
                 self.app.neutron_info_label.configure(text=f"❌ Error: {error_msg}")
                 ErrorDialog(self.app, "Neutron Route Error", f"Failed to calculate route:\n{error_msg}")
+        try:
+            start_coords = None
+            if self.app.journal_monitor and from_system.lower() == (self.get_current_system_from_journal() or '').lower():
+                start_coords = self.app.journal_monitor.get_current_coordinates()
+        except Exception:
+            start_coords = None
         self.app.neutron_router.calculate_route_async(
             from_system, to_system, jump_range, fsd_boost,
-            calculation_done, progress_update
+            calculation_done, progress_update, start_coords=start_coords
         )
     def neutron_prev_waypoint(self):
         if self.app.neutron_router.prev_waypoint():

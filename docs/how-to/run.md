@@ -37,3 +37,12 @@ To probe a module headless, put a script outside the repository and run it with
 `-I -u` and `sys.path.insert(0, <repo>)`. `-u` matters if the script ends with `os._exit`, since the
 upstream monitor threads otherwise keep the process alive and buffered output is lost. Write fake
 journals into `$H` and pass their folder as `manual_journal_path`.
+
+## Run the tests
+
+```
+.venv/Scripts/python.exe -m pytest
+```
+
+From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
+against real data (`../architecture/patterns.md`). No test touches the network.

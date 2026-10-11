@@ -5,6 +5,7 @@ import json
 from typing import Dict, List, Optional, Callable
 from edmrn.logger import get_logger
 from edmrn.icons import Icons
+from edmrn.ext.spansh import submit_route_job, spansh_error, TRANSIENT_STATUSES
 
 logger = get_logger('Neutron')
 
@@ -19,7 +20,7 @@ class NeutronRouter:
         self.is_calculating = False
         self.current_waypoint_index = 0
     def calculate_route(self, from_system: str, to_system: str, jump_range: float,
-                       fsd_boost: str = "x4", progress_callback: Callable = None) -> Dict:
+                       fsd_boost: str = "x4", progress_callback: Callable = None, start_coords=None) -> Dict:
         if self.is_calculating:
             return {"success": False, "error": "Route calculation already in progress"}
         if from_system.strip().lower() == to_system.strip().lower():
@@ -31,7 +32,7 @@ class NeutronRouter:
             supercharge_multiplier = 6 if fsd_boost == "x6" else 4
             if progress_callback:
                 progress_callback("Connecting to Spansh API...")
-            response = requests.post(
+            response, start_note, used_from = submit_route_job(
                 self.route_api_url,
                 params={
                     "efficiency": 60,
@@ -41,10 +42,12 @@ class NeutronRouter:
                     "supercharge_multiplier": supercharge_multiplier
                 },
                 headers={'User-Agent': "EDMRN 3.0"},
-                timeout=30
+                timeout=30,
+                start_coords=start_coords,
+                on_retry=lambda n, why: progress_callback(f"Spansh busy, retrying ({n}/2)...") if progress_callback else None
             )
             if response.status_code != 202:
-                return {"success": False, "error": f"API Error: {response.status_code}"}
+                return {"success": False, "error": f"API Error {response.status_code}: {spansh_error(response)}"}
             data = response.json()
             job_id = data.get("job")
             if not job_id:
@@ -63,7 +66,9 @@ class NeutronRouter:
                 "total_distance": route_data["total_distance"],
                 "total_jumps": route_data["total_jumps"],
                 "neutron_jumps": route_data["neutron_jumps"],
-                "normal_jumps": route_data["normal_jumps"]
+                "normal_jumps": route_data["normal_jumps"],
+                "note": start_note,
+                "start_system": used_from
             }
         except requests.exceptions.Timeout:
             return {"success": False, "error": "Request timeout - Spansh API not responding"}
@@ -77,14 +82,31 @@ class NeutronRouter:
     def _wait_for_result(self, job_id: str, progress_callback: Callable = None) -> Dict:
         max_attempts = 20
         attempt = 0
+        transient_failures = 0
         while attempt < max_attempts:
             try:
-                response = requests.get(f"{self.results_api_url}/{job_id}", timeout=10)
+                try:
+                    response = requests.get(f"{self.results_api_url}/{job_id}", timeout=10)
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                    transient_failures += 1
+                    if transient_failures >= 3:
+                        return {"success": False, "error": f"Result API Error: {e}"}
+                    time.sleep(1)
+                    attempt += 1
+                    continue
+                if response.status_code in TRANSIENT_STATUSES:
+                    transient_failures += 1
+                    if transient_failures >= 3:
+                        return {"success": False, "error": f"Result API Error: {response.status_code}"}
+                    time.sleep(1)
+                    attempt += 1
+                    continue
+                transient_failures = 0
                 if response.status_code == 200:
                     data = response.json()
                     return {"success": True, "data": data}
                 elif response.status_code != 202:
-                    return {"success": False, "error": f"Result API Error: {response.status_code}"}
+                    return {"success": False, "error": f"Result API Error {response.status_code}: {spansh_error(response)}"}
                 if progress_callback:
                     progress_callback(f"Calculating... ({attempt + 1}/20)")
                 time.sleep(1)
@@ -212,9 +234,9 @@ class NeutronRouter:
             logger.error(f"Failed to load neutron route: {e}")
             return False
     def calculate_route_async(self, from_system: str, to_system: str, jump_range: float,
-                            fsd_boost: str, callback: Callable, progress_callback: Callable = None):
+                            fsd_boost: str, callback: Callable, progress_callback: Callable = None, start_coords=None):
         def worker():
-            result = self.calculate_route(from_system, to_system, jump_range, fsd_boost, progress_callback)
+            result = self.calculate_route(from_system, to_system, jump_range, fsd_boost, progress_callback, start_coords)
             callback(result)
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
