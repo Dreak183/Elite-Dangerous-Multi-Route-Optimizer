@@ -1140,8 +1140,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `edmrn/ext/location.py`. Add `format_location` and `install`, plus the import of
   `JournalMonitor`.
-- Modify: `edmrn/app.py`. Add two lines directly after
-  `self.journal_monitor = JournalMonitor(self._journal_callback)` in `EDMRN_App.__init__`.
+- Modify: `edmrn/app.py`. Add two lines directly after the neutron-resume install
+  lines (`install_edmrn_neutron_resume(self)`) in `EDMRN_App.__init__`.
 - Test: `tests/test_location_install.py`
 - Docs: `docs/architecture/overview.md` (row + "Location data flow" section)
 
@@ -1406,7 +1406,7 @@ Report what the header showed. If no one can look at the window, say so; do not 
 - [ ] **Step 7: Docs.** In `docs/architecture/overview.md`, add a hook-point row:
 
 ```markdown
-| `edmrn/app.py` | Two lines after the first `JournalMonitor(...)` in `EDMRN_App.__init__`: `edmrn.ext.location.install(self)` | Wires the location tracker, header binding and cold start | no |
+| `edmrn/app.py` | Two lines directly after `install_edmrn_neutron_resume(self)` in `EDMRN_App.__init__`: `edmrn.ext.location.install(self)` | Wires the location tracker, header binding and cold start | no |
 ```
 
 and append:

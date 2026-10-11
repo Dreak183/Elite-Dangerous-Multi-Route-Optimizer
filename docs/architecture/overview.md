@@ -44,4 +44,5 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
   same destination. A change to an existing route updates that row's progress.
 - Resume loads a row back into the router. `decide_resume` chooses whether to continue, to advance
   through upstream's jump handler, or to ask the commander.
-- All writes happen on the Tk thread.
+- `install()` opens and migrates `edmrn.db` during `EDMRN_App.__init__` (on main.py's load thread,
+  before any tick); every later read and write happens on the Tk thread.

@@ -168,10 +168,11 @@ class Store:
             self._conn.execute('BEGIN IMMEDIATE')
             try:
                 yield self._conn
+                self._conn.execute('COMMIT')
             except BaseException:
-                self._conn.execute('ROLLBACK')
+                if self._conn.in_transaction:
+                    self._conn.execute('ROLLBACK')
                 raise
-            self._conn.execute('COMMIT')
 
     def _probe(self) -> None:
         if self._conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':

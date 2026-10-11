@@ -13,8 +13,8 @@ def wp(name, status="unvisited"):
     return {"system": name, "type": "Normal", "distance": 10.0, "jumps": 1, "status": status}
 
 
-@pytest.fixture
-def root():
+@pytest.fixture(scope="module")
+def _tk_root():
     try:
         r = ctk.CTk()
     except Exception as e:  # tkinter.TclError without a display
@@ -27,10 +27,21 @@ def root():
         pass
 
 
+@pytest.fixture
+def root(_tk_root):
+    yield _tk_root
+    for child in _tk_root.winfo_children():
+        if isinstance(child, ctk.CTkToplevel):
+            try:
+                child.destroy()
+            except Exception:
+                pass
+
+
 def make_gui_app(root, store):
     router = SimpleNamespace(last_route=[], current_waypoint_index=0)
     manager = SimpleNamespace(
-        update_neutron_navigation=lambda: None, handle_neutron_system_jump=lambda n: None,
+        update_neutron_navigation=lambda: None, update_neutron_statistics_from_loaded_route=lambda: None, handle_neutron_system_jump=lambda n: None,
         copy_current_neutron_system=lambda auto=False: None,
         get_current_system_from_journal=lambda: None)
     app = SimpleNamespace(root=root, edmrn_store=store, edmrn_store_error=None,

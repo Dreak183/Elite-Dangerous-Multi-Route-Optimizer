@@ -48,6 +48,7 @@ def make_app(route=None, index=0, last_request=None):
     calls = []
     manager = SimpleNamespace(
         update_neutron_navigation=lambda: calls.append("nav"),
+        update_neutron_statistics_from_loaded_route=lambda: calls.append("stats"),
         handle_neutron_system_jump=lambda name: calls.append(("jump", name)),
         copy_current_neutron_system=lambda auto=False: calls.append("copy"),
         get_current_system_from_journal=lambda: None)
@@ -90,7 +91,9 @@ def test_stale_last_request_for_other_destination_is_ignored(store):
     app, _ = make_app([waypoint("Sol"), waypoint("Colonia")],
                       last_request={"from": "X", "to": "Beagle Point", "range": 30.0, "boost": "x4"})
     NeutronAutosave(app, store).check()
-    assert store.list_neutron_routes()[0].to_system == "Colonia"
+    [summary] = store.list_neutron_routes()
+    assert summary.to_system == "Colonia"
+    assert summary.from_system == "Sol" and summary.range_ly == 70.0
 
 
 def test_progress_change_updates_row_and_completes(store):
@@ -170,7 +173,7 @@ def test_resume_continue_does_not_duplicate(store):
     autosave.check()
     resume_route(app, store, autosave, rid, ask=lambda *a: None)
     autosave.check()
-    assert decision.kind == "continue" and "nav" in calls
+    assert decision.kind == "continue" and "nav" in calls and "stats" in calls
     assert app.neutron_router.current_waypoint_index == 1
     assert len(store.list_neutron_routes()) == 1
 
@@ -210,6 +213,23 @@ def test_resume_ask_replot_replaces_saved_route(store):
     assert summary.id == rid and summary.from_system == "Elsewhere" and summary.total == 3
 
 
+def test_replace_request_is_cleared_once_answered(store):
+    rid = _saved(store)
+    app, _ = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Elsewhere"
+    autosave = NeutronAutosave(app, store)
+    resume_route(app, store, autosave, rid, ask=lambda *a: "replot")
+    app.neutron_router.last_route = [waypoint("Elsewhere"), waypoint("B"), waypoint("Colonia")]
+    app.neutron_router.last_request = {"from": "Elsewhere", "to": "Colonia", "range": 70.0, "boost": "x4"}
+    autosave.check()
+    app.neutron_router.last_route = [waypoint("Other"), waypoint("Colonia")]
+    app.neutron_router.last_request = {"from": "Other", "to": "Colonia", "range": 70.0, "boost": "x4"}
+    autosave.check()
+    rows = {s.id: s for s in store.list_neutron_routes()}
+    assert len(rows) == 2
+    assert rows[rid].from_system == "Elsewhere" and rows[rid].total == 3
+
+
 def test_failed_replot_does_not_hijack_unrelated_route(store):
     rid = _saved(store)
     app, _ = make_app()
@@ -235,6 +255,22 @@ def test_deleted_row_of_active_route_is_logged_once_not_recreated(store, monkeyp
     for _ in range(3):
         autosave._tick()
     assert len(errors) == 1 and store.list_neutron_routes() == []
+    route[1]["status"] = "visited"
+    app.neutron_router.current_waypoint_index = 0
+    autosave._tick()
+    autosave._tick()
+    assert len(errors) == 1 and store.list_neutron_routes() == []
+
+
+def test_unchanged_route_does_not_write_progress(store, monkeypatch):
+    app, _ = make_app([waypoint("Sol"), waypoint("Colonia")])
+    autosave = NeutronAutosave(app, store)
+    autosave.check()
+    count = []
+    monkeypatch.setattr(store, "update_neutron_progress", lambda *a, **k: count.append(a))
+    for _ in range(3):
+        autosave.check()
+    assert count == []
 
 
 def test_waypoint_count_mismatch_is_logged_once(store, monkeypatch):
@@ -298,7 +334,16 @@ def test_install_opens_default_store_and_starts(isolated_home):
         app.edmrn_store.close()
 
 
-def test_install_with_corrupt_database_disables_feature(isolated_home, monkeypatch):
+def test_install_survives_unexpected_open_error(isolated_home, monkeypatch):
+    def boom():
+        raise PermissionError("denied")
+    monkeypatch.setattr(Store, "open_default", staticmethod(boom))
+    app, _ = make_app()
+    assert install(app) is None
+    assert "denied" in app.edmrn_store_error
+
+
+def test_install_with_corrupt_database_disables_feature(isolated_home):
     from edmrn.config import AppConfig
     from pathlib import Path
     data_dir = Path(AppConfig.get_app_data_path())

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from edmrn.ext.store import RouteMeta, SavedRoute, Store, StoreError
+from edmrn.ext.store import RouteMeta, SavedRoute, Store
 from edmrn.logger import get_logger
 
 logger = get_logger('NeutronResume')
@@ -79,7 +79,7 @@ class NeutronAutosave:
         try:
             self.app.root.after(self.INTERVAL_MS, self._tick)
         except Exception as e:
-            logger.debug(f"Neutron autosave not rescheduled: {e}")
+            logger.warning(f"Neutron autosave not rescheduled: {e}")
 
     def _tick(self) -> None:
         try:
@@ -174,6 +174,7 @@ def resume_route(app, store: Store, autosave: NeutronAutosave, route_id: int, as
     router.current_waypoint_index = saved.current_index
     autosave.adopt(route, saved.id)
     app.neutron_manager.update_neutron_navigation()
+    app.neutron_manager.update_neutron_statistics_from_loaded_route()
     current = app.neutron_manager.get_current_system_from_journal()
     decision = decide_resume([wp['system'] for wp in route], saved.current_index, current)
     if decision.kind == 'advance':
@@ -199,7 +200,7 @@ def install(app) -> Optional[NeutronAutosave]:
         return existing
     try:
         store = Store.open_default()
-    except StoreError as e:
+    except Exception as e:  # the hook must never abort EDMRN_App.__init__
         logger.error(f"Saved neutron routes unavailable: {e}")
         app.edmrn_store, app.neutron_autosave, app.edmrn_store_error = None, None, str(e)
         return None

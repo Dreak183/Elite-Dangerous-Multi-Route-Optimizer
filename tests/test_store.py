@@ -174,3 +174,26 @@ def test_open_default_uses_isolated_app_data_dir(isolated_home):
 def test_rollback_journal_and_foreign_keys(store):
     assert store._conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
     assert store._conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_commit_time_lock_rolls_back_and_store_recovers(tmp_path):
+    path = tmp_path / "edmrn.db"
+    store = Store(path)
+    store._conn.execute("PRAGMA busy_timeout = 50")
+    reader = sqlite3.connect(str(path), isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT * FROM neutron_routes").fetchall()
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            store.add_neutron_route(META, [wp("Sol")])
+        assert store._conn.in_transaction is False
+    finally:
+        reader.execute("COMMIT")
+        reader.close()
+    rid = store.add_neutron_route(META, [wp("Colonia")])
+    store.close()
+    reopened = Store(path)
+    try:
+        assert [s.id for s in reopened.list_neutron_routes()] == [rid]
+    finally:
+        reopened.close()
