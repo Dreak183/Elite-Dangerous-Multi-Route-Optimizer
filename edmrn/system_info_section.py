@@ -264,7 +264,7 @@ class SystemInfoSection:
         def on_suggestion_selected(selected):
             self.fetch_callback()
 
-        app = getattr(self.parent, 'app', None)
+        app = self.app
         if app and hasattr(app, '_get_system_suggestions'):
             suggestion_provider = app._get_system_suggestions
         else:

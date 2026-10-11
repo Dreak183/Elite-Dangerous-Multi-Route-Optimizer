@@ -654,15 +654,7 @@ class CustomRouteTab:
             self.app._log(f"Ending system set to: {name}")
 
     def _get_suggestions(self, query: str, callback: Callable):
-        def fetch():
-            try:
-                from edmrn.system_autocomplete import SystemAutocompleter
-                completer = SystemAutocompleter()
-                suggestions = completer.get_suggestions(query, max_results=8)
-                callback(suggestions)
-            except Exception:
-                callback([])
-        threading.Thread(target=fetch, daemon=True).start()
+        self.app._get_system_suggestions(query, callback)
 
     def _on_suggestion_selected(self, selected: str):
         pass

@@ -1,4 +1,4 @@
-import requests
+from edmrn.ext.api import ApiError, ServiceCooldown, call
 import threading
 import time
 from typing import List, Optional, Callable
@@ -14,6 +14,7 @@ class SystemAutocompleter:
         self.edsm_api_url = "https://www.edsm.net/api-v1/systems"
         self.cache = {}
         self.cache_ttl = 3600
+        self.cooldown = ServiceCooldown(60.0)
     
     def get_suggestions(self, query: str, max_results: int = 10) -> List[str]:
         if not query or len(query.strip()) < 3:
@@ -42,6 +43,8 @@ class SystemAutocompleter:
         return []
     
     def _fetch_from_edsm(self, query: str, max_results: int) -> List[str]:
+        if self.cooldown.active("EDSM"):
+            return []
         try:
             params = {
                 "systemName": query,
@@ -52,12 +55,7 @@ class SystemAutocompleter:
                 "showPrimaryStar": 0
             }
             
-            response = requests.get(
-                self.edsm_api_url,
-                params=params,
-                headers={'User-Agent': "EDMRN_AutoComplete/1.0"},
-                timeout=5
-            )
+            response = call("GET", self.edsm_api_url, service="EDSM", params=params, timeout=5, retries=0)
             
             if response.status_code == 200:
                 data = response.json()
@@ -74,11 +72,17 @@ class SystemAutocompleter:
             
             return []
             
+        except ApiError as e:
+            self.cooldown.note(e.failure)
+            logger.debug(f"EDSM autocomplete failed for '{query}': {e.failure}")
+            return []
         except Exception as e:
             logger.debug(f"EDSM API error for '{query}': {str(e)}")
             return []
     
     def _fetch_from_spansh(self, query: str, max_results: int) -> List[str]:
+        if self.cooldown.active("Spansh"):
+            return []
         try:
             payload = {
                 "filters": {
@@ -90,15 +94,7 @@ class SystemAutocompleter:
                 "sort": [{"name": {"order": "asc"}}]
             }
             
-            response = requests.post(
-                self.spansh_api_url,
-                json=payload,
-                headers={
-                    'User-Agent': "EDMRN_AutoComplete/1.0",
-                    'Content-Type': 'application/json'
-                },
-                timeout=5
-            )
+            response = call("POST", self.spansh_api_url, service="Spansh", json=payload, timeout=5, retries=0)
             
             if response.status_code == 200:
                 data = response.json()
@@ -115,6 +111,10 @@ class SystemAutocompleter:
             
             return []
             
+        except ApiError as e:
+            self.cooldown.note(e.failure)
+            logger.debug(f"Spansh autocomplete failed for '{query}': {e.failure}")
+            return []
         except Exception as e:
             logger.debug(f"Spansh API error for '{query}': {str(e)}")
             return []

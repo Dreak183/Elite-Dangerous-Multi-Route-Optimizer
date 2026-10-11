@@ -274,3 +274,20 @@ def nearest_known_system(x, y, z, *, call=call) -> Optional[tuple]:
     """(name, distance in ly) of Spansh's nearest known system, else None. Failures raise ApiError."""
     system = nearest_system(x, y, z, call=call)
     return (system["name"], system["distance"]) if system else None
+
+
+class ServiceCooldown:
+    """Skips a service for `seconds` after a transient failure (spec A12: autocomplete)."""
+
+    def __init__(self, seconds: float = 60.0, clock=time.monotonic) -> None:
+        self.seconds = seconds
+        self.clock = clock
+        self._until = {}
+
+    def active(self, service: str) -> bool:
+        until = self._until.get(service)
+        return until is not None and self.clock() < until
+
+    def note(self, failure: ApiFailure) -> None:
+        if failure.kind in TRANSIENT_KINDS:
+            self._until[failure.service] = self.clock() + self.seconds

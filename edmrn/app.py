@@ -2640,7 +2640,7 @@ class EDMRN_App:
     def _get_system_suggestions(self, query: str, callback):
         self.system_autocompleter.get_suggestions_async(
             query, 
-            callback,
+            lambda results: self.root.after(0, lambda: callback(results)),
             max_results=10
         )
     

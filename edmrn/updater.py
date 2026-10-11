@@ -1,4 +1,4 @@
-import requests
+from edmrn.ext.api import ApiError, call, failure_from_response
 import threading
 import time
 import webbrowser
@@ -15,14 +15,12 @@ class SimpleUpdateChecker:
         self.update_available = False
         self.latest_version = None
         self.release_url = None
+        self.last_error = None
     def check_for_updates(self):
+        self.last_error = None
         try:
             logger.info("Checking for updates from GitHub...")
-            response = requests.get(
-                self.latest_release_url,
-                headers={'Accept': 'application/vnd.github.v3+json'},
-                timeout=10
-            )
+            response = call("GET", self.latest_release_url, service="GitHub", timeout=10, retries=0)
             if response.status_code == 200:
                 release_data = response.json()
                 latest_tag = release_data.get('tag_name', '').lstrip('vV')
@@ -38,15 +36,15 @@ class SimpleUpdateChecker:
                     self.update_available = False
             else:
                 logger.warning(f"GitHub API error: {response.status_code}")
+                self.last_error = str(failure_from_response(response, "GitHub"))
                 self.update_available = False
-        except requests.exceptions.Timeout:
-            logger.warning("GitHub API timeout")
-            self.update_available = False
-        except requests.exceptions.ConnectionError:
-            logger.warning("GitHub API connection error")
+        except ApiError as e:
+            logger.warning(f"Update check failed: {e.failure}")
+            self.last_error = str(e.failure)
             self.update_available = False
         except Exception as e:
             logger.error(f"Update check error: {e}")
+            self.last_error = "Unexpected error talking to GitHub."
             self.update_available = False
         return self.update_available
     def show_update_dialog(self, parent_window):
@@ -239,6 +237,8 @@ class UpdateManager:
             update_available = self.update_checker.check_for_updates()
             if update_available:
                 self.update_checker.show_update_dialog(self.app.root)
+            elif self.update_checker.last_error:
+                InfoDialog(self.app, "Update Check", f"Could not check for updates: {self.update_checker.last_error}")
             else:
                 import tkinter as tk
                 from tkinter import messagebox
