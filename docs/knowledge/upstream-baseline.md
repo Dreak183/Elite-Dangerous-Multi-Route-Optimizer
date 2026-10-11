@@ -70,6 +70,23 @@ exchange. It also lists the upstream defects that our features would sit on top 
 - Route export: only Galaxy Plotter routes can be exported to CSV. There is no JSON format for a
   route **[community]**.
 
+## Neutron Highway and Spansh
+
+- **Defect — Spansh error reason discarded:** `neutron.NeutronRouter.calculate_route` turns any
+  non-202 answer into `API Error: <status>` and drops the JSON body. That body names the reason
+  (`../../../knowledge/bulk-data.md`, "Spansh API") **[community]**.
+- **Start system:** an empty *From* field is filled from `journal_monitor.get_current_system()`.
+  When exploring, that system is often not yet known to Spansh, so the request fails with 400
+  `Could not find starting system`. There is no fallback to the nearest known system
+  (`/api/nearest` is used only by the manual coordinate search in `app.py`) **[community]**.
+- There are no retries: one 502 or timeout from an overloaded Spansh ends the calculation
+  **[community]**.
+- **Saving:** `save_neutron_route` writes `neutron_route.json` (waypoints, statuses, current index)
+  only into `app.current_backup_folder`. That folder exists only after a CSV route was optimised or
+  loaded, so a stand-alone neutron route is never saved. From, to, range and boost are not stored.
+  Reloading happens only as part of "Load from backup", which lists folders that contain a CSV
+  **[community]**.
+
 ## Bookmarks
 
 - There is no bookmark feature. `visit_history` keeps
