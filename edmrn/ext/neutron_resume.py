@@ -29,7 +29,7 @@ def decide_resume(systems: list, saved_index: int, current: Optional[str]) -> De
         return Decision('continue', saved_index)
     for i, system in enumerate(systems):
         if i >= saved_index - 1 and _key(system) == key:
-            if i <= saved_index:
+            if i == saved_index - 1:
                 return Decision('continue', saved_index)
             return Decision('advance', i)
     return Decision('ask', saved_index)
@@ -132,8 +132,12 @@ class NeutronAutosave:
             self._save_new(route, snapshot)
         elif self._route_id is not None and snapshot != self._snapshot:
             waypoints = _normalise(route)
-            self.store.update_neutron_progress(self._route_id, self._index(len(waypoints)),
-                                               [wp['status'] for wp in waypoints])
+            try:
+                self.store.update_neutron_progress(self._route_id, self._index(len(waypoints)),
+                                                   [wp['status'] for wp in waypoints])
+            except (ValueError, KeyError) as e:
+                logger.error(f"Neutron route progress not saved, route unmapped: {e}")
+                self._route_id = None
             self._snapshot = snapshot
 
     def _save_new(self, route: list, snapshot: tuple) -> None:
@@ -143,7 +147,10 @@ class NeutronAutosave:
             meta = self._meta(waypoints)
             if self._pending and self._pending[1] == _key(meta.to_system):
                 route_id = self._pending[0]
-                self.store.replace_neutron_waypoints(route_id, meta, waypoints, index)
+                try:
+                    self.store.replace_neutron_waypoints(route_id, meta, waypoints, index)
+                except KeyError:
+                    route_id = self.store.add_neutron_route(meta, waypoints, index)
             else:
                 route_id = self.store.add_neutron_route(meta, waypoints, index)
         except (ValueError, KeyError) as e:

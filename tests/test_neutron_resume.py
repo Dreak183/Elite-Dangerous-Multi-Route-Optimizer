@@ -12,7 +12,7 @@ SYSTEMS = ["Sol", "A", "B", "C", "Colonia"]
     (None, Decision("continue", 2)),
     ("  ", Decision("continue", 2)),
     ("A", Decision("continue", 2)),
-    ("b", Decision("continue", 2)),
+    ("b", Decision("advance", 2)),
     (" C ", Decision("advance", 3)),
     ("Colonia", Decision("advance", 4)),
     ("Sol", Decision("ask", 2)),
@@ -23,7 +23,7 @@ def test_decide_resume(current, expected):
 
 
 def test_decide_resume_at_start_index_zero():
-    assert decide_resume(SYSTEMS, 0, "Sol") == Decision("continue", 0)
+    assert decide_resume(SYSTEMS, 0, "Sol") == Decision("advance", 0)
 
 
 class Var:
@@ -220,3 +220,65 @@ def test_failed_replot_does_not_hijack_unrelated_route(store):
     autosave.check()
     assert len(store.list_neutron_routes()) == 2
     assert store.load_neutron_route(rid).meta.to_system == "Colonia"
+
+
+def test_deleted_row_of_active_route_is_logged_once_not_recreated(store, monkeypatch):
+    route = [waypoint("Sol"), waypoint("Colonia")]
+    app, _ = make_app(route)
+    autosave = NeutronAutosave(app, store)
+    autosave._tick()
+    store.delete_neutron_route(store.list_neutron_routes()[0].id)
+    errors = []
+    monkeypatch.setattr("edmrn.ext.neutron_resume.logger.error", lambda msg: errors.append(msg))
+    route[0]["status"] = "visited"
+    app.neutron_router.current_waypoint_index = 1
+    for _ in range(3):
+        autosave._tick()
+    assert len(errors) == 1 and store.list_neutron_routes() == []
+
+
+def test_waypoint_count_mismatch_is_logged_once(store, monkeypatch):
+    route = [waypoint("Sol"), waypoint("A"), waypoint("Colonia")]
+    app, _ = make_app(route)
+    autosave = NeutronAutosave(app, store)
+    autosave.check()
+    errors = []
+    monkeypatch.setattr("edmrn.ext.neutron_resume.logger.error", lambda msg: errors.append(msg))
+    route[:] = [waypoint("Sol", "visited"), waypoint("Colonia")]
+    for _ in range(3):
+        autosave.check()
+    assert len(errors) == 1
+
+
+def test_resume_at_destination_completes_route(store):
+    rid = store.add_neutron_route(RouteMeta("Sol", "Colonia", 70.0, "x4"),
+                                  [waypoint("Sol", "visited"), waypoint("A", "visited"), waypoint("Colonia")], 2)
+    app, calls = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Colonia"
+
+    def jump(name):
+        router = app.neutron_router
+        for i, wp in enumerate(router.last_route):
+            if wp["system"] == name:
+                for earlier in router.last_route[:i + 1]:
+                    earlier["status"] = "visited"
+                router.current_waypoint_index = i
+    app.neutron_manager.handle_neutron_system_jump = jump
+    autosave = NeutronAutosave(app, store)
+    resume_route(app, store, autosave, rid, ask=lambda *a: pytest.fail("no ask"))
+    autosave.check()
+    assert store.load_neutron_route(rid).state == "completed"
+
+
+def test_replace_target_deleted_falls_back_to_new_row(store):
+    rid = _saved(store)
+    app, _ = make_app()
+    app.neutron_manager.get_current_system_from_journal = lambda: "Elsewhere"
+    autosave = NeutronAutosave(app, store)
+    resume_route(app, store, autosave, rid, ask=lambda *a: "replot")
+    store.delete_neutron_route(rid)
+    app.neutron_router.last_route = [waypoint("Elsewhere"), waypoint("Colonia")]
+    app.neutron_router.last_request = {"from": "Elsewhere", "to": "Colonia", "range": 70.0, "boost": "x4"}
+    autosave.check()
+    [summary] = store.list_neutron_routes()
+    assert summary.from_system == "Elsewhere"
