@@ -2,38 +2,34 @@
 
 ## Where things stand
 
-`main` = upstream `1e8cda4` (v3.3.0) + the hub-template scaffold + the upstream baseline commit.
-There is no own code, no spec and no tests yet. `.venv` (Python 3.13, git-ignored) is set up per
-`../how-to/run.md`. The app starts cleanly in an isolated home (verified 2026-10-11). The upstream
-survey is done; its results are in `../knowledge/upstream-baseline.md`.
+`main` = upstream `1e8cda4` (v3.3.0) plus the scaffold, the upstream baseline and the location spec.
+There is no own code and there are no tests yet. `.venv` (Python 3.13, git-ignored) is set up per
+`../how-to/run.md`. The app starts cleanly in an isolated home (verified 2026-10-11). Brainstorming
+for feature 1 is done. Its spec is
+`../superpowers/specs/2026-10-11-journal-location-design.md` (Status: Draft), and the commander has
+been asked to review it.
 
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002 (`../architecture/decisions/`), and
-   `../knowledge/upstream-baseline.md`.
-2. Run `superpowers:brainstorming` for the first part. The spec goes to `../superpowers/specs/`.
+1. Read `../../CLAUDE.md`, ADR-0001/0002 (`../architecture/decisions/`),
+   `../knowledge/upstream-baseline.md` and the location spec.
+2. If the commander has approved the spec, set its Status to Accepted and run
+   `superpowers:writing-plans`. The plan goes to `../superpowers/plans/`. If the spec has not been
+   approved, ask for the review first.
 
 ## Open decisions
 
-- **Feature order.** The four features are journal location, a saved-route library with UI, system
-  bookmarks, and friend exchange. Suggested order: location → bookmarks and route library (local,
-  sharing one storage design) → exchange. To be settled in brainstorming.
-- **Upstream defects under our features** (`upstream-baseline.md`):
-  - the idle busy-spin in the journal tail;
-  - no journal file rotation;
-  - live `Location`/`CarrierJump` are ignored;
-  - autosave writes nothing.
-
-  Location builds directly on the first three. Fix them in `journal.py` as small diffs offered
-  upstream as PRs, or work around them from `edmrn/ext/`? ADR-0001 rules out a second journal reader
-  unless a superseding ADR allows it. Decide in the spec.
+- **Settled in brainstorming (in the spec).**
+  - Feature order: location → bookmarks/route library → exchange.
+  - Approach A: fix the journal-tail defects in `journal.py` and offer them upstream as PRs; add a
+    class-level listener hook; keep the location state machine in `edmrn/ext/location.py`.
 - **Transport for the friend exchange.** P2P is preferred; an own server is acceptable. Research
   comes first (`../cowork/BACKLOG.md` items 1–3, not started), then an ADR. No transport code before
   that ADR.
-- **Local storage for routes and bookmarks.** SQLite, or JSON files like upstream's (the
-  `slef_store` pattern)? Decide in the spec.
-- **Own GitHub fork as `origin`.** Not set up. It is needed for upstream PRs and for builds that
-  friends can use; the updater checks upstream's releases. The commander provides the URL.
+- **Local storage for routes and bookmarks.** SQLite or JSON files (the `slef_store` pattern)?
+  Decide in the feature-2 spec, together with upstream's autosave defect.
+- **Own GitHub fork as `origin`.** Not set up. It is needed for the upstream PRs from feature 1 and
+  for builds that friends can use. The commander provides the URL.
 
 ## Traps
 
@@ -49,5 +45,6 @@ survey is done; its results are in `../knowledge/upstream-baseline.md`.
 
 - Rules and map: `../README.md`. Architecture and decisions: `../architecture/`.
 - What upstream already does: `../knowledge/upstream-baseline.md`.
+- Feature specs (authority over plans): `../superpowers/specs/`.
 - Running and probing: `../how-to/run.md`. Upstream merges: `../how-to/upstream-sync.md`.
 - Shared facts: `../../../knowledge/README.md`. Location events: `reference-data.md` §6.
