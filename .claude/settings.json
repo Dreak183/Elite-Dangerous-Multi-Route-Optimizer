@@ -1,0 +1,10 @@
+{
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": true,
+    "remember@claude-plugins-official": true
+  },
+  "permissions": {
+    "additionalDirectories": ["../knowledge", "../ED_journal_dev"],
+    "deny": ["Read(./.env)", "Edit(./.env)"]
+  }
+}

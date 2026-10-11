@@ -47,3 +47,9 @@ temp_*.csv
 # Dist - keep only final release builds
 dist/*.exe
 !dist/EDMRN_v*.exe
+# EDMRN fork additions (ADR-0002: keep this block at the end)
+.env
+*.local.toml
+.ruff_cache/
+.superpowers/
+.claude/settings.local.json
