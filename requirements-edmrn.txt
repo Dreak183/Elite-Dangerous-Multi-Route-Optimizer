@@ -1,0 +1,2 @@
+# EDMRN fork dependencies (ADR-0002); upstream's stay in requirements.txt.
+pytest>=8.0

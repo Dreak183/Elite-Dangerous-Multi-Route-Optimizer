@@ -27,8 +27,8 @@ This folder is its own git repository (branch `main`) inside the `EDProjects` hu
 Upstream's stack, unchanged: Python ≥ 3.13 (`setup.py`), customtkinter, tksheet, pandas, scipy,
 python-tsp, matplotlib, requests (Spansh and EDSM), PyInstaller (`edmrn.spec`). Dependencies are
 declared in upstream's `requirements.txt`; ours go in `requirements-edmrn.txt`. Locally, uv runs the
-environment without a packaging rewrite: `uv venv` + `uv pip install -r requirements.txt -r
-requirements-edmrn.txt`. Tests: pytest under `tests/` (upstream ships none).
+environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest under `tests/`
+(upstream ships none).
 
 ## Hard rules
 
