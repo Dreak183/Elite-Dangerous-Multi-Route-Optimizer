@@ -28,7 +28,7 @@ this plan; the spec wins where they disagree.
 - **Own code** lives in `edmrn/ext/`, `tests/` and `pytest.ini`.
 - **Journal data enters only through upstream's journal layer** (ADR-0001). `edmrn/ext/location.py`
   never tails journals itself; only `cold_start` reads files, once, at startup.
-- **No test touches real user folders** (spec R7). `tests/conftest.py` from Task 1 is mandatory.
+- **No test touches real user folders** (spec R7). `tests/conftest.py` (since commit `23903c2`) is mandatory.
   Run tests only with `.venv/Scripts/python.exe -m pytest` from the repository root.
 - **No new runtime dependencies.** `pytest` is already in `requirements-edmrn.txt`.
 - **Staging:**
@@ -59,19 +59,14 @@ this plan; the spec wins where they disagree.
 
 | File | Responsibility | Task |
 |---|---|---|
-| `pytest.ini` | pytest rootdir, test path, `pythonpath = .` | 1 |
-| `tests/conftest.py` | Redirect home variables before any `edmrn` import, plus a per-test home | 1 |
 | `tests/journal_helpers.py` | Fake journal writing and waiting helpers shared by tests | 1 |
-| `tests/test_isolation.py` | Proves that the redirect works | 1 |
 | `tests/test_journal_monitor.py` | Behaviour of the upstream `JournalMonitor` that we changed | 1, 2, 3 |
 | `edmrn/journal.py` (upstream) | Carrier jump; idle sleep, rotation, complete lines; listener hook | 1, 2, 3 |
-| `edmrn/ext/__init__.py` | Marks the fork's package | 4 |
 | `edmrn/ext/location.py` | `LocationState`, rules, `LocationTracker`, `cold_start`, `format_location`, `install` | 4, 5, 6 |
 | `tests/test_location_tracker.py` | Rule and tracker tests | 4, 5 |
 | `tests/test_location_install.py` | Header binding and install tests | 6 |
 | `edmrn/app.py` (upstream) | Two-line install hook | 6 |
 | `docs/architecture/overview.md` | Upstream hook-point table; location data flow | 1, 2, 3, 6 |
-| `docs/architecture/patterns.md` | Test-isolation pattern | 1 |
 | `docs/how-to/run.md` | "Run the tests" section | 1 |
 
 ---
@@ -79,11 +74,11 @@ this plan; the spec wins where they disagree.
 ### Task 1: Test scaffold and carrier jumps in the journal monitor
 
 **Files:**
-- Create: `pytest.ini`, `tests/conftest.py`, `tests/journal_helpers.py`, `tests/test_isolation.py`,
-  `tests/test_journal_monitor.py`
+- Create: `tests/journal_helpers.py`, `tests/test_journal_monitor.py`. The scaffold
+  (`pytest.ini`, `tests/conftest.py`, `tests/test_isolation.py`) exists since commit `23903c2`.
 - Modify: `edmrn/journal.py`. Change the live `if event == 'FSDJump':` in `_process_line`, and both
   `if event in ['FSDJump', 'Location']:` in `get_current_system` and `get_current_coordinates`.
-- Docs: `docs/architecture/overview.md`, `docs/architecture/patterns.md`, `docs/how-to/run.md`
+- Docs: `docs/architecture/overview.md`, `docs/how-to/run.md`
 
 **Interfaces:**
 - Produces (test helpers, used by Tasks 2–6):
@@ -92,51 +87,15 @@ this plan; the spec wins where they disagree.
   - `journal_helpers.append_events(path: Path, *events: dict) -> None`
   - `journal_helpers.wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> bool`
   - `journal_helpers.attached(monitor, path: Path) -> bool`
-  - The conftest fixture `isolated_home -> Path` (autouse).
+  - Existing: the conftest fixture `isolated_home -> Path` (autouse).
 - Produces (behaviour): `CarrierJump` triggers `callback(system_name)` and sets
   `monitor.current_system`. `get_current_system()`/`get_current_coordinates()` honour `CarrierJump`.
 
-- [ ] **Step 1: Write the test scaffold**
+- [ ] **Step 1: Add the journal test helpers**
 
-`pytest.ini`:
-
-```ini
-[pytest]
-testpaths = tests
-pythonpath = .
-```
-
-`tests/conftest.py`:
-
-```python
-"""Test isolation: no test may resolve a path to a real user folder (spec R7).
-
-edmrn.logger.get_logger() creates the app data dir and a log file under
-Path.home() the first time any upstream module is imported. Test modules import
-edmrn at collection time, before fixtures run, so the home variables are
-redirected here at module level. Each test then gets its own home on top.
-"""
-import os
-import tempfile
-
-_HOME_VARS = ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
-_SESSION_HOME = tempfile.mkdtemp(prefix="edmrn-test-home-")
-for _var in _HOME_VARS:
-    os.environ[_var] = _SESSION_HOME
-
-import pytest  # noqa: E402  (must follow the redirect)
-
-
-@pytest.fixture(autouse=True)
-def isolated_home(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    home.mkdir()
-    for var in _HOME_VARS:
-        monkeypatch.setenv(var, str(home))
-    return home
-```
-
-`tests/journal_helpers.py`:
+The Spansh fix (commit `23903c2`) already created `pytest.ini`, `tests/conftest.py` and
+`tests/test_isolation.py`. Do not recreate or overwrite them; read `tests/conftest.py` once so you
+know what the `isolated_home` fixture does. Create only `tests/journal_helpers.py`:
 
 ```python
 """Fake journal files and polling helpers for tests."""
@@ -177,34 +136,10 @@ def attached(monitor, path: Path) -> bool:
             and monitor.last_tell == Path(path).stat().st_size)
 ```
 
-`tests/test_isolation.py`:
+- [ ] **Step 2: Run the existing suite**
 
-```python
-import logging
-import os
-from pathlib import Path
-
-from edmrn.logger import get_logger
-
-get_logger("Isolation")  # forces upstream's import-time log setup in this session
-
-
-def test_home_is_redirected_per_test(isolated_home):
-    assert Path.home() == isolated_home
-    assert Path(os.path.expanduser("~")) == isolated_home
-
-
-def test_import_time_log_file_lives_in_session_home():
-    files = [h.baseFilename for h in logging.getLogger().handlers
-             if isinstance(h, logging.FileHandler)]
-    assert files, "upstream logging did not create a file handler"
-    assert all("edmrn-test-home-" in f for f in files), files
-```
-
-- [ ] **Step 2: Run the isolation tests**
-
-Run: `.venv/Scripts/python.exe -m pytest tests/test_isolation.py -v`
-Expected: 2 passed.
+Run: `.venv/Scripts/python.exe -m pytest -q`
+Expected: all existing tests pass (37 at commit `23903c2`).
 
 - [ ] **Step 3: Write the failing carrier-jump tests**
 
@@ -296,57 +231,26 @@ becomes
 - [ ] **Step 6: Run all tests**
 
 Run: `.venv/Scripts/python.exe -m pytest -v`
-Expected: 4 passed. Then `git diff --stat edmrn/journal.py` should show 3 changed lines
+Expected: all pass, including the 2 new tests. Then `git diff --stat edmrn/journal.py` should show 3 changed lines
 (3 insertions, 3 deletions).
 
 - [ ] **Step 7: Update the docs**
 
-In `docs/architecture/overview.md`, append:
+`docs/architecture/overview.md` already has the section "Upstream hook points (ADR-0002)", with
+rows for `neutron.py` and `neutron_manager.py`. Add one row to its table:
 
 ```markdown
-## Upstream hook points (ADR-0002)
-
-Every change we make in an upstream file. On a merge conflict, these are the only lines that may be
-ours. "Upstream PR" marks changes meant to be offered upstream.
-
-| File | Change | Why | Upstream PR |
-|---|---|---|---|
 | `edmrn/journal.py` | `CarrierJump` handled live like `FSDJump`; the `get_current_*` getters accept it | Location spec R6: after a carrier jump the app showed the previous system | yes |
 ```
 
-In `docs/architecture/patterns.md`, append:
-
-```markdown
-## Tests redirect the home folder before importing `edmrn`
-
-Rule: `tests/conftest.py` sets `HOME`, `USERPROFILE`, `APPDATA` and `LOCALAPPDATA` at module level,
-before any test module imports `edmrn`. An autouse fixture then gives each test its own home. Never
-import `edmrn` from a test helper that loads before `conftest.py`.
-
-Defect it prevents: `edmrn.logger.get_logger()` creates `Documents/EDMRN_Route_Data/logs` under
-`Path.home()` when most upstream modules are imported. That happens at test collection, before any
-fixture runs, so a fixture-only redirect lets the real Documents folder be written
-(`../knowledge/upstream-baseline.md`).
-```
-
-In `docs/how-to/run.md`, append:
-
-````markdown
-## Run the tests
-
-```
-.venv/Scripts/python.exe -m pytest
-```
-
-From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
-against real data (`../architecture/patterns.md`). Monitor tests start real threads and poll for up
-to 5 s each.
-````
+`docs/architecture/patterns.md` (test isolation) and the "Run the tests" section of
+`docs/how-to/run.md` already exist. Extend the latter by one sentence: "Monitor tests start real
+threads and poll for up to 5 s each."
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add pytest.ini tests/conftest.py tests/journal_helpers.py tests/test_isolation.py tests/test_journal_monitor.py edmrn/journal.py docs/architecture/overview.md docs/architecture/patterns.md docs/how-to/run.md
+git add tests/journal_helpers.py tests/test_journal_monitor.py edmrn/journal.py docs/architecture/overview.md docs/how-to/run.md
 git commit -m "feat(journal): handle CarrierJump live and in location getters; add test scaffold
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -684,7 +588,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: `LocationState`, rules and `LocationTracker`
 
 **Files:**
-- Create: `edmrn/ext/__init__.py`, `edmrn/ext/location.py`
+- Create: `edmrn/ext/location.py` (`edmrn/ext/__init__.py` exists since commit `23903c2`)
 - Test: `tests/test_location_tracker.py`
 
 **Interfaces:**
@@ -860,12 +764,6 @@ Expected: collection error, `ModuleNotFoundError: No module named 'edmrn.ext'`.
 
 - [ ] **Step 3: Implement**
 
-`edmrn/ext/__init__.py`:
-
-```python
-"""EDMRN fork extensions. Upstream files only call into this package (ADR-0002)."""
-```
-
 `edmrn/ext/location.py`:
 
 ```python
@@ -1035,7 +933,7 @@ Expected: all pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add edmrn/ext/__init__.py edmrn/ext/location.py tests/test_location_tracker.py
+git add edmrn/ext/location.py tests/test_location_tracker.py
 git commit -m "feat(location): LocationState, journal rules and LocationTracker
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
