@@ -2,39 +2,71 @@
 
 ## Where things stand
 
-Branch `feature/api-hardening` (not yet merged into `main`) holds the API hardening, 12 commits on
-top of `1018269`. 144 tests pass (`.venv/Scripts/python.exe -m pytest`); the tests block network
-access. No linter is configured.
+Two finished, reviewed branches are stacked on `main`. Neither is merged.
 
-Done:
-- **API hardening** (spec `../superpowers/specs/2026-10-11-api-hardening-design.md`, plan
-  `../superpowers/plans/2026-10-11-api-hardening.md`):
-  - Every live external call goes through `edmrn/ext/api.py` (binding rule in
-    `../architecture/patterns.md`).
-  - Neutron and Galaxy plot from the nearest known system when the start is unknown to Spansh.
-  - Readable failures everywhere.
-  - Verified live on 2026-10-12 with the procedure in `../how-to/run.md`; the GUI was not looked
-    at.
-- **Neutron save/resume:** spec Accepted, plan `../superpowers/plans/2026-10-11-neutron-route-resume.md`,
-  ADR-0003. Not executed. Its Task 2 test is already adapted to the rebuilt `calculate_route`.
-- **Location, feature 1:** spec Accepted, plan `../superpowers/plans/2026-10-11-journal-location.md`.
-  Not executed.
+- **`feature/api-hardening`** (12 commits on `1018269`) hardens the API layer:
+  - every live external call goes through `edmrn/ext/api.py`;
+  - plotting falls back to the nearest known system when the start is unknown to Spansh;
+  - failures are readable.
+
+  Spec `../superpowers/specs/2026-10-11-api-hardening-design.md`. Verified live 2026-10-12
+  (`../how-to/run.md`).
+- **`feature/neutron-resume`** (11 commits on `feature/api-hardening`) saves neutron routes and
+  resumes them:
+  - every plotted neutron route is saved to `edmrn.db` with its progress;
+  - the Neutron tab has a "Saved routes" list with Resume and Delete;
+  - resuming follows where the commander is.
+
+  Spec `../superpowers/specs/2026-10-11-neutron-route-resume-design.md`, ADR-0004. Verified end to end
+  on real Tk with faked Spansh. No human has looked at the window.
+
+214 tests pass (`.venv/Scripts/python.exe -m pytest`, network blocked in tests). No linter is
+configured. The location feature (feature 1) has an accepted spec and plan,
+`../superpowers/plans/2026-10-11-journal-location.md`, and is not executed.
 
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002/0003 (`../architecture/decisions/`),
-   `../architecture/overview.md` (the upstream hook points) and `../knowledge/upstream-baseline.md`.
-2. Ask the commander whether to merge `feature/api-hardening` into `main`. There is no `origin`,
-   so a PR is not possible.
-3. Execute the neutron plan, then the location plan, subagent-driven, on a branch.
+1. Read `../../CLAUDE.md`, ADR-0001/0002/0004 (`../architecture/decisions/`),
+   `../architecture/overview.md` (the upstream hook points and data flows) and
+   `../knowledge/upstream-baseline.md`.
+2. Ask the commander whether both branches should be merged into `main`. Merge
+   `feature/neutron-resume`; it contains the API branch. There is no `origin`.
+3. Look at the GUI once: the Neutron tab's "Saved routes", and a plot from an unknown start.
+4. Execute the location plan subagent-driven, on a branch. Its Task 6 places the location install
+   lines directly after `install_edmrn_neutron_resume(self)` in `app.py`.
 
 ## Open decisions
 
-- **Merge of `feature/api-hardening`** (above).
+- **Merge** of the two branches (above).
 - **Transport for the friend exchange.** Research first (`../cowork/BACKLOG.md` items 1–3, not
   started), then an ADR. No transport code before that ADR.
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
+
+## Preconditions before friend data enters `edmrn.db` (from the neutron review)
+
+The store validates types and numbers; it does not yet validate content. The exchange feature must
+first add the following:
+- bounds on names, distances and ranges;
+- a character whitelist (NUL, ANSI escapes and bidi characters are accepted today);
+- rejection of unknown keys (extra waypoint keys are silently dropped today);
+- strict `route_id` types;
+- a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
+  the process.
+
+## Follow-ups from the neutron-resume review (deferred, none blocking)
+
+- Test gap: no test fails if `_snapshot = snapshot` in the progress branch of `NeutronAutosave.check`
+  is removed. Pin it by changing a status, ticking once, then counting `update_neutron_progress`
+  calls over further unchanged ticks.
+- Reloading the same upstream CSV backup inserts a duplicate saved route each time.
+- Resuming while a Spansh calculation runs: the later result overwrites the resumed route. A
+  second replot bypasses the disabled button.
+- On continue, advance or back, the From/To fields are not set.
+- Corruption that appears mid-session logs a warning every 2 s and never unmaps.
+- The 5 s SQLite busy timeout blocks the Tk thread while another process holds a lock.
+- Neutron `_key` does not strip spaces, `-` and `_` like upstream's `normalize`. The cost is "ask"
+  instead of "advance".
 
 ## Follow-ups from the API-hardening reviews (deferred, none blocking)
 
