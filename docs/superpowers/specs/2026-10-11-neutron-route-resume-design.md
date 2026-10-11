@@ -35,7 +35,7 @@ folder of an optimised CSV route, so a stand-alone neutron route is lost.
 
 ## Design
 
-### Store: `edmrn/ext/store.py` (ADR-0003)
+### Store: `edmrn/ext/store.py` (ADR-0004)
 
 - **`Store(path)`** opens one connection with `check_same_thread=False`, guarded by an
   `RLock`.

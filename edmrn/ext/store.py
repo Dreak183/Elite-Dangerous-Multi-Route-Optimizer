@@ -1,4 +1,4 @@
-"""SQLite store for EDMRN fork data (ADR-0003: one connection, rollback journal, bound values)."""
+"""SQLite store for EDMRN fork data (ADR-0004: one connection, rollback journal, bound values)."""
 from __future__ import annotations
 
 import math

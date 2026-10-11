@@ -56,6 +56,7 @@ class NeutronRouter:
             route_data = self._process_route_data(result_data["data"], from_system, to_system)
             self.last_route = route_data["waypoints"]
             self.current_waypoint_index = 0
+            self.last_request = {"from": used_from, "to": to_system, "range": jump_range, "boost": fsd_boost}
             return {
                 "success": True,
                 "waypoints": route_data["waypoints"],
