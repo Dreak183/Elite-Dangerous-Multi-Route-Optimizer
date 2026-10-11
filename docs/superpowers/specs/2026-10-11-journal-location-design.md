@@ -1,6 +1,6 @@
 # Journal location — design
 
-Status: Draft, awaiting review
+Status: Accepted (2026-10-11)
 Date: 2026-10-11
 Feature 1 of 4 (location → bookmarks/route library → exchange). Rules: ADR-0001, ADR-0002.
 Upstream facts: `../../knowledge/upstream-baseline.md`. Journal facts:
@@ -111,8 +111,12 @@ does the following:
 - Creates the tracker and stores it as `app.location_tracker`.
 - Appends `tracker.feed` to `JournalMonitor.event_listeners`.
 - Subscribes a header observer that sets `app.cmdr_location` via `root.after(0, …)`. The text is
-  `System · Station` when docked, `System · Body` when near a body, and `System` otherwise. An
-  unknown state leaves the label untouched.
+  `System · Station` when docked, `System · Body` when near a body, and `System` otherwise. A body
+  of type `Star`, or one named like the system, is not shown: `FSDJump` sets the arrival star as the
+  body. An unknown state leaves the label untouched.
+- Adds a write trace on `app.cmdr_location`. Upstream writes the label too: the startup scan in
+  `_get_latest_cmdr_data` and the jump handler. When the tracker knows a system, the trace writes
+  the tracker's text back, so the header always shows the tracker's view.
 - Starts `cold_start` in a daemon thread.
 
 `install` does nothing on a second call.
