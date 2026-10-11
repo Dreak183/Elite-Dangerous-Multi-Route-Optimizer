@@ -1370,10 +1370,11 @@ the Windows dev machine it must PASS.
 After
 
 ```python
-        self.journal_monitor = JournalMonitor(self._journal_callback)
+        install_edmrn_neutron_resume(self)
 ```
 
-insert
+(the neutron resume install lines, which sit directly after
+`self.journal_monitor = JournalMonitor(self._journal_callback)`), insert
 
 ```python
         from edmrn.ext.location import install as install_edmrn_location

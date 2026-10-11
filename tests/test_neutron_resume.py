@@ -282,3 +282,27 @@ def test_replace_target_deleted_falls_back_to_new_row(store):
     autosave.check()
     [summary] = store.list_neutron_routes()
     assert summary.from_system == "Elsewhere"
+
+
+from edmrn.ext.neutron_resume import install
+
+
+def test_install_opens_default_store_and_starts(isolated_home):
+    app, calls = make_app()
+    autosave = install(app)
+    try:
+        assert autosave is app.neutron_autosave and install(app) is autosave
+        assert str(isolated_home) in app.edmrn_store.path
+        assert ("after", 2000) in calls
+    finally:
+        app.edmrn_store.close()
+
+
+def test_install_with_corrupt_database_disables_feature(isolated_home, monkeypatch):
+    from edmrn.config import AppConfig
+    from pathlib import Path
+    data_dir = Path(AppConfig.get_app_data_path())
+    (data_dir / "edmrn.db").write_bytes(b"garbage" * 200)
+    app, _ = make_app()
+    assert install(app) is None
+    assert app.neutron_autosave is None and "edmrn.db" in app.edmrn_store_error

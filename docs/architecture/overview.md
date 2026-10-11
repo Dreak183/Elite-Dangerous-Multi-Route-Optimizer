@@ -33,3 +33,15 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
 | `edmrn/system_autocomplete.py` | Requests go through `edmrn.ext.api.call` without retries; a `ServiceCooldown` skips a service for 60 s after a transient failure | During an outage every keystroke waited up to 5 s + 5 s (API hardening spec A12) | yes |
 | `edmrn/app.py` (suggestions), `edmrn/custom_route.py` (`_get_suggestions`), `edmrn/system_info_section.py` (one line) | `_get_system_suggestions` hands results to the widget via `root.after`; Custom Route and System Info use the app's single autocompleter | Results reached widgets on worker threads; Custom Route built a new autocompleter, with an empty cache, per keystroke, and System Info a second one (A12) | yes |
 | `edmrn/updater.py` | The release check goes through `edmrn.ext.api.call` with one attempt; `last_error` keeps the reason; a failed manual check says `Could not check for updates: <reason>` | A failed manual check claimed the app was up to date (A13) | yes |
+| `edmrn/ui_components.py` | Two lines in `create_neutron_tab` add the "Saved routes" button (`edmrn.ext.neutron_resume`) | Neutron resume spec N3 | no |
+| `edmrn/app.py` (neutron resume) | Two lines after the first `JournalMonitor(...)` in `EDMRN_App.__init__`: `edmrn.ext.neutron_resume.install(self)` | Opens `edmrn.db` and starts the neutron autosave | no |
+
+## Neutron route persistence (neutron resume spec, ADR-0004)
+
+- `NeutronAutosave` polls upstream's `NeutronRouter` every 2 s on the Tk loop. It compares the
+  route object, the current index and the statuses.
+- A new route object becomes a row in `edmrn.db`, or replaces a row that asked for a replot to the
+  same destination. A change to an existing route updates that row's progress.
+- Resume loads a row back into the router. `decide_resume` chooses whether to continue, to advance
+  through upstream's jump handler, or to ask the commander.
+- All writes happen on the Tk thread.

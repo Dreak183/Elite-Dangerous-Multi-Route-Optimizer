@@ -323,6 +323,8 @@ class UIComponents:
         )
         self.app.theme_manager.apply_button_theme(self.app.neutron_next_btn, "secondary")
         self.app.neutron_next_btn.pack(side="left", padx=(5, 0))
+        from edmrn.ext.neutron_resume import add_saved_routes_button
+        add_saved_routes_button(self.app, button_frame)
         
         info_frame = ctk.CTkFrame(left_frame, fg_color=colors['frame'])
         info_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10), padx=15)
