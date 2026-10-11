@@ -74,6 +74,7 @@ from edmrn.theme_editor import ThemeEditor
 from edmrn.neutron import NeutronRouter
 from edmrn.ext.spansh import journal_start_coords
 from edmrn.ext.system_info import fetch_system_data
+from edmrn.ext.api import ApiError, nearest_system
 logger = get_logger('App')
 
 class EDMRN_App:
@@ -2407,28 +2408,20 @@ class EDMRN_App:
             
             def search_nearest():
                 try:
-                    import requests
-                    url = "https://spansh.co.uk/api/nearest"
-                    params = {
-                        'x': x_val,
-                        'y': y_val,
-                        'z': z_val,
-                        'limit': 5
-                    }
-                    
-                    response = requests.get(url, params=params, timeout=10)
-                    response.raise_for_status()
-                    data = response.json()
+                    system = nearest_system(x_val, y_val, z_val)
+                    data = {'system': system} if system else None
                     
                     if data and 'system' in data:
                         self.root.after(0, lambda: self._show_nearest_results(data, x_val, y_val, z_val))
                     else:
                         self.root.after(0, lambda: InfoDialog(self, "No Results", "No systems found near those coordinates"))
                 
-                except requests.RequestException as e:
-                    self.root.after(0, lambda: ErrorDialog(self, "API Error", f"Failed to search: {str(e)[:100]}"))
+                except ApiError as e:
+                    message = str(e.failure)
+                    self.root.after(0, lambda: ErrorDialog(self, "API Error", message))
                 except Exception as e:
-                    self.root.after(0, lambda: ErrorDialog(self, "Error", f"Search failed: {str(e)[:100]}"))
+                    logger.exception(f"Nearest system search failed: {e}")
+                    self.root.after(0, lambda: ErrorDialog(self, "Error", "Unexpected error talking to Spansh."))
             
             threading.Thread(target=search_nearest, daemon=True).start()
             
@@ -2438,7 +2431,7 @@ class EDMRN_App:
     def _show_nearest_results(self, data, x, y, z):
         try:
             system = data.get('system')
-            distance = data.get('distance', 0)
+            distance = (system or {}).get('distance', 0)
             
             if system:
                 system_name = system.get('name', 'Unknown')
