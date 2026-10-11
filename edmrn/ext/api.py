@@ -6,6 +6,7 @@ system API answers an unknown system with [] (../../../knowledge/edsm-api.md).
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -139,3 +140,137 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
             except Exception:
                 logger.exception("on_retry callback failed")
         sleep(delays[min(attempt - 1, len(delays) - 1)])
+
+
+# --- Coordinates and nearest system (spec A3, A4) ---------------------------
+
+SPANSH_SEARCH_URL = "https://spansh.co.uk/api/systems/search"
+SPANSH_NEAREST_URL = "https://spansh.co.uk/api/nearest"
+EDSM_SYSTEM_URL = "https://www.edsm.net/api-v1/system"
+LOOKUP_SERVICES = ("Spansh", "EDSM")
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _coords(record) -> Optional[tuple]:
+    if not isinstance(record, dict):
+        return None
+    values = (record.get("x"), record.get("y"), record.get("z"))
+    if not all(_is_number(v) for v in values):
+        return None
+    return tuple(float(v) for v in values)
+
+
+@dataclass(frozen=True)
+class Lookup:
+    """Result of lookup_system: coordinates with their source, not found, or failed."""
+    name: str
+    coords: Optional[tuple] = None
+    source: Optional[str] = None
+    failures: tuple = ()
+
+    @classmethod
+    def not_found(cls, name: str) -> "Lookup":
+        return cls(name)
+
+    @classmethod
+    def failed(cls, name: str, failures) -> "Lookup":
+        return cls(name, failures=tuple(failures))
+
+    @property
+    def found(self) -> bool:
+        return self.coords is not None
+
+    @property
+    def message(self) -> Optional[str]:
+        """The A9 sentence for a lookup that gave no coordinates; None when found."""
+        if self.found:
+            return None
+        if not self.failures:
+            return f"System '{self.name}' was not found at Spansh or EDSM. Check the spelling."
+        by_service = {f.service: f for f in self.failures}
+        reasons = [str(by_service[s]).rstrip(".") if s in by_service
+                   else f"System '{self.name}' is not known to {s}" for s in LOOKUP_SERVICES]
+        return f"Could not look up '{self.name}': {'; '.join(reasons)}."
+
+
+def _spansh_coords(name: str, call) -> Optional[tuple]:
+    response = call("POST", SPANSH_SEARCH_URL, service="Spansh", timeout=10,
+                    json={"filters": {"name": {"value": name}}, "sort": [{"name": {"order": "asc"}}],
+                          "size": 50})
+    if response.status_code != 200:
+        raise ApiError(failure_from_response(response, "Spansh"))
+    body = json_body(response, "Spansh")
+    results = body.get("results") if isinstance(body, dict) else None
+    if not isinstance(results, list):
+        raise ApiError(ApiFailure("Spansh", "unexpected", 200))
+    key = name.casefold()
+    for record in results:
+        if isinstance(record, dict) and isinstance(record.get("name"), str) \
+                and record["name"].strip().casefold() == key:
+            coords = _coords(record)
+            if coords:
+                return coords
+    return None
+
+
+def _edsm_coords(name: str, call) -> Optional[tuple]:
+    response = call("GET", EDSM_SYSTEM_URL, service="EDSM", timeout=10,
+                    params={"systemName": name, "showCoordinates": 1})
+    if response.status_code != 200:
+        raise ApiError(failure_from_response(response, "EDSM"))
+    body = json_body(response, "EDSM")
+    if isinstance(body, list):
+        return None
+    if not isinstance(body, dict):
+        raise ApiError(ApiFailure("EDSM", "unexpected", 200))
+    return _coords(body.get("coords"))
+
+
+def lookup_system(name: str, *, call=call) -> Lookup:
+    """Coordinates of a system: Spansh system search first, then EDSM (spec A4).
+
+    Not found only when both services answered and neither knows the name; when one failed and
+    the other does not know it, the result is failed (A3).
+    """
+    name = (name or "").strip()
+    if not name:
+        return Lookup.not_found(name)
+    failures = []
+    for service, fetch in (("Spansh", _spansh_coords), ("EDSM", _edsm_coords)):
+        try:
+            coords = fetch(name, call)
+        except ApiError as e:
+            failures.append(e.failure)
+            continue
+        if coords:
+            return Lookup(name, coords, service)
+    return Lookup.failed(name, failures) if failures else Lookup.not_found(name)
+
+
+def nearest_system(x, y, z, *, call=call) -> Optional[dict]:
+    """Spansh's nearest known system to the coordinates as {name, x, y, z, distance}, else None.
+
+    Spansh answers exactly one system and nests `distance` inside `system`
+    (../../../knowledge/bulk-data.md). Service failures raise ApiError.
+    """
+    response = call("GET", SPANSH_NEAREST_URL, service="Spansh", timeout=10,
+                    params={"x": x, "y": y, "z": z})
+    if response.status_code != 200:
+        raise ApiError(failure_from_response(response, "Spansh"))
+    body = json_body(response, "Spansh")
+    system = body.get("system") if isinstance(body, dict) else None
+    coords = _coords(system)
+    if coords is None or not isinstance(system.get("name"), str) or not system["name"].strip() \
+            or not _is_number(system.get("distance")):
+        return None
+    return {"name": system["name"], "x": coords[0], "y": coords[1], "z": coords[2],
+            "distance": float(system["distance"])}
+
+
+def nearest_known_system(x, y, z, *, call=call) -> Optional[tuple]:
+    """(name, distance in ly) of Spansh's nearest known system, else None. Failures raise ApiError."""
+    system = nearest_system(x, y, z, call=call)
+    return (system["name"], system["distance"]) if system else None
