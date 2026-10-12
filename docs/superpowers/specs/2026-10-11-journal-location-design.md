@@ -47,9 +47,18 @@ Each change is a minimal diff with no reformatting (ADR-0002):
 - **Rotation.** While tailing, at most once per second, `_tail_file` compares
   `_get_latest_journal_file()` with the file it tails. If a different file is now newest, it returns
   to `run`, which picks up the new file.
+  - The directory scan behind that comparison runs only when the journal folder's modification time
+    changed, and unconditionally at least every 30 s. Creating a file changes the folder's time on
+    NTFS, appending does not, so a game restart is followed within about a second while an idle
+    monitor does not scan thousands of files every second. On a filesystem without folder times the
+    switch can lag up to 30 s.
   - A new file is read from its beginning, not seeked to its end. A file that appears while
-    EDMRN runs was written by the running game, so all of its events are live.
-  - The first file seen at monitor start is still seeked to its end, as today.
+    EDMRN runs was written by the running game, so all of its events are live. This includes the
+    first file when the folder held no journal at monitor start.
+  - A file that already existed when the monitor started is seeked to its end, as today. A file the
+    monitor tailed before resumes at its last offset.
+  - Only newline-terminated lines are processed; lines are read as bytes and decoded one complete
+    line at a time, so a line the game has half written is processed once, when complete.
 - **`CarrierJump`.**
   - It is handled live like `FSDJump`: `current_system` is set and `callback(system_name)` fires.
     Upstream's route visited-marking and neutron tracking therefore follow carrier jumps.

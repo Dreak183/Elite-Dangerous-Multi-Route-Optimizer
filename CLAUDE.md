@@ -12,10 +12,11 @@ Rules only; detail lives in `docs/`. Keep this file short.
 
 EDMRN is a fork and continuation of *ED Multi Route Navigation*
 (NinurtaKalhu/Elite-Dangerous-Multi-Route-Optimizer, AGPL-3.0), a desktop route planning and
-optimization tool for Elite Dangerous. The fork adds current-location detection from the journal, a
-library of saved routes, system bookmarks, and an exchange channel for a small group of friends — a
-wing leader builds a route and sends it to the others; peer-to-peer preferred, an own server if
-necessary, chosen by a researched comparison of the options.
+optimization tool for Elite Dangerous, and the commander's main tool for finding systems and
+travelling. The fork adds current-location detection from the journal, saved routes, and crew
+features for a small group of friends: who is where in what ship, which systems are explored, finds,
+the leader's route, chat and notes — exchanged through a Cloudflare relay with peer-to-peer as a
+fallback (ADR-0005). Exploring the system the commander is in stays with Elite Observatory.
 
 The fork stays close to upstream and merges `upstream/main` regularly (remote `upstream`).
 
@@ -39,7 +40,7 @@ environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest un
 - **Journal data comes from upstream's journal layer**, never from EDJournalData (ADR-0001).
 - **Data received from friends is untrusted.** Routes and bookmarks are validated against a schema
   before use, never executed, never placed unchecked into paths, SQL or UI markup.
-- **No transport code before the transport ADR.** P2P vs. server is researched and decided first.
+- **Crew data travels only as ADR-0005's signed event log.** No second sync path, no transport outside it.
 - **Tests never touch the real journal folder.** Upstream derives it from `~`; redirect
   `HOME`/`USERPROFILE` and pass explicit paths.
 - **Secrets stay in `.env`** (git-ignored, read access denied in `.claude/settings.json`).

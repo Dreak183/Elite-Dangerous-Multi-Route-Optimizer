@@ -2,57 +2,82 @@
 
 ## Where things stand
 
-Two finished, reviewed branches are stacked on `main`. Neither is merged.
+- `main` (8653859) holds the API hardening and neutron save/resume (merged 2026-10-12).
+- **`feature/journal-location`** (10 commits on `main`) is finished and reviewed, not merged. It is
+  the location feature (spec `../superpowers/specs/2026-10-11-journal-location-design.md`):
+  - upstream's journal monitor follows carrier jumps and game restarts and reads only complete lines;
+  - an idle monitor stays cheap with thousands of journal files;
+  - a class-level listener hook feeds `edmrn/ext/location.py`;
+  - the header shows `System · Station` or `System · Body`;
+  - `app.location_tracker` is the location source for later features.
 
-- **`feature/api-hardening`** (12 commits on `1018269`) hardens the API layer:
-  - every live external call goes through `edmrn/ext/api.py`;
-  - plotting falls back to the nearest known system when the start is unknown to Spansh;
-  - failures are readable.
-
-  Spec `../superpowers/specs/2026-10-11-api-hardening-design.md`. Verified live 2026-10-12
-  (`../how-to/run.md`).
-- **`feature/neutron-resume`** (11 commits on `feature/api-hardening`) saves neutron routes and
-  resumes them:
-  - every plotted neutron route is saved to `edmrn.db` with its progress;
-  - the Neutron tab has a "Saved routes" list with Resume and Delete;
-  - resuming follows where the commander is.
-
-  Spec `../superpowers/specs/2026-10-11-neutron-route-resume-design.md`, ADR-0004. Verified end to end
-  on real Tk with faked Spansh. No human has looked at the window.
-
-214 tests pass (`.venv/Scripts/python.exe -m pytest`, network blocked in tests). No linter is
-configured. The location feature (feature 1) has an accepted spec and plan,
-`../superpowers/plans/2026-10-11-journal-location.md`, and is not executed.
+  The final whole-branch review executed probes and 28 mutations; its fix wave was re-reviewed as
+  ready. 278 tests pass (`.venv/Scripts/python.exe -m pytest`); `tests/test_neutron_resume_gui.py`
+  sometimes skips 5 tests with Tk's "can't find usable init.tcl" (environment, intermittent). No
+  linter is configured. A smoke start with a fake journal showed `Sol · Abraham Lincoln` in the
+  header variable; **no human has looked at the window** yet.
+- **Crew features** (the commander's priority): transport is decided in ADR-0005. The crew design
+  was proposed in chat on 2026-10-12 and awaits the commander's approval (below); no crew spec
+  exists yet.
 
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002/0004 (`../architecture/decisions/`),
-   `../architecture/overview.md` (the upstream hook points and data flows) and
-   `../knowledge/upstream-baseline.md`.
-2. Ask the commander whether both branches should be merged into `main`. Merge
-   `feature/neutron-resume`; it contains the API branch. There is no `origin`.
-3. Look at the GUI once: the Neutron tab's "Saved routes", and a plot from an unknown start.
-4. Execute the location plan subagent-driven, on a branch. Its Task 6 places the location install
-   lines directly after `install_edmrn_neutron_resume(self)` in `app.py`.
+1. Read `../../CLAUDE.md`, ADR-0001/0002/0004/0005 (`../architecture/decisions/`),
+   `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
+2. Ask the commander to merge `feature/journal-location` into `main` (there is no `origin`).
+3. Ask the commander to look at the GUI once: header location, Neutron "Saved routes", a plot from
+   an unknown start.
+4. Crew work: get the design approved, then write Spec A (capture), Spec B (sync), Spec C (window),
+   each spec → plan → subagent-driven execution.
+
+## Crew requirements the commander gave (2026-10-12) — move into Spec A/B/C, then delete here
+
+- One fixed group, with named expeditions as filters. Own status is shared automatically, with a
+  "pause sharing" switch.
+- A visited system is tracked but counts as **explored** only when all bodies are found by FSS
+  (`FSSAllBodiesFound`). Per explored system: number of planets, landable planets, and per planet
+  the FSS-visible signals: biological, geological, xeno (Thargoid), Guardian, human, other.
+- Automatic finds: biosignals, stellar phenomena, valuable bodies; manual finds with a note.
+  Later: a local inbound API through which other tools (e.g. Observatory scripts) post finds.
+- Status per commander: ship and loadout (EDSY link), fuel, hull, current or last known location.
+- Window: commander cards in the header; tabs "Explored systems", "Current route", "Reported
+  finds"; a live chat; notes on systems.
+- Proposed decomposition (awaiting approval): Spec A local capture into the event log
+  (journal + `Status.json`, deterministic ids), Spec B sync (identity, invites, Worker, catch-up,
+  Discord webhook), Spec C window. Open research for A: `../cowork/BACKLOG.md`.
 
 ## Open decisions
 
-- **Merge** of the two branches (above).
-- **Transport for the friend exchange.** Research first (`../cowork/BACKLOG.md` items 1–3, not
-  started), then an ADR. No transport code before that ADR.
+- **Merge** of `feature/journal-location`.
+- **Crew design approval** (above), then the sub-domain for the Worker.
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
 
 ## Preconditions before friend data enters `edmrn.db` (from the neutron review)
 
-The store validates types and numbers; it does not yet validate content. The exchange feature must
-first add the following:
+The store validates types and numbers; it does not yet validate content. Spec B must add:
 - bounds on names, distances and ranges;
 - a character whitelist (NUL, ANSI escapes and bidi characters are accepted today);
 - rejection of unknown keys (extra waypoint keys are silently dropped today);
 - strict `route_id` types;
 - a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
-  the process.
+  the process (ADR-0005's `event_id` is that identity).
+
+## Follow-ups from the location reviews (deferred, none blocking)
+
+- The monitor's "folder was empty at start" flag is also set by a transient failed lookup; the next
+  lookup then replays the newest finished journal as live.
+- `os.stat(journal_path)` in the rotation gate is unguarded; an error delays rotation by ~4.6 s via
+  the retry path.
+- `run()`'s error path still sleeps 5 s, so `stop()` can take 5 s after an exception.
+- Test gaps: the 30 s rotation safety net; the I1 source-level test checks the keyword, not its
+  value (`config.journal_path`).
+- Galaxy Plotter and Neutron read the start system from upstream's `get_current_system()` (newest
+  journal file only), not from the tracker.
+- `app.py:401` does not `.strip()` the configured journal path like the other start sites.
+- The tracker follows every commander; upstream filters jumps by the selected commander.
+- After a cold start the journal folder is not re-read when the path changes at runtime.
+- Listener errors log `str(e)` without traceback or listener name.
 
 ## Follow-ups from the neutron-resume review (deferred, none blocking)
 
@@ -95,16 +120,20 @@ first add the following:
 - Every path derives from `Path.home()`, and `edmrn.logger` writes there at import time. Tests rely
   on `tests/conftest.py` (`../architecture/patterns.md`). Probes redirect
   `HOME`/`USERPROFILE`/`APPDATA`/`LOCALAPPDATA` (`../how-to/run.md`).
-- `galaxy_handler.py` and `journal_handler.py` are dead copies; the live Galaxy code is in
+- `galaxy_handler.py` and `journal_handler.py` are dead copies; the live Galaxy and jump code is in
   `app.py`. Fixes in the dead files have no effect.
 - Importing `edmrn.app` replaces `sys.excepthook`; tests that import it restore the hook.
+- Journal listeners and tracker observers run on the monitor or cold-start thread; Tk work goes
+  through `root.after`.
 - Spansh is slow and returns 502s under load (`../../../knowledge/bulk-data.md`). Live checks may
   need several minutes and retries; unit tests must never use the network.
 - The Neutron tab is built by `ui_components.create_neutron_tab`; `app._create_neutron_tab` is dead
   code.
-- Upstream files are CRLF. Keep them CRLF, and do not "tidy" them (ADR-0002).
+- Upstream files are CRLF in the working tree (git autocrlf). Keep them CRLF, and do not "tidy" them
+  (ADR-0002).
 - `uv venv` without `--python 3.13` picks 3.14.
-- `.remember/` is the remember plugin's local store. Leave it untracked.
+- `.remember/` is the remember plugin's local store, `.superpowers/` the SDD scratch. Leave both
+  untracked.
 
 ## Where the knowledge lives
 
@@ -113,4 +142,5 @@ first add the following:
 - Feature specs (authority over plans): `../superpowers/specs/`. Plans: `../superpowers/plans/`.
 - Running, testing, probing: `../how-to/run.md`. Upstream merges: `../how-to/upstream-sync.md`.
 - Shared facts: `../../../knowledge/README.md` (Spansh API: `bulk-data.md`; location events:
-  `reference-data.md` §6; SQLite: `local-ipc-and-storage.md` §3.1).
+  `reference-data.md` §6; SQLite and folder mtime: `local-ipc-and-storage.md`; crew transport:
+  `group-sync-transport.md`; route formats: `ed-data-sharing.md`).
