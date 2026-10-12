@@ -5,6 +5,10 @@ Event field shapes: knowledge/reference-data.md section 6 in the EDProjects hub.
 """
 from __future__ import annotations
 
+import glob
+import json
+import math
+import os
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
@@ -50,7 +54,11 @@ def _int(value: Any) -> Optional[int]:
 def _coords(value: Any) -> Optional[Coords]:
     if (isinstance(value, (list, tuple)) and len(value) == 3
             and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
-        return (float(value[0]), float(value[1]), float(value[2]))
+        try:
+            result = (float(value[0]), float(value[1]), float(value[2]))
+        except (OverflowError, ValueError):
+            return None
+        return result if all(math.isfinite(v) for v in result) else None
     return None
 
 
@@ -118,7 +126,7 @@ def apply_event(state: LocationState, event: Any) -> LocationState:
     new = _apply_rules(state, event)
     if replace(new, timestamp=state.timestamp) == state:
         return state
-    return replace(new, timestamp=_str(event.get('timestamp')))
+    return replace(new, timestamp=_str(event.get('timestamp')) or state.timestamp)
 
 
 class LocationTracker:
@@ -148,9 +156,56 @@ class LocationTracker:
         if new is not old:
             self._notify(new)
 
-    def _notify(self, state: LocationState) -> None:
+    def adopt(self, state: LocationState) -> bool:
+        """Take a replayed state unless the tracker already holds a newer one."""
+        with self._lock:
+            current = self._state
+            if current.timestamp is not None and (
+                    state.timestamp is None or state.timestamp <= current.timestamp):
+                return False
+            if state == current:
+                return False
+            self._state = state
+        self._notify(state)
+        return True
+
+    def _notify(self, _applied: LocationState) -> None:
+        # Deliver the current state, not the argument: another thread may have moved on
+        # between releasing the lock and getting here, and the last notice must be the newest.
+        state = self._state
         for observer in list(self._observers):
             try:
                 observer(state)
             except Exception as e:
                 logger.error(f"Location observer failed: {e}")
+
+
+def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
+               max_files: int = 5) -> Optional[LocationState]:
+    """Replay the newest journal files until one yields a system; hand it to the tracker."""
+    if not journal_dir or not os.path.isdir(journal_dir):
+        return None
+    try:
+        files = sorted(glob.glob(os.path.join(journal_dir, 'Journal.*.log')),
+                       key=os.path.getmtime, reverse=True)
+    except OSError as e:
+        logger.error(f"Cold start could not list journals: {e}")
+        return None
+    for path in files[:max_files]:
+        replay = LocationTracker()
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if '"event"' not in line:
+                        continue
+                    try:
+                        replay.feed(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError as e:
+            logger.warning(f"Cold start skipped {os.path.basename(path)}: {e}")
+            continue
+        if replay.state.system is not None:
+            tracker.adopt(replay.state)
+            return replay.state
+    return None
