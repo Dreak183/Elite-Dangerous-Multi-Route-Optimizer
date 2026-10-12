@@ -29,7 +29,7 @@ This feature builds 1 and 2 and the state object that 3 and 4 consume. It does n
   - the timestamp of the event that last changed it.
 - R2. At app start the state reflects the journal, even when the game is not running.
 - R3. Live updates are processed within one monitor cycle for `FSDJump`, `CarrierJump`,
-  `Location`, `Docked`, `Undocked`, `ApproachBody`, `LeaveBody`, `SupercruiseExit`, `Touchdown`,
+  `Location`, `Docked`, `Undocked`, `ApproachBody`, `LeaveBody`, `SupercruiseEntry`, `SupercruiseExit`, `Touchdown`,
   `LoadGame` and `Commander`.
 - R4. A game restart that writes a new journal file is followed without restarting EDMRN.
 - R5. An idle journal monitor uses negligible CPU.
@@ -83,7 +83,7 @@ Each change is a minimal diff with no reformatting (ADR-0002):
     - `Docked` sets the station, but only if its `SystemAddress` matches the current system.
       Otherwise it sets the system name and address from the event and clears the coordinates.
     - `Undocked` clears the station.
-  - **Body.** `ApproachBody`, `SupercruiseExit` and `Touchdown` set the body. `LeaveBody` clears it.
+  - **Body.** `ApproachBody`, `SupercruiseExit` and `Touchdown` set the body. `LeaveBody` and `SupercruiseEntry` clear it.
     A `SupercruiseExit` with `BodyType` `Station` leaves the body unchanged, because a station is
     not a body.
   - **Commander.**

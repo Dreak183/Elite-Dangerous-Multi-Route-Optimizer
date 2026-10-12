@@ -305,3 +305,28 @@ def test_cold_start_survives_hostile_lines(tmp_path):
     cold_start(str(tmp_path), tracker)
 
     assert tracker.state.system == "Survivor"
+
+
+def test_supercruise_entry_clears_body_so_a_later_station_shows_no_ring():
+    s = feed_all(
+        event("FSDJump", StarSystem="Lave", SystemAddress=5, StarPos=[1, 2, 3]),
+        event("SupercruiseExit", StarSystem="Lave", SystemAddress=5, Body="Lave A Ring",
+              BodyID=7, BodyType="PlanetaryRing"),
+        event("SupercruiseEntry", StarSystem="Lave", SystemAddress=5),
+        event("SupercruiseExit", StarSystem="Lave", SystemAddress=5, Body="Lave Station",
+              BodyID=9, BodyType="Station"),
+        event("Docked", StarSystem="Lave", SystemAddress=5, StationName="Lave Station",
+              MarketID=3, StationType="Coriolis"),
+        event("Undocked", StationName="Lave Station"),
+    )
+    assert (s.body, s.body_id, s.body_type) == (None, None, None)
+    assert s.station is None and s.system == "Lave"
+
+
+def test_non_finite_star_pos_gives_no_coords_but_the_system_applies():
+    import json
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        line = ('{"timestamp": "2026-10-11T12:00:00Z", "event": "FSDJump", "StarSystem": "Lave",'
+                ' "SystemAddress": 5, "StarPos": [1.0, %s, 3.0]}' % literal)
+        s = feed_all(json.loads(line))
+        assert s.system == "Lave" and s.coords is None

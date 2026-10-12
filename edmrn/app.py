@@ -398,7 +398,7 @@ class EDMRN_App:
         self._autodetect_csv(initial_run=True)
         t16 = time.perf_counter(); print(f"[Startup] CSV autodetect: {t16-t15:.3f}s")
         self.root.after(500, self._complete_startup_in_background)
-        self.journal_monitor = JournalMonitor(self._journal_callback)
+        self.journal_monitor = JournalMonitor(self._journal_callback, manual_journal_path=self.config.journal_path or None)
         from edmrn.ext.neutron_resume import install as install_edmrn_neutron_resume
         install_edmrn_neutron_resume(self)
         from edmrn.ext.location import install as install_edmrn_location

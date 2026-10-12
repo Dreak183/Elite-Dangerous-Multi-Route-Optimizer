@@ -156,7 +156,7 @@ class JournalMonitor(threading.Thread):
         if self.current_journal_file != filename:
             if filename in offsets:
                 start = offsets[filename]
-            elif not offsets:
+            elif not offsets and not self.__dict__.get('_started_empty'):
                 with open(filename, 'rb') as f:
                     f.seek(0, 2)
                     start = f.tell()
@@ -168,6 +168,8 @@ class JournalMonitor(threading.Thread):
             logger.info(f"New journal file: {os.path.basename(filename)}")
         retry_count = 0
         last_rotation_check = time.monotonic()
+        last_scan = 0.0
+        last_dir_mtime = None
         while not self._stop_event.is_set() and retry_count < self.max_retries:
             try:
                 with self._file_lock:
@@ -192,12 +194,17 @@ class JournalMonitor(threading.Thread):
                         if self.last_tell != start_tell:
                             progressed = True
                             retry_count = 0
-                            time.sleep(0.1)
+                            self._stop_event.wait(0.1)
                     if not progressed:
-                        time.sleep(0.5)
+                        self._stop_event.wait(0.5)
                         if time.monotonic() - last_rotation_check >= 1.0:
                             last_rotation_check = time.monotonic()
-                            latest_file = self._get_latest_journal_file()
+                            dir_mtime = os.stat(self.journal_path).st_mtime_ns
+                            if dir_mtime != last_dir_mtime or last_rotation_check - last_scan >= 30.0:
+                                last_dir_mtime, last_scan = dir_mtime, last_rotation_check
+                                latest_file = self._get_latest_journal_file()
+                            else:
+                                latest_file = None
                             if latest_file and latest_file != filename:
                                 logger.info(f"Newer journal file: {os.path.basename(latest_file)}")
                                 break
@@ -207,11 +214,11 @@ class JournalMonitor(threading.Thread):
             except PermissionError:
                 logger.error("Permission denied reading journal file")
                 retry_count += 1
-                time.sleep(1)
+                self._stop_event.wait(1)
             except Exception as e:
                 retry_count += 1
                 logger.error(f"Journal file reading error (attempt {retry_count}): {e}")
-                time.sleep(1)
+                self._stop_event.wait(1)
         self.current_journal_file = None
     def detect_commanders(self, max_files: int = 200) -> list:
         commanders = set()
@@ -293,7 +300,8 @@ class JournalMonitor(threading.Thread):
                         logger.warning("Journal path not configured")
                     else:
                         logger.info("No journal file found")
-                    time.sleep(5)
+                    self.__dict__['_started_empty'] = True
+                    self._stop_event.wait(5)
             except Exception as e:
                 logger.error(f"Journal monitor error: {e}")
                 time.sleep(5)

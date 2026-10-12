@@ -115,7 +115,7 @@ def _apply_rules(state: LocationState, event: dict) -> LocationState:
     if name in _BODY_EVENTS:
         body = _body_fields(event, state)
         return replace(state, **body) if body else state
-    if name == 'LeaveBody':
+    if name in ('LeaveBody', 'SupercruiseEntry'):
         return replace(state, **_NO_BODY)
     return state
 

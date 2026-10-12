@@ -153,3 +153,22 @@ def test_install_uses_live_monitor_directory(tmp_path):
     install(app)
 
     assert wait_for(lambda: app.cmdr_location.get() == "Sol · Abraham Lincoln")
+
+
+def test_app_startup_monitor_receives_the_configured_journal_path():
+    """app.py's first JournalMonitor(...) in EDMRN_App.__init__ must pass the manual path.
+
+    Source-level check: importing edmrn.app needs Tk and replaces sys.excepthook.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse((Path(__file__).parent.parent / "edmrn" / "app.py").read_text(encoding="utf-8"))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "EDMRN_App")
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+    calls = [n for n in ast.walk(init) if isinstance(n, ast.Call)
+             and getattr(n.func, "id", None) == "JournalMonitor"]
+    calls.sort(key=lambda n: n.lineno)
+    assert calls, "no JournalMonitor( call in __init__"
+    keywords = {k.arg for k in calls[0].keywords}
+    assert "manual_journal_path" in keywords

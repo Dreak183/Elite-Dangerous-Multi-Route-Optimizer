@@ -175,6 +175,7 @@ def test_file_tailed_before_resumes_instead_of_replaying(journal_dir, run_monito
 
     future = time.time() + 60
     os.utime(a, (future, future))
+    os.utime(journal_dir, (future, future))  # the directory mtime gates the rotation scan
     assert wait_for(lambda: os.path.basename(monitor.current_journal_file) == a.name,
                     timeout=6.0)
     append_events(a, event("FSDJump", StarSystem="A2"))
@@ -266,3 +267,59 @@ def test_listener_survives_monitor_restart(journal_dir, run_monitor, listeners):
     append_events(path, event("FSDJump", StarSystem="AfterRestart"))
 
     assert wait_for(lambda: "AfterRestart" in received)
+
+
+def test_first_file_in_an_empty_folder_is_read_from_its_start(journal_dir, run_monitor, listeners):
+    seen = []
+    listeners.append(seen.append)
+    run_monitor(lambda system, data=None: None)
+    time.sleep(0.3)
+    path = journal_file(journal_dir)
+
+    append_events(path, event("Fileheader", part=1), event("Location", StarSystem="Sol"))
+
+    assert wait_for(lambda: any(e["event"] == "Location" for e in seen), timeout=8.0)
+    assert seen[0]["event"] == "Fileheader"
+
+
+def test_stop_ends_an_idle_monitor_promptly(journal_dir):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1))
+    monitor = JournalMonitor(None, manual_journal_path=str(journal_dir))
+    monitor.start()
+    assert wait_for(lambda: attached(monitor, path))
+    time.sleep(0.1)
+
+    began = time.monotonic()
+    monitor.stop()
+    monitor.join(timeout=5)
+
+    assert not monitor.is_alive()
+    assert time.monotonic() - began < 0.3
+
+
+def test_idle_cpu_stays_low_with_thousands_of_journals(journal_dir, run_monitor, monkeypatch):
+    past = time.time() - 3600
+    for i in range(3000):
+        old = journal_file(journal_dir, f"2020-01-01T{i:06d}")
+        append_events(old, event("Fileheader", part=1))
+        os.utime(old, (past, past))
+    newest = journal_file(journal_dir, "2026-10-11T120000")
+    append_events(newest, event("Fileheader", part=1))
+    scans = []
+    original = JournalMonitor._get_latest_journal_file
+    monkeypatch.setattr(JournalMonitor, "_get_latest_journal_file",
+                        lambda self: scans.append(1) or original(self))
+    monitor = run_monitor(lambda system, data=None: None)
+    assert wait_for(lambda: attached(monitor, newest), timeout=15.0)
+    scans.clear()
+
+    start = time.process_time()
+    time.sleep(4.0)
+    used = time.process_time() - start
+
+    # The directory scan is linear in the journal count: with an unchanged directory it must
+    # not run every second. (CPU is process-wide, so other test threads add noise; the scan
+    # count is the exact check, the CPU bound the spec's R5 limit with margin for that noise.)
+    assert len(scans) <= 1, f"{len(scans)} directory scans in 4 s with an unchanged folder"
+    assert used < 0.8, f"idle monitor used {used:.2f} s CPU in 4 s with 3000 journals"
