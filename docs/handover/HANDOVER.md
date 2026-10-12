@@ -11,17 +11,17 @@
 - **Crew features** (the commander's priority):
   - Transport is decided in ADR-0005. The store layer for feature modules is ADR-0006.
   - The commander approved the decomposition: A capture → B sync → C window.
-  - **Spec A** (`../superpowers/specs/2026-10-12-crew-capture-design.md`) is a draft. An Opus
-    review against the journal facts found 3 critical and 10 important issues; all are worked in.
-    The draft awaits the commander's review.
+  - **Spec A** (`../superpowers/specs/2026-10-12-crew-capture-design.md`) is accepted (2026-10-12).
+  - Its plan is `../superpowers/plans/2026-10-12-crew-capture.md`: 12 tasks in two phases, the log
+    (1–5) and capture (6–12). It records ten planning rulings that fill spec gaps. It awaits the
+    commander's review and choice of execution method; none of it is implemented.
 
 ## Start here
 
 1. Read `../../CLAUDE.md`, ADR-0001/0002/0004/0005/0006 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
-2. If the commander approved Spec A: set its status to Accepted, then `writing-plans`. The plan
-   may split into two phases: (1) identity, envelope, log, projector; (2) capture, replay, status.
-   Execute subagent-driven on a branch.
+2. Once the commander has approved the crew capture plan, execute it on a branch
+   (`feature/crew-capture`), subagent-driven unless the commander chose otherwise.
 3. Then Spec B (sync), then Spec C (window).
 
 ## Crew requirements for Specs B and C (commander, 2026-10-12) — move into those specs, then delete
@@ -38,7 +38,7 @@
 
 ## Open decisions
 
-- **Spec A review** by the commander.
+- **Crew capture plan review** and execution method, by the commander.
 - **Sub-domain** for the Worker (Spec B).
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.

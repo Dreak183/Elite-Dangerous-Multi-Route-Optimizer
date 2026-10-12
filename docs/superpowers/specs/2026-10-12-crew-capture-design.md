@@ -1,6 +1,6 @@
 # Crew capture — design (Spec A)
 
-Status: Draft (2026-10-12), awaiting the commander's review
+Status: Accepted (2026-10-12)
 Date: 2026-10-12
 Crew features: A capture (this spec) → B sync → C window. Rules: ADR-0001, ADR-0002, ADR-0004 with
 ADR-0006, ADR-0005. Journal facts: `../../../../knowledge/exploration-events.md`,
