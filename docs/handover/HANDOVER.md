@@ -2,60 +2,51 @@
 
 ## Where things stand
 
-- `main` (8653859) holds the API hardening and neutron save/resume (merged 2026-10-12).
-- **`feature/journal-location`** (10 commits on `main`) is finished and reviewed, not merged. It is
-  the location feature (spec `../superpowers/specs/2026-10-11-journal-location-design.md`):
-  - upstream's journal monitor follows carrier jumps and game restarts and reads only complete lines;
-  - an idle monitor stays cheap with thousands of journal files;
-  - a class-level listener hook feeds `edmrn/ext/location.py`;
-  - the header shows `System · Station` or `System · Body`;
-  - `app.location_tracker` is the location source for later features.
-
-  The final whole-branch review executed probes and 28 mutations; its fix wave was re-reviewed as
-  ready. 278 tests pass (`.venv/Scripts/python.exe -m pytest`); `tests/test_neutron_resume_gui.py`
-  sometimes skips 5 tests with Tk's "can't find usable init.tcl" (environment, intermittent). No
-  linter is configured. A smoke start with a fake journal showed `Sol · Abraham Lincoln` in the
-  header variable; **no human has looked at the window** yet.
-- **Crew features** (the commander's priority): transport is decided in ADR-0005. The crew design
-  was proposed in chat on 2026-10-12 and awaits the commander's approval (below); no crew spec
-  exists yet.
+- `main` holds API hardening, neutron save/resume and the journal location (all merged
+  2026-10-12). 278 tests pass (`.venv/Scripts/python.exe -m pytest`);
+  `tests/test_neutron_resume_gui.py` sometimes skips 5 tests with Tk's "can't find usable
+  init.tcl" (environment, intermittent). No linter is configured.
+- **No human has looked at the window** since the location and neutron features: header location,
+  Neutron "Saved routes", a plot from an unknown start.
+- **Crew features** (the commander's priority):
+  - Transport is decided in ADR-0005. The store layer for feature modules is ADR-0006.
+  - The commander approved the decomposition: A capture → B sync → C window.
+  - **Spec A** (`../superpowers/specs/2026-10-12-crew-capture-design.md`) is a draft. An Opus
+    review against the journal facts found 3 critical and 10 important issues; all are worked in.
+    The draft awaits the commander's review.
 
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002/0004/0005 (`../architecture/decisions/`),
+1. Read `../../CLAUDE.md`, ADR-0001/0002/0004/0005/0006 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
-2. Ask the commander to merge `feature/journal-location` into `main` (there is no `origin`).
-3. Ask the commander to look at the GUI once: header location, Neutron "Saved routes", a plot from
-   an unknown start.
-4. Crew work: get the design approved, then write Spec A (capture), Spec B (sync), Spec C (window),
-   each spec → plan → subagent-driven execution.
+2. If the commander approved Spec A: set its status to Accepted, then `writing-plans`. The plan
+   may split into two phases: (1) identity, envelope, log, projector; (2) capture, replay, status.
+   Execute subagent-driven on a branch.
+3. Then Spec B (sync), then Spec C (window).
 
-## Crew requirements the commander gave (2026-10-12) — move into Spec A/B/C, then delete here
+## Crew requirements for Specs B and C (commander, 2026-10-12) — move into those specs, then delete
 
 - One fixed group, with named expeditions as filters. Own status is shared automatically, with a
-  "pause sharing" switch.
-- A visited system is tracked but counts as **explored** only when all bodies are found by FSS
-  (`FSSAllBodiesFound`). Per explored system: number of planets, landable planets, and per planet
-  the FSS-visible signals: biological, geological, xeno (Thargoid), Guardian, human, other.
-- Automatic finds: biosignals, stellar phenomena, valuable bodies; manual finds with a note.
-  Later: a local inbound API through which other tools (e.g. Observatory scripts) post finds.
-- Status per commander: ship and loadout (EDSY link), fuel, hull, current or last known location.
+  "pause sharing" switch. The leader admits members; invites go by Discord DM.
+- Status per commander: ship and loadout (EDSY link), fuel, hull, current or last known location
+  (captured by Spec A's `CrewStatus`).
 - Window: commander cards in the header; tabs "Explored systems", "Current route", "Reported
-  finds"; a live chat; notes on systems.
-- Proposed decomposition (awaiting approval): Spec A local capture into the event log
-  (journal + `Status.json`, deterministic ids), Spec B sync (identity, invites, Worker, catch-up,
-  Discord webhook), Spec C window. Open research for A: `../cowork/BACKLOG.md`.
+  finds"; a live chat; notes on systems; manual finds with a note. Per explored system: planets,
+  landable planets, per-planet signals.
+- Finds are optionally mirrored to the group's Discord through a webhook (ADR-0005).
+- Later: a local inbound API through which other tools (e.g. Observatory scripts) post finds.
 
 ## Open decisions
 
-- **Merge** of `feature/journal-location`.
-- **Crew design approval** (above), then the sub-domain for the Worker.
+- **Spec A review** by the commander.
+- **Sub-domain** for the Worker (Spec B).
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
 
 ## Preconditions before friend data enters `edmrn.db` (from the neutron review)
 
-The store validates types and numbers; it does not yet validate content. Spec B must add:
+The neutron store validates types and numbers, not content. Spec A's validator (C12) and
+`insert_received` close these for crew data; any other friend data must do the same:
 - bounds on names, distances and ranges;
 - a character whitelist (NUL, ANSI escapes and bidi characters are accepted today);
 - rejection of unknown keys (extra waypoint keys are silently dropped today);
@@ -143,4 +134,5 @@ The store validates types and numbers; it does not yet validate content. Spec B 
 - Running, testing, probing: `../how-to/run.md`. Upstream merges: `../how-to/upstream-sync.md`.
 - Shared facts: `../../../knowledge/README.md` (Spansh API: `bulk-data.md`; location events:
   `reference-data.md` §6; SQLite and folder mtime: `local-ipc-and-storage.md`; crew transport:
-  `group-sync-transport.md`; route formats: `ed-data-sharing.md`).
+  `group-sync-transport.md`; route formats: `ed-data-sharing.md`; exploration events:
+  `exploration-events.md`).

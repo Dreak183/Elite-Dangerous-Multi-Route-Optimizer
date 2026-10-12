@@ -1,6 +1,6 @@
 # ADR-0004: Local fork data lives in one SQLite database; an unusable database disables the feature
 
-Status: Accepted
+Status: Accepted; superseded in part (module boundary) by [ADR-0006](0006-store-layer-and-crew-modules.md)
 Date: 2026-10-12
 Supersedes: [ADR-0003](0003-sqlite-for-local-storage.md). ADR-0003 said a newer database is opened
 read-only. The neutron resume spec (N6) requires the feature to be disabled with a visible reason
