@@ -85,7 +85,7 @@ class JournalMonitor(threading.Thread):
                     except Exception as e:
                         logger.error(f"[JournalMonitor] Loadout callback error: {e}")
                 return
-            if event == 'FSDJump':
+            if event in ('FSDJump', 'CarrierJump'):
                 system_name = data.get('StarSystem')
                 if self.selected_commander and self.selected_commander != 'Auto' and self.current_commander and self.current_commander != self.selected_commander:
                     return
@@ -268,7 +268,7 @@ class JournalMonitor(threading.Thread):
                     try:
                         data = json.loads(line)
                         event = data.get('event')
-                        if event in ['FSDJump', 'Location']:
+                        if event in ['FSDJump', 'Location', 'CarrierJump']:
                             current_system = data.get('StarSystem')
                     except json.JSONDecodeError:
                         continue
@@ -289,7 +289,7 @@ class JournalMonitor(threading.Thread):
                     try:
                         data = json.loads(line)
                         event = data.get('event')
-                        if event in ['FSDJump', 'Location']:
+                        if event in ['FSDJump', 'Location', 'CarrierJump']:
                             star_pos = data.get('StarPos')
                             if star_pos and isinstance(star_pos, list) and len(star_pos) == 3:
                                 coords = tuple(star_pos)

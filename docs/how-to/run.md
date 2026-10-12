@@ -45,7 +45,7 @@ journals into `$H` and pass their folder as `manual_journal_path`.
 ```
 
 From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
-against real data (`../architecture/patterns.md`). No test touches the network.
+against real data (`../architecture/patterns.md`). No test touches the network. Monitor tests start real threads and poll for up to 5 s each.
 
 ## Manual live check of the external APIs
 
