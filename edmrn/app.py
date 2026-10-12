@@ -401,6 +401,8 @@ class EDMRN_App:
         self.journal_monitor = JournalMonitor(self._journal_callback)
         from edmrn.ext.neutron_resume import install as install_edmrn_neutron_resume
         install_edmrn_neutron_resume(self)
+        from edmrn.ext.location import install as install_edmrn_location
+        install_edmrn_location(self)
         t17 = time.perf_counter(); print(f"[Startup] JournalMonitor: {t17-t16:.3f}s")
         print(f"[Startup] TOTAL __init__: {t17-t0:.3f}s")
         self.journal_monitor.start()

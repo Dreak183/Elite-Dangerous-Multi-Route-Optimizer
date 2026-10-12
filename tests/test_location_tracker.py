@@ -272,3 +272,36 @@ def test_docked_without_system_address_keeps_system_and_coords():
                              StationType="Orbis"))
     assert s.system == "Sol" and s.coords == (0.0, 0.0, 0.0)
     assert s.station == "Dock"
+
+
+def test_cold_start_survives_file_vanishing_before_getmtime(tmp_path, monkeypatch):
+    vanishing = journal_file(tmp_path, "2026-10-11T120000")
+    survivor = journal_file(tmp_path, "2026-10-10T120000")
+    append_events(vanishing, event("FSDJump", StarSystem="Gone", StarPos=[0, 0, 0]))
+    append_events(survivor, event("FSDJump", StarSystem="Survivor", StarPos=[0, 0, 0]))
+    real = os.path.getmtime
+
+    def flaky(path):
+        if os.fspath(path) == os.fspath(vanishing):
+            raise FileNotFoundError(path)
+        return real(path)
+
+    monkeypatch.setattr("edmrn.ext.location.os.path.getmtime", flaky)
+    tracker = LocationTracker()
+
+    cold_start(str(tmp_path), tracker)
+
+    assert tracker.state.system == "Survivor"
+
+
+def test_cold_start_survives_hostile_lines(tmp_path):
+    path = journal_file(tmp_path)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write('{"event": "x", "n": ' + "9" * 6000 + "}\n")
+        f.write('{"event": "x", "n": ' + "[" * 200000 + "\n")
+    append_events(path, event("FSDJump", StarSystem="Survivor", StarPos=[0, 0, 0]))
+    tracker = LocationTracker()
+
+    cold_start(str(tmp_path), tracker)
+
+    assert tracker.state.system == "Survivor"

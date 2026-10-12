@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
+from edmrn.journal import JournalMonitor
 from edmrn.logger import get_logger
 
 logger = get_logger('Location')
@@ -180,6 +181,13 @@ class LocationTracker:
                 logger.error(f"Location observer failed: {e}")
 
 
+def _mtime_or_zero(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
+
+
 def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
                max_files: int = 5) -> Optional[LocationState]:
     """Replay the newest journal files until one yields a system; hand it to the tracker."""
@@ -187,7 +195,7 @@ def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
         return None
     try:
         files = sorted(glob.glob(os.path.join(journal_dir, 'Journal.*.log')),
-                       key=os.path.getmtime, reverse=True)
+                       key=_mtime_or_zero, reverse=True)
     except OSError as e:
         logger.error(f"Cold start could not list journals: {e}")
         return None
@@ -200,7 +208,7 @@ def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
                         continue
                     try:
                         replay.feed(json.loads(line))
-                    except json.JSONDecodeError:
+                    except (ValueError, RecursionError):
                         continue
         except OSError as e:
             logger.warning(f"Cold start skipped {os.path.basename(path)}: {e}")
@@ -209,3 +217,44 @@ def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
             tracker.adopt(replay.state)
             return replay.state
     return None
+
+
+def format_location(state: LocationState) -> Optional[str]:
+    """Header text, or None when the system is unknown. The arrival star is not shown."""
+    if state.system is None:
+        return None
+    if state.station:
+        return f"{state.system} · {state.station}"
+    if state.body and state.body_type != 'Star' and state.body != state.system:
+        return f"{state.system} · {state.body}"
+    return state.system
+
+
+def install(app) -> LocationTracker:
+    """Wire the tracker into a running EDMRN_App. Called once from EDMRN_App.__init__."""
+    existing = getattr(app, 'location_tracker', None)
+    if isinstance(existing, LocationTracker):
+        return existing
+    tracker = LocationTracker()
+    app.location_tracker = tracker
+    JournalMonitor.event_listeners.append(tracker.feed)
+
+    def reassert_header(*_):
+        text = format_location(tracker.state)
+        if text is not None and app.cmdr_location.get() != text:
+            app.cmdr_location.set(text)
+
+    def on_change(_state: LocationState) -> None:
+        try:
+            app.root.after(0, reassert_header)
+        except Exception as e:
+            logger.debug(f"Header update skipped: {e}")
+
+    tracker.subscribe(on_change)
+    app.cmdr_location.trace_add('write', reassert_header)
+
+    manual_path = getattr(getattr(app, 'config', None), 'journal_path', '') or None
+    journal_dir = JournalMonitor(None, manual_journal_path=manual_path).journal_path
+    threading.Thread(target=cold_start, args=(journal_dir, tracker),
+                     name='edmrn-location-cold-start', daemon=True).start()
+    return tracker
