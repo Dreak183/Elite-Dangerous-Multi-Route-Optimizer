@@ -7,6 +7,7 @@ import platform
 from edmrn.logger import get_logger
 logger = get_logger('Journal')
 class JournalMonitor(threading.Thread):
+    event_listeners = []
     def __init__(self, callback, manual_journal_path=None, selected_commander=None):
         super().__init__(daemon=True)
         self.callback = callback
@@ -135,6 +136,21 @@ class JournalMonitor(threading.Thread):
             pass
         except Exception as e:
             logger.error(f"Journal line processing error: {e}")
+    def _dispatch_line(self, line):
+        self._process_line(line)
+        if not JournalMonitor.event_listeners or '"event"' not in line:
+            return
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(data, dict):
+            return
+        for listener in list(JournalMonitor.event_listeners):
+            try:
+                listener(data)
+            except Exception as e:
+                logger.error(f"[JournalMonitor] Event listener error: {e}")
     def _tail_file(self, filename):
         offsets = self.__dict__.setdefault('_tail_offsets', {})
         if self.current_journal_file != filename:
@@ -172,7 +188,7 @@ class JournalMonitor(threading.Thread):
                                     break
                                 self.last_tell = f.tell()
                                 offsets[filename] = self.last_tell
-                                self._process_line(line.decode('utf-8', errors='replace'))
+                                self._dispatch_line(line.decode('utf-8', errors='replace'))
                         if self.last_tell != start_tell:
                             progressed = True
                             retry_count = 0

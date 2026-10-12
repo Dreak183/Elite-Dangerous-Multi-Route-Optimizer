@@ -209,3 +209,60 @@ def test_retail_of_same_file_neither_replays_nor_loses(journal_dir, run_monitor,
     assert wait_for(lambda: "Two" in seen, timeout=8.0)
     time.sleep(0.5)
     assert seen == ["One", "Two"]
+
+
+@pytest.fixture
+def listeners(monkeypatch):
+    fresh = []
+    monkeypatch.setattr(JournalMonitor, "event_listeners", fresh)
+    return fresh
+
+
+def test_listener_runs_after_upstream_callback(journal_dir, run_monitor, listeners):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1))
+    order = []
+    listeners.append(lambda e: order.append(("listener", e["event"])))
+    monitor = run_monitor(lambda system, data=None: order.append(("callback", system)))
+    assert wait_for(lambda: attached(monitor, path))
+
+    append_events(path, event("FSDJump", StarSystem="Alpha"), event("Docked", StationName="Port"))
+
+    assert wait_for(lambda: ("listener", "Docked") in order)
+    assert order.index(("callback", "Alpha")) < order.index(("listener", "FSDJump"))
+
+
+def test_raising_listener_does_not_stop_processing(journal_dir, run_monitor, listeners):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1))
+    received, seen = [], []
+
+    def broken(_event):
+        raise RuntimeError("listener bug")
+
+    listeners.extend([broken, lambda e: received.append(e.get("StarSystem"))])
+    monitor = run_monitor(lambda system, data=None: seen.append(system))
+    assert wait_for(lambda: attached(monitor, path))
+
+    append_events(path, event("FSDJump", StarSystem="A"))
+    append_events(path, event("FSDJump", StarSystem="B"))
+
+    assert wait_for(lambda: received[-2:] == ["A", "B"])
+    assert seen[-2:] == ["A", "B"]
+
+
+def test_listener_survives_monitor_restart(journal_dir, run_monitor, listeners):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1))
+    received = []
+    listeners.append(lambda e: received.append(e.get("StarSystem")))
+    first = run_monitor(lambda system, data=None: None)
+    assert wait_for(lambda: attached(first, path))
+    first.stop()
+    first.join(timeout=5)
+
+    second = run_monitor(lambda system, data=None: None)
+    assert wait_for(lambda: attached(second, path))
+    append_events(path, event("FSDJump", StarSystem="AfterRestart"))
+
+    assert wait_for(lambda: "AfterRestart" in received)
