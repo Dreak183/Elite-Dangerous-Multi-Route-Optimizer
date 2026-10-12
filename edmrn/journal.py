@@ -136,17 +136,20 @@ class JournalMonitor(threading.Thread):
         except Exception as e:
             logger.error(f"Journal line processing error: {e}")
     def _tail_file(self, filename):
+        offsets = self.__dict__.setdefault('_tail_offsets', {})
         if self.current_journal_file != filename:
-            previous_file = getattr(self, '_last_tailed_file', None)
-            self.current_journal_file = filename
-            self._last_tailed_file = filename
-            logger.info(f"New journal file: {os.path.basename(filename)}")
-            if previous_file is None:
-                with open(filename, 'r', encoding='utf-8') as f:
+            if filename in offsets:
+                start = offsets[filename]
+            elif not offsets:
+                with open(filename, 'rb') as f:
                     f.seek(0, 2)
-                    self.last_tell = f.tell()
-            elif previous_file != filename:
-                self.last_tell = 0
+                    start = f.tell()
+            else:
+                start = 0
+            self.last_tell = start
+            offsets[filename] = start
+            self.current_journal_file = filename
+            logger.info(f"New journal file: {os.path.basename(filename)}")
         retry_count = 0
         last_rotation_check = time.monotonic()
         while not self._stop_event.is_set() and retry_count < self.max_retries:
@@ -156,23 +159,25 @@ class JournalMonitor(threading.Thread):
                     if current_size < self.last_tell:
                         logger.info("Journal file size reset")
                         self.last_tell = 0
+                        offsets[filename] = 0
                         continue
+                    progressed = False
                     if current_size > self.last_tell:
-                        with open(filename, 'r', encoding='utf-8') as f:
+                        start_tell = self.last_tell
+                        with open(filename, 'rb') as f:
                             f.seek(self.last_tell)
                             while True:
-                                line_start = f.tell()
                                 line = f.readline()
-                                if not line:
+                                if not line or not line.endswith(b'\n'):
                                     break
-                                if not line.endswith('\n'):
-                                    f.seek(line_start)
-                                    break
-                                self._process_line(line)
-                            self.last_tell = f.tell()
-                        retry_count = 0
-                        time.sleep(0.1)
-                    else:
+                                self.last_tell = f.tell()
+                                offsets[filename] = self.last_tell
+                                self._process_line(line.decode('utf-8', errors='replace'))
+                        if self.last_tell != start_tell:
+                            progressed = True
+                            retry_count = 0
+                            time.sleep(0.1)
+                    if not progressed:
                         time.sleep(0.5)
                         if time.monotonic() - last_rotation_check >= 1.0:
                             last_rotation_check = time.monotonic()

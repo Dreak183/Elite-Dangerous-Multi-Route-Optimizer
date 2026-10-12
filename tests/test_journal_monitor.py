@@ -1,3 +1,4 @@
+import json
 import os
 import time
 
@@ -114,3 +115,97 @@ def test_half_written_line_is_processed_once_when_complete(journal_dir, run_moni
     assert wait_for(lambda: "Split" in seen)
     time.sleep(0.5)
     assert seen.count("Split") == 1
+
+
+def test_trailing_fragment_does_not_block_rotation(journal_dir, run_monitor):
+    old = journal_file(journal_dir, "2026-10-11T120000")
+    append_events(old, event("Fileheader", part=1))
+    seen = []
+    monitor = run_monitor(lambda system, data=None: seen.append(system))
+    assert wait_for(lambda: attached(monitor, old))
+    with open(old, "a", encoding="utf-8", newline="\n") as f:
+        f.write('{"timestamp":"x","event":"FSDJ')
+    time.sleep(0.7)
+    past = time.time() - 60
+    os.utime(old, (past, past))
+
+    new = journal_file(journal_dir, "2026-10-11T130000")
+    append_events(new, event("Fileheader", part=1), event("FSDJump", StarSystem="Delta"))
+
+    assert wait_for(lambda: "Delta" in seen, timeout=6.0)
+    assert os.path.basename(monitor.current_journal_file) == new.name
+
+
+def test_fragment_split_inside_multibyte_character(journal_dir, run_monitor):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1))
+    seen = []
+    monitor = run_monitor(lambda system, data=None: seen.append(system))
+    assert wait_for(lambda: attached(monitor, path))
+
+    complete = json.dumps(event("FSDJump", StarSystem="A")) + "\n"
+    raw = (json.dumps(event("FSDJump", StarSystem="Gröt"), ensure_ascii=False)
+           + "\n").encode("utf-8")
+    cut = raw.index("ö".encode("utf-8")) + 1
+    with open(path, "ab") as f:
+        f.write(complete.encode("utf-8") + raw[:cut])
+    time.sleep(1.5)
+    with open(path, "ab") as f:
+        f.write(raw[cut:])
+
+    assert wait_for(lambda: "Gröt" in seen)
+    time.sleep(0.5)
+    assert seen == ["A", "Gröt"]
+
+
+def test_file_tailed_before_resumes_instead_of_replaying(journal_dir, run_monitor):
+    a = journal_file(journal_dir, "2026-10-11T120000")
+    append_events(a, event("Fileheader", part=1))
+    seen = []
+    monitor = run_monitor(lambda system, data=None: seen.append(system))
+    assert wait_for(lambda: attached(monitor, a))
+    append_events(a, event("FSDJump", StarSystem="A1"))
+    assert wait_for(lambda: "A1" in seen)
+
+    b = journal_file(journal_dir, "2026-10-11T130000")
+    append_events(b, event("Fileheader", part=1), event("FSDJump", StarSystem="B1"))
+    past = time.time() - 60
+    os.utime(a, (past, past))
+    assert wait_for(lambda: "B1" in seen, timeout=6.0)
+
+    future = time.time() + 60
+    os.utime(a, (future, future))
+    assert wait_for(lambda: os.path.basename(monitor.current_journal_file) == a.name,
+                    timeout=6.0)
+    append_events(a, event("FSDJump", StarSystem="A2"))
+
+    assert wait_for(lambda: "A2" in seen)
+    assert seen == ["A1", "B1", "A2"]
+
+
+def test_retail_of_same_file_neither_replays_nor_loses(journal_dir, run_monitor,
+                                                       monkeypatch):
+    path = journal_file(journal_dir)
+    append_events(path, event("Fileheader", part=1), event("FSDJump", StarSystem="Old"))
+    seen = []
+    monitor = run_monitor(lambda system, data=None: seen.append(system))
+    assert wait_for(lambda: attached(monitor, path))
+    append_events(path, event("FSDJump", StarSystem="One"))
+    assert wait_for(lambda: "One" in seen)
+
+    real = os.path.getsize
+    state = {"raised": False}
+
+    def flaky(p):
+        if not state["raised"] and str(p) == str(monitor.current_journal_file):
+            state["raised"] = True
+            raise FileNotFoundError(p)
+        return real(p)
+
+    monkeypatch.setattr(os.path, "getsize", flaky)
+    assert wait_for(lambda: state["raised"])
+    append_events(path, event("FSDJump", StarSystem="Two"))
+
+    assert wait_for(lambda: "Two" in seen, timeout=8.0)
+    time.sleep(0.5)
+    assert seen == ["One", "Two"]
