@@ -137,13 +137,18 @@ class JournalMonitor(threading.Thread):
             logger.error(f"Journal line processing error: {e}")
     def _tail_file(self, filename):
         if self.current_journal_file != filename:
+            previous_file = getattr(self, '_last_tailed_file', None)
             self.current_journal_file = filename
-            self.last_tell = 0
+            self._last_tailed_file = filename
             logger.info(f"New journal file: {os.path.basename(filename)}")
-            with open(filename, 'r', encoding='utf-8') as f:
-                f.seek(0, 2)
-                self.last_tell = f.tell()
+            if previous_file is None:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    f.seek(0, 2)
+                    self.last_tell = f.tell()
+            elif previous_file != filename:
+                self.last_tell = 0
         retry_count = 0
+        last_rotation_check = time.monotonic()
         while not self._stop_event.is_set() and retry_count < self.max_retries:
             try:
                 with self._file_lock:
@@ -155,12 +160,26 @@ class JournalMonitor(threading.Thread):
                     if current_size > self.last_tell:
                         with open(filename, 'r', encoding='utf-8') as f:
                             f.seek(self.last_tell)
-                            new_lines = f.readlines()
-                            for line in new_lines:
+                            while True:
+                                line_start = f.tell()
+                                line = f.readline()
+                                if not line:
+                                    break
+                                if not line.endswith('\n'):
+                                    f.seek(line_start)
+                                    break
                                 self._process_line(line)
                             self.last_tell = f.tell()
                         retry_count = 0
                         time.sleep(0.1)
+                    else:
+                        time.sleep(0.5)
+                        if time.monotonic() - last_rotation_check >= 1.0:
+                            last_rotation_check = time.monotonic()
+                            latest_file = self._get_latest_journal_file()
+                            if latest_file and latest_file != filename:
+                                logger.info(f"Newer journal file: {os.path.basename(latest_file)}")
+                                break
             except FileNotFoundError:
                 logger.warning("Journal file not found during tailing")
                 break
