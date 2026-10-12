@@ -44,6 +44,9 @@ class CustomRouteManager:
         except Exception:
             pass
         try:
+            from edmrn.ext.location import tracked_system
+            if tracked_system(self.app):
+                return tracked_system(self.app)
             if hasattr(self.app, 'cmdr_location'):
                 loc = self.app.cmdr_location.get()
                 if loc and loc != "[Location: Unknown]":

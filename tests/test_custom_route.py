@@ -128,3 +128,13 @@ def test_optimize_failure_dialog_shows_the_reason(monkeypatch):
     tab.manager = SimpleNamespace(optimize_error=NOT_FOUND, systems=[], optimized_route=[])
     tab._on_optimize_complete(False)
     assert shown == [("Route Optimization", NOT_FOUND)]
+
+
+def test_detect_current_system_prefers_tracker_over_compound_header():
+    from edmrn.ext.location import LocationTracker
+    tracker = LocationTracker()
+    tracker.feed({"event": "Location", "StarSystem": "Sol", "Docked": True, "StationName": "Abraham Lincoln"})
+    app = SimpleNamespace(journal_monitor=Journal(None, None), location_tracker=tracker,
+                          cmdr_location=SimpleNamespace(get=lambda: "Sol · Abraham Lincoln"))
+
+    assert cr.CustomRouteManager(app).detect_current_system() == "Sol"

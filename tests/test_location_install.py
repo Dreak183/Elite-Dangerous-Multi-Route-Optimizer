@@ -134,3 +134,22 @@ def test_real_tk_trace_reasserts(tmp_path, listeners):
         assert app.cmdr_location.get() == "Sol · Abraham Lincoln"
     finally:
         root.destroy()
+
+
+def test_tracked_system_helper():
+    from edmrn.ext.location import LocationTracker, tracked_system
+    assert tracked_system(SimpleNamespace()) is None
+    tracker = LocationTracker()
+    assert tracked_system(SimpleNamespace(location_tracker=tracker)) is None
+    tracker.feed(DOCKED)
+    assert tracked_system(SimpleNamespace(location_tracker=tracker)) == "Sol"
+
+
+def test_install_uses_live_monitor_directory(tmp_path):
+    append_events(journal_file(tmp_path), DOCKED)
+    app = make_app(tmp_path / "elsewhere")
+    app.journal_monitor = SimpleNamespace(journal_path=str(tmp_path))
+
+    install(app)
+
+    assert wait_for(lambda: app.cmdr_location.get() == "Sol · Abraham Lincoln")

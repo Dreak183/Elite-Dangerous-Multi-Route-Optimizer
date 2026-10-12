@@ -39,6 +39,8 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
 | `edmrn/ui_components.py` | Two lines in `create_neutron_tab` add the "Saved routes" button (`edmrn.ext.neutron_resume`) | Neutron resume spec N3 | no |
 | `edmrn/app.py` (neutron resume) | Two lines after the first `JournalMonitor(...)` in `EDMRN_App.__init__`: `edmrn.ext.neutron_resume.install(self)` | Opens `edmrn.db` and starts the neutron autosave | no |
 | `edmrn/app.py` (location) | Two lines directly after `install_edmrn_neutron_resume(self)` in `EDMRN_App.__init__`: `edmrn.ext.location.install(self)` | Wires the location tracker, header binding and cold start | no |
+| `edmrn/custom_route.py` (location) | `detect_current_system` asks `edmrn.ext.location.tracked_system` before reading `cmdr_location` | The header text is compound (`Sol · Station`), so as a fallback it yielded a station name as a system name (location spec) | no |
+| `edmrn/app.py` (location fallback) | Three lines in the jump handler: `tracked_system(self)` is asked before `cmdr_location.get()` when `last_known_system` is empty | Same reason: the compound header text is not a system name (location spec) | no |
 
 ## Neutron route persistence (neutron resume spec, ADR-0004)
 

@@ -1526,6 +1526,9 @@ class EDMRN_App:
 
         if not system_name:
             system_name = getattr(self, 'last_known_system', None)
+            if not system_name:
+                from edmrn.ext.location import tracked_system
+                system_name = tracked_system(self)
             if not system_name and hasattr(self, 'cmdr_location'):
                 try:
                     system_name = self.cmdr_location.get()

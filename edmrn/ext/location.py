@@ -230,6 +230,14 @@ def format_location(state: LocationState) -> Optional[str]:
     return state.system
 
 
+def tracked_system(app) -> Optional[str]:
+    """Bare system name the tracker knows, or None. Never raises."""
+    try:
+        return app.location_tracker.state.system
+    except Exception:
+        return None
+
+
 def install(app) -> LocationTracker:
     """Wire the tracker into a running EDMRN_App. Called once from EDMRN_App.__init__."""
     existing = getattr(app, 'location_tracker', None)
@@ -254,7 +262,8 @@ def install(app) -> LocationTracker:
     app.cmdr_location.trace_add('write', reassert_header)
 
     manual_path = getattr(getattr(app, 'config', None), 'journal_path', '') or None
-    journal_dir = JournalMonitor(None, manual_journal_path=manual_path).journal_path
+    live_dir = getattr(getattr(app, 'journal_monitor', None), 'journal_path', None)
+    journal_dir = live_dir or JournalMonitor(None, manual_journal_path=manual_path).journal_path
     threading.Thread(target=cold_start, args=(journal_dir, tracker),
                      name='edmrn-location-cold-start', daemon=True).start()
     return tracker
