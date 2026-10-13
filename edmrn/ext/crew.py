@@ -12,15 +12,24 @@ from typing import Any, Optional
 
 from edmrn.ext import crew_events as ev
 from edmrn.ext.crew_capture import LiveCapture, MapperState, find_revision, note_revision, replay
-from edmrn.ext.crew_identity import Identity, KeyFileError, KeyRing
 from edmrn.ext.crew_status import CrewStatus, ShipStatus
-from edmrn.ext.crew_store import CrewStore, FindRow, NoteRow
 from edmrn.ext.location import journal_dir_for
 from edmrn.fuel_tracker import FuelTracker
 from edmrn.journal import JournalMonitor
 from edmrn.logger import get_logger
 
 logger = get_logger('Crew')
+
+# `cryptography` is an optional install: without it crew capture is off and EDMRN still starts.
+try:
+    from edmrn.ext.crew_identity import Identity, KeyFileError, KeyRing
+    from edmrn.ext.crew_store import CrewStore, FindRow, NoteRow
+    _UNAVAILABLE: Optional[Exception] = None
+except ImportError as _e:
+    _UNAVAILABLE = _e
+
+    class KeyFileError(Exception):  # placeholder so the except clauses below stay valid
+        pass
 
 
 class Writer:
@@ -34,6 +43,8 @@ class Writer:
         self._root = root
         self._queue: deque = deque()
         self._lock = threading.Lock()
+        self._space = threading.Condition(self._lock)
+        self._caught_up: set[str] = set()
         self._dropped = 0
         self._bad_kinds: set[str] = set()
         self._broken: set[str] = set()
@@ -48,8 +59,11 @@ class Writer:
     def running(self) -> bool:
         return self._running
 
-    def enqueue(self, draft: ev.Draft) -> None:
-        """Any thread. An invalid draft is dropped here, logged once per kind."""
+    def enqueue(self, draft: ev.Draft, block: bool = False) -> None:
+        """Any thread. An invalid draft is dropped here, logged once per kind.
+
+        `block` (the startup replay only) waits for the writer to free space while it runs, so a
+        long replay is not cut by the queue cap. A stopped writer never blocks."""
         try:
             ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
         except ev.PayloadError as e:
@@ -59,13 +73,20 @@ class Writer:
             if first:
                 logger.warning(f"Crew {draft.kind} draft dropped: {e}")
             return
-        with self._lock:
-            if len(self._queue) >= self.QUEUE_CAP:
-                self._queue.popleft()
-                self._dropped += 1
-                if self._dropped % 1000 == 1:
-                    logger.warning(f"Crew queue full; {self._dropped} oldest drafts dropped so far")
+        with self._space:
+            if block:
+                while self._running and len(self._queue) >= self.QUEUE_CAP - self.BATCH:
+                    self._space.wait(0.5)
             self._queue.append(draft)
+            self._trim()
+
+    def _trim(self) -> None:
+        """Hold `_lock`. Past the cap the oldest drafts go; the newest may be manual entries."""
+        while len(self._queue) > self.QUEUE_CAP:
+            self._queue.popleft()
+            self._dropped += 1
+            if self._dropped % 1000 == 1:
+                logger.warning(f"Crew queue full; {self._dropped} oldest drafts dropped so far")
 
     def start(self) -> None:
         self._running = True
@@ -73,6 +94,8 @@ class Writer:
 
     def stop(self) -> None:
         self._running = False
+        with self._space:
+            self._space.notify_all()
 
     def _schedule(self) -> None:
         if not self._running:
@@ -92,9 +115,10 @@ class Writer:
 
     def drain(self, limit: Optional[int] = None) -> int:
         """Sign and log queued drafts now (Tk thread). Returns how many were written."""
-        with self._lock:
+        with self._space:
             count = len(self._queue) if limit is None else min(limit, len(self._queue))
             drafts = [self._queue.popleft() for _ in range(count)]
+            self._space.notify_all()
         items = []
         for draft in drafts:
             identity = self._identity(draft.commander)
@@ -125,23 +149,38 @@ class Writer:
         return written
 
     def _requeue(self, drafts: list) -> None:
-        """Put a failed batch back ahead of newer drafts; past the cap the newest are dropped, so
-        the oldest stay first (the same ones a longer wait would have written)."""
+        """Put a failed batch back ahead of newer drafts; past the cap the oldest are dropped, as in
+        `enqueue`: the newest may be manual notes and finds that no replay restores."""
         with self._lock:
             self._queue.extendleft(reversed(drafts))
-            while len(self._queue) > self.QUEUE_CAP:
-                self._queue.pop()
-                self._dropped += 1
+            self._trim()
 
     def _identity(self, commander: Any) -> Optional[Identity]:
         if not isinstance(commander, str) or commander in self._broken:
             return None
         try:
-            return self._keyring.for_commander(commander)
+            identity = self._keyring.for_commander(commander)
         except (KeyFileError, OSError) as e:
             self._broken.add(commander)
             logger.error(f"Crew capture disabled for one commander: {e}")
             return None
+        if commander not in self._caught_up:
+            self._catch_up(commander, identity)
+        return identity
+
+    def _catch_up(self, commander: str, identity: Identity) -> None:
+        """A crash between the log commit and the key-file write leaves the file behind the log;
+        raise it to the log's maximum before any seq is allocated from it."""
+        try:
+            logged = self._crew_store.max_seq(identity.author)
+            if logged > identity.high_water:
+                identity.raise_high_water(logged)
+        except sqlite3.Error as e:  # locked or busy: try again on the next drain
+            logger.warning(f"Crew high-water catch-up postponed: {e}")
+            return
+        except (OSError, KeyFileError, ValueError) as e:
+            logger.error(f"Crew high-water catch-up failed: {e}")
+        self._caught_up.add(commander)
 
 
 class CrewService:
@@ -243,7 +282,7 @@ def _startup_replay(journal_dir: Optional[str], live: LiveCapture, writer: Write
                     status: CrewStatus) -> None:
     state: Optional[MapperState] = None
     try:
-        state = replay(journal_dir, writer.enqueue, status)
+        state = replay(journal_dir, lambda d: writer.enqueue(d, block=True), status)
     except Exception as e:
         logger.error(f"Crew startup replay failed: {e}")
     finally:
@@ -252,6 +291,10 @@ def _startup_replay(journal_dir: Optional[str], live: LiveCapture, writer: Write
 
 def install(app: Any) -> Optional[CrewService]:
     """Wire crew capture into a running EDMRN_App. Called once from EDMRN_App.__init__."""
+    if _UNAVAILABLE is not None:
+        logger.error(f"Crew capture disabled: {_UNAVAILABLE}")
+        app.crew = None
+        return None
     existing = getattr(app, 'crew', None)
     if isinstance(existing, CrewService):
         return existing

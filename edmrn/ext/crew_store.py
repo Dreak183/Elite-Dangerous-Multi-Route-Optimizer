@@ -371,6 +371,12 @@ class CrewStore:
                 logger.error(f"Crew key file not updated ({identity.path.name}): {e}")
         return written
 
+    def max_seq(self, author: str) -> int:
+        """Highest seq of `author` in the log, 0 when there is none."""
+        with self.store.read() as conn:
+            row = conn.execute('SELECT MAX(seq) FROM crew_log WHERE author = ?', (author,)).fetchone()
+        return row[0] or 0
+
     def insert_received(self, envelope: bytes, signature: bytes) -> bool:
         """A received envelope: structure, signature, then INSERT OR IGNORE on (author, seq)."""
         env = ev.parse_envelope(envelope)

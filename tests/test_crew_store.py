@@ -448,6 +448,50 @@ def test_a_repeated_event_id_projects_the_same_in_every_order(tmp_path, friend, 
     assert dumps[0] == dumps[1]
 
 
+def _winner(tmp_path, friend, pair, label):
+    """Insert the sealed pair in both arrival orders; return the (identical) dump and both reads."""
+    results = []
+    for attempt, order in enumerate((pair, pair[::-1])):
+        s = Store(tmp_path / f"{label}{attempt}.db")
+        try:
+            crew_store = CrewStore(s)
+            for data, signature in order:
+                assert crew_store.insert_received(data, signature)
+            with s.read() as conn:
+                mapped = [r[0] for r in conn.execute("SELECT was_mapped FROM crew_body_reports")]
+                details = [r[0] for r in conn.execute("SELECT detail FROM crew_finds")]
+            results.append((dump(s), mapped, details))
+        finally:
+            s.close()
+    assert results[0] == results[1]
+    return results[0]
+
+
+@pytest.mark.parametrize("make", [
+    lambda at, flag, count: body("F9", at=at, body_id=4, mapped=flag),
+    lambda at, flag, count: bio_find("F9", at=at, count=count),
+], ids=["body", "find"])
+def test_two_seqs_at_the_same_time_resolve_the_same_in_both_orders(tmp_path, friend, make):
+    """Same id, same created_at: only the seq tells the reports apart, so it must be in the key."""
+    pair = [sealed(friend, make(ts(5), False, 2), 2), sealed(friend, make(ts(5), True, 5), 7)]
+    _winner(tmp_path, friend, pair, "tie")
+
+
+def test_the_seq_in_the_order_key_is_zero_padded(tmp_path, friend):
+    pair = [sealed(friend, body("F9", at=ts(5), body_id=4, mapped=False), 9),
+            sealed(friend, body("F9", at=ts(5), body_id=4, mapped=True), 10)]
+    _, mapped, _ = _winner(tmp_path, friend, pair, "pad")
+    assert mapped == [0]  # seq 9 sorts before seq 10 ("10" < "9" without padding)
+
+
+def test_the_smallest_report_key_wins_a_repeated_body_or_find(tmp_path, friend):
+    pairs = _duplicate_pairs(friend)
+    _, mapped, _ = _winner(tmp_path, friend, pairs["body"], "bodywin")
+    assert mapped == [0]  # the report at ts(1), not the later one at ts(40)
+    _, _, details = _winner(tmp_path, friend, pairs["find"], "findwin")
+    assert details == ['{"count":2}']
+
+
 def test_a_repeated_visit_counts_once(crew, friend):
     draft = visit("F9", at=ts(1))
     crew.insert_received(*sealed(friend, draft, 2))

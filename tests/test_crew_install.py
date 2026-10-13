@@ -1,5 +1,8 @@
 import ast
+import json
 import sqlite3
+import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +13,7 @@ from crew_helpers import ADDR, ts, visit
 from edmrn.ext import crew as crew_module
 from edmrn.ext import crew_events as ev
 from edmrn.ext.crew import Writer, install
+from edmrn.ext.crew_capture import replay
 from edmrn.ext.crew_identity import KeyRing
 from edmrn.ext.crew_status import IN_MAIN_SHIP
 from edmrn.ext.crew_store import CrewStore
@@ -163,6 +167,21 @@ def test_app_installs_crew_right_after_location():
     assert imports and imports[0].names[0].name == "install"
 
 
+def test_a_missing_cryptography_disables_crew_without_raising(store, tmp_path, monkeypatch, listeners):
+    import importlib
+    import edmrn.ext as ext_package
+    for name in [n for n in sys.modules if n.startswith(("edmrn.ext.crew", "cryptography."))]:
+        monkeypatch.delitem(sys.modules, name)
+        attribute = name.rpartition(".")[2]
+        if name.startswith("edmrn.ext.") and hasattr(ext_package, attribute):
+            monkeypatch.setattr(ext_package, attribute, getattr(ext_package, attribute))  # restored later
+    monkeypatch.setitem(sys.modules, "cryptography", None)
+    fresh = importlib.import_module("edmrn.ext.crew")
+    app = make_app(store, tmp_path / "journals")
+    assert fresh.install(app) is None
+    assert app.crew is None and listeners.journal == [] and listeners.status == []
+
+
 # --- writer -----------------------------------------------------------------------------
 
 def test_the_writer_takes_at_most_500_drafts_per_tick(store, tmp_path):
@@ -203,6 +222,37 @@ def test_queue_overflow_drops_the_oldest(store, tmp_path):
             ts(0, 2), ts(0, 3), ts(0, 4)]
 
 
+class LockedStore(CrewStore):
+    """Locked on every append; `during` runs first, like drafts arriving while the Tk loop waits."""
+
+    def __init__(self, store, during=None):
+        super().__init__(store)
+        self.during = during
+
+    def append_own(self, items):
+        if self.during is not None:
+            self.during()
+        raise sqlite3.OperationalError("database is locked")
+
+
+def test_a_requeue_past_the_cap_drops_the_oldest_and_keeps_the_newest(store, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(crew_module.logger, "warning", warnings.append)
+    holder = {}
+    locked = LockedStore(store, during=lambda: [holder["w"].enqueue(visit(at=ts(0, i), system=f"N{i}",
+                                                                          address=str(200 + i)))
+                                                 for i in range(3)])
+    writer, root = writer_for(store, tmp_path, locked)
+    holder["w"] = writer
+    writer.QUEUE_CAP = 5
+    for i in range(5):
+        writer.enqueue(visit(at=ts(0, i), system=f"O{i}", address=str(100 + i)))
+    assert writer.drain(5) == 0
+    assert [d.payload["system"] for d in writer._queue] == ["O3", "O4", "N0", "N1", "N2"]
+    assert writer._dropped == 3
+    assert len([w for w in warnings if "oldest drafts dropped" in w]) == 1
+
+
 def test_invalid_drafts_are_dropped_and_logged_once_per_kind(store, tmp_path, monkeypatch):
     warnings = []
     monkeypatch.setattr(crew_module.logger, "warning", warnings.append)
@@ -222,6 +272,105 @@ def test_a_broken_key_file_disables_only_that_commander(store, tmp_path):
     writer.enqueue(visit("F1", at=ts(1)))
     assert writer.drain() == 1
     assert broken.read_text(encoding="utf-8") == "garbage"
+
+
+# --- replay backpressure ----------------------------------------------------------------
+
+def _many_jumps(tmp_path, count):
+    journals = tmp_path / "journals"
+    journals.mkdir(exist_ok=True)
+    jumps = [event("FSDJump", ts(i // 60, i % 60), StarSystem=f"S{i}", SystemAddress=1000 + i,
+                   StarPos=[i, 0, 0]) for i in range(count)]
+    append_events(journal_file(journals, "2026-10-12T095800"), LOAD, *jumps)
+    return journals
+
+
+def test_a_blocking_replay_loses_no_draft_when_the_writer_drains_slowly(store, tmp_path):
+    journals = _many_jumps(tmp_path, 120)
+    writer, root = writer_for(store, tmp_path)
+    writer.QUEUE_CAP, writer.BATCH = 50, 10
+    writer.start()
+    thread = threading.Thread(target=replay, args=(str(journals), lambda d: writer.enqueue(d, block=True)))
+    thread.start()
+    deadline = time.monotonic() + 20
+    while thread.is_alive() and time.monotonic() < deadline:
+        writer.drain(writer.BATCH)
+        time.sleep(0.001)
+    thread.join(5)
+    assert not thread.is_alive()
+    writer.drain()
+    assert writer._dropped == 0
+    assert log_kinds(store) == ["visit"] * 120
+
+
+def test_the_startup_replay_enqueues_with_backpressure(tmp_path):
+    journals = _many_jumps(tmp_path, 3)
+    calls = []
+    writer = SimpleNamespace(enqueue=lambda draft, block=False: calls.append(block))
+    live = SimpleNamespace(seed=lambda state: None)
+    crew_module._startup_replay(str(journals), live, writer, crew_module.CrewStatus())
+    assert calls == [True, True, True]
+
+
+def test_a_blocking_enqueue_on_a_stopped_writer_returns_promptly(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    writer.QUEUE_CAP, writer.BATCH = 5, 1
+    started = time.monotonic()
+    for i in range(8):
+        writer.enqueue(visit(at=ts(0, i), address=str(100 + i)), block=True)
+    assert time.monotonic() - started < 2
+    assert writer.pending == 5 and writer._dropped == 3
+
+
+def test_stopping_the_writer_releases_a_blocked_enqueue(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    writer.QUEUE_CAP, writer.BATCH = 5, 1
+    writer.start()
+    for i in range(4):
+        writer.enqueue(visit(at=ts(0, i), address=str(100 + i)))
+    thread = threading.Thread(target=writer.enqueue, args=(visit(at=ts(0, 9), address="109"),),
+                              kwargs={"block": True})
+    thread.start()
+    time.sleep(0.2)
+    assert thread.is_alive()
+    writer.stop()
+    thread.join(0.3)  # woken by stop(), not by the 0.5 s poll
+    assert not thread.is_alive()
+
+
+def test_a_drain_wakes_a_blocked_enqueue_at_once(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    writer.QUEUE_CAP, writer.BATCH = 5, 1
+    writer.start()
+    for i in range(4):
+        writer.enqueue(visit(at=ts(0, i), address=str(100 + i)))
+    thread = threading.Thread(target=writer.enqueue, args=(visit(at=ts(0, 9), address="109"),),
+                              kwargs={"block": True})
+    thread.start()
+    time.sleep(0.1)
+    assert thread.is_alive()
+    writer.drain(2)
+    thread.join(0.25)
+    assert not thread.is_alive() and writer.pending == 3
+
+
+# --- high-water catch-up ----------------------------------------------------------------
+
+def test_the_writer_raises_a_stale_key_file_to_the_log_maximum(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    drafts = [visit("F1", at=ts(0, i), address=str(100 + i)) for i in range(2)]
+    for d in drafts:
+        writer.enqueue(d)
+    assert writer.drain() == 2
+    key_path = KeyRing(tmp_path / "keys").path_for("F1")
+    record = json.loads(key_path.read_text(encoding="utf-8"))
+    assert record["high_water"] == 2
+    record["high_water"] = 0
+    key_path.write_text(json.dumps(record), encoding="utf-8")
+    fresh, _ = writer_for(store, tmp_path)
+    fresh.enqueue(drafts[0])  # already logged: nothing is written, the catch-up alone must act
+    assert fresh.drain() == 0
+    assert json.loads(key_path.read_text(encoding="utf-8"))["high_water"] == 2
 
 
 # --- manual API -------------------------------------------------------------------------

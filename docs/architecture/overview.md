@@ -93,6 +93,9 @@ Invariant: `edmrn/ext/` code never tails journals. Live data comes only through
    ids mean it adds only what EDMRN missed.
    - The monitor reads the newest journal from its end and never sees that session's `LoadGame`.
      The live mapper therefore buffers events until the replay hands it its final state.
+   - The replay enqueues with backpressure: it waits while the queue is nearly full and the writer
+     runs, so a long replay is never cut by the cap. Live listeners and the manual API never wait.
+     Past the 10,000 cap the oldest drafts are dropped (newer ones may be manual entries).
 
 Invariants:
 - Only the writer (own events) and `CrewStore.insert_received` (received events) write `crew_log`.
@@ -106,4 +109,6 @@ Invariants:
   same tables from the log.
 - Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for
   that commander and is never replaced.
-- `app.crew` is `None` when the store is unusable (ADR-0004).
+- `app.crew` is `None` when the store is unusable (ADR-0004) or `cryptography` is not installed.
+- Before a commander's first write the writer raises the key file's high-water mark to the log's
+  highest seq, so a crash between log commit and key-file write cannot cause seq reuse.
