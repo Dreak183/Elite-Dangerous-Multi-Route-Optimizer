@@ -1,16 +1,21 @@
-"""Journal events to crew drafts (Spec A C5, C6, C11) and the manual entry builders.
+"""Journal events to crew drafts (Spec A C5, C6, C10, C11), the live listener, the startup replay and the manual entry builders.
 
 The mapper is a state machine over journal dicts: no I/O, no Tk, no threads. It never writes; its
 drafts go to the writer in crew.py. Field shapes: knowledge/exploration-events.md in the hub.
 """
 from __future__ import annotations
 
+import glob
 import hashlib
+import json
 import math
+import os
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from edmrn.ext import crew_events as ev
+from edmrn.ext.crew_status import CrewStatus
 from edmrn.logger import get_logger
 
 logger = get_logger('CrewCapture')
@@ -307,3 +312,115 @@ def note_revision(commander: str, note_id: str, system: Optional[str], address: 
     elif ev.stamp(created_at) is None:
         raise ev.PayloadError('created_at is not a UTC timestamp')
     return ev.Draft('note', commander, created_at, payload, event_id=ev.uuid7())
+
+
+# --- live capture and the startup replay (C10) -------------------------------------------
+
+Enqueue = Callable[[ev.Draft], None]
+
+
+class LiveCapture:
+    """The journal listener (monitor thread): maps live events and hands drafts on. Never writes.
+
+    The monitor reads the newest journal from its end, so the live mapper would not know the
+    commander. Events are buffered until the startup replay seeds the mapper (plan ruling 7);
+    deterministic ids remove what both saw.
+    """
+    BUFFER_LIMIT = 5000
+
+    def __init__(self, enqueue: Enqueue, status: Optional[CrewStatus] = None) -> None:
+        self.mapper = JournalMapper()
+        self._enqueue = enqueue
+        self._status = status
+        self._lock = threading.Lock()
+        self._seeded = False
+        self._buffer: list[dict] = []
+        self._overflow_logged = False
+
+    @property
+    def seeded(self) -> bool:
+        return self._seeded
+
+    def feed(self, event: Any) -> None:
+        if not isinstance(event, dict):
+            return
+        if self._status is not None:
+            self._status.feed(event)
+        with self._lock:
+            if not self._seeded:
+                if len(self._buffer) < self.BUFFER_LIMIT:
+                    self._buffer.append(event)
+                elif not self._overflow_logged:
+                    self._overflow_logged = True
+                    logger.warning('Crew capture buffer full before the startup replay finished')
+                return
+            drafts = self.mapper.map(event)
+        self._hand_on(drafts)
+
+    def seed(self, state: Optional[MapperState]) -> None:
+        with self._lock:
+            if self._seeded:
+                return
+            if state is not None:
+                self.mapper = JournalMapper(state)
+            drafts = []
+            for event in self._buffer:
+                drafts.extend(self.mapper.map(event))
+            self._buffer = []
+            self._seeded = True
+        self._hand_on(drafts)
+
+    def _hand_on(self, drafts: list[ev.Draft]) -> None:
+        for draft in drafts:
+            try:
+                self._enqueue(draft)
+            except Exception as e:
+                logger.error(f"Crew draft not queued: {e}")
+
+
+def _newest_journals(journal_dir: Optional[str], max_files: int) -> list[str]:
+    if not journal_dir or not os.path.isdir(journal_dir):
+        return []
+
+    def mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return 0.0
+
+    try:
+        files = glob.glob(os.path.join(journal_dir, 'Journal.*.log'))
+    except OSError as e:
+        logger.error(f"Crew replay could not list journals: {e}")
+        return []
+    return sorted(files, key=mtime, reverse=True)[:max_files]
+
+
+def replay(journal_dir: Optional[str], enqueue: Enqueue, status: Optional[CrewStatus] = None,
+           max_files: int = 5) -> Optional[MapperState]:
+    """Map the newest journal files, oldest first (C10); seed `status` only if newer."""
+    files = _newest_journals(journal_dir, max_files)
+    if not files:
+        return None
+    mapper = JournalMapper()
+    replayed = CrewStatus()
+    for path in reversed(files):
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    if '"event"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    replayed.feed(event)
+                    for draft in mapper.map(event):
+                        enqueue(draft)
+        except OSError as e:
+            logger.warning(f"Crew replay skipped {os.path.basename(path)}: {e}")
+    if status is not None:
+        status.adopt(replayed.state)
+    return mapper.snapshot()

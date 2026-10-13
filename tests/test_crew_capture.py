@@ -1,8 +1,15 @@
+import os
+
 import pytest
 
 from edmrn.ext import crew_events as ev
-from edmrn.ext.crew_capture import JournalMapper, MapperState, commander_key, find_revision, note_revision
-from journal_helpers import event
+from edmrn.ext.crew_capture import (JournalMapper, LiveCapture, MapperState, commander_key, find_revision,
+                                    note_revision, replay)
+from edmrn.ext.crew_identity import KeyRing
+from edmrn.ext.crew_status import CrewStatus
+from edmrn.ext.crew_store import CrewStore
+from edmrn.ext.store import Store
+from journal_helpers import append_events, event, journal_file
 
 SOL = 10477373803
 AUTHOR = "A" * 43
@@ -331,3 +338,168 @@ def test_manual_builders_reject_an_invalid_created_at():
         note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x", created_at="2026-10-12 10:00:00")
     ok = note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x", created_at="2026-10-12T10:00:00Z")
     assert ok.created_at == "2026-10-12T10:00:00Z"
+
+
+def test_live_events_before_seed_are_buffered_and_attributed():
+    queued = []
+    live = LiveCapture(queued.append)
+    live.feed(jump())
+    assert queued == [] and not live.seeded
+    live.seed(MapperState(commander="F100", commander_name="Jameson"))
+    assert live.seeded
+    assert [(d.kind, d.commander) for d in queued] == [("visit", "F100")]
+    live.feed(jump(system="Alpha", address=42, ts="2026-10-12T10:10:00Z"))
+    assert len(queued) == 2 and queued[1].payload["system"] == "Alpha"
+
+
+def test_a_loadgame_in_the_buffer_overrides_the_seed():
+    queued = []
+    live = LiveCapture(queued.append)
+    live.feed(event("LoadGame", Commander="Other", FID="F200"))
+    live.feed(jump())
+    live.seed(MapperState(commander="F100", commander_name="Jameson"))
+    assert [d.commander for d in queued] == ["F200"]
+
+
+def test_seed_without_a_state_maps_the_buffer_from_scratch():
+    queued = []
+    live = LiveCapture(queued.append)
+    live.feed(jump())
+    live.feed(LOAD)
+    live.feed(jump(ts="2026-10-12T10:01:00Z"))
+    live.seed(None)
+    assert [d.commander for d in queued] == ["F100"]
+
+
+def test_a_second_seed_changes_nothing():
+    queued = []
+    live = LiveCapture(queued.append)
+    live.seed(MapperState(commander="F100", commander_name="Jameson"))
+    live.seed(MapperState(commander="F200", commander_name="Other"))
+    live.feed(jump())
+    assert [d.commander for d in queued] == ["F100"]
+
+
+def test_the_buffer_is_bounded():
+    live = LiveCapture(lambda d: None)
+    for _ in range(LiveCapture.BUFFER_LIMIT + 10):
+        live.feed(jump())
+    assert len(live._buffer) == LiveCapture.BUFFER_LIMIT
+
+
+def test_status_is_fed_live_even_before_the_seed():
+    status = CrewStatus()
+    live = LiveCapture(lambda d: None, status)
+    live.feed(event("Loadout", "2026-10-12T10:00:00Z", Ship="sidewinder", HullHealth=1.0,
+                    FuelCapacity={"Main": 2.0, "Reserve": 0.3}))
+    assert status.state.ship == "sidewinder"
+
+
+def test_a_raising_enqueue_does_not_reach_the_monitor():
+    def refuse(draft):
+        raise RuntimeError("queue gone")
+
+    live = LiveCapture(refuse)
+    live.seed(MapperState(commander="F100", commander_name="Jameson"))
+    live.feed(jump())
+
+
+def write_journal(directory, stamp, mtime, *events):
+    directory.mkdir(exist_ok=True)
+    path = journal_file(directory, stamp)
+    append_events(path, *events)
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_replay_reads_the_newest_five_files_oldest_first(tmp_path):
+    journals = tmp_path / "journals"
+    for i in range(6):
+        write_journal(journals, f"2026-10-0{i + 1}T100000", 1_000_000 + i * 100, LOAD,
+                      jump(system=f"S{i}", address=100 + i, ts=f"2026-10-0{i + 1}T10:00:00Z"))
+    queued = []
+    state = replay(str(journals), queued.append)
+    assert [d.payload["system"] for d in queued] == ["S1", "S2", "S3", "S4", "S5"]
+    assert state.commander == "F100" and state.system == "S5"
+
+
+def test_replay_chooses_by_modification_time_not_by_name(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "220315152335", 2_000_000, LOAD, jump(system="Horizons"))
+    write_journal(journals, "2026-10-01T100000", 1_000_000, LOAD, jump(system="Odyssey"))
+    queued = []
+    replay(str(journals), queued.append, max_files=1)
+    assert [d.payload["system"] for d in queued] == ["Horizons"]
+
+
+def test_replay_seeds_the_status_from_the_startup_loadout(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD,
+                  event("Loadout", "2026-10-12T10:00:01Z", Ship="krait_light", HullHealth=0.9,
+                        FuelCapacity={"Main": 32.0, "Reserve": 0.63}))
+    status = CrewStatus()
+    replay(str(journals), lambda d: None, status)
+    assert status.state.ship == "krait_light" and status.state.hull == 0.9
+
+
+def test_replay_of_a_missing_folder_or_no_files_returns_none(tmp_path):
+    assert replay(str(tmp_path / "missing"), lambda d: None) is None
+    assert replay(str(tmp_path), lambda d: None) is None
+    assert replay(None, lambda d: None) is None
+
+
+def test_replay_skips_unreadable_files_and_bad_lines(tmp_path):
+    journals = tmp_path / "journals"
+    path = write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD)
+    (journals / "Journal.2026-10-12T090000.01.log").mkdir()
+    with open(path, "a", encoding="utf-8") as f:
+        f.write('{"event": broken\n["event"]\n')
+    append_events(path, jump())
+    queued = []
+    replay(str(journals), queued.append)
+    assert [d.kind for d in queued] == ["visit"]
+
+
+def _session(journals):
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD, jump(),
+                  event("FSSDiscoveryScan", "2026-10-12T10:00:30Z", Progress=0.5, BodyCount=1,
+                        NonBodyCount=0, SystemName="Sol", SystemAddress=SOL),
+                  planet(), event("FSSAllBodiesFound", "2026-10-12T10:02:00Z", SystemName="Sol",
+                                  SystemAddress=SOL, Count=1))
+
+
+def test_replaying_a_journal_twice_adds_no_envelope(tmp_path):
+    journals = tmp_path / "journals"
+    _session(journals)
+    store = Store(tmp_path / "edmrn.db")
+    ring = KeyRing(tmp_path / "crew_keys")
+    try:
+        crew = CrewStore(store)
+        for _ in range(2):
+            queued = []
+            replay(str(journals), queued.append)
+            crew.append_own([(ring.for_commander(d.commander), d) for d in queued])
+        with store.read() as conn:
+            assert conn.execute("SELECT kind FROM crew_log ORDER BY seq").fetchall() == [
+                ("visit",), ("honk",), ("body",), ("all_bodies",)]
+    finally:
+        store.close()
+
+
+def test_two_commanders_in_one_journal_sequence_give_two_authors(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD, jump(),
+                  event("LoadGame", "2026-10-12T11:00:00Z", Commander="Other", FID="F200"),
+                  jump(ts="2026-10-12T11:01:00Z"))
+    store = Store(tmp_path / "edmrn.db")
+    ring = KeyRing(tmp_path / "crew_keys")
+    try:
+        queued = []
+        replay(str(journals), queued.append)
+        CrewStore(store).append_own([(ring.for_commander(d.commander), d) for d in queued])
+        with store.read() as conn:
+            authors = conn.execute("SELECT DISTINCT author FROM crew_log").fetchall()
+        assert len(authors) == 2
+        assert len(list((tmp_path / "crew_keys").glob("cmdr-*.json"))) == 2
+    finally:
+        store.close()
