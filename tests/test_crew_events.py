@@ -462,6 +462,8 @@ def test_status_accepts_a_full_and_an_empty_status():
     {"hull": 1.5}, {"hull": True}, {"fuel_main": float("nan")}, {"fuel_main": 1e6},
     {"edsy_url": "https://evil.example/#/I=x"}, {"edsy_url": "https://edsy.org/#/I=" + "a" * 6000},
     {"paused": None}, {"commander": "a‮b"}, {"address": "007"},
+    {"edsy_url": "https://edsy.org/#/I=%0A%00"}, {"edsy_url": "https://edsy.org/#/I=ab%3Dc"},
+    {"edsy_url": "https://edsy.org/#/I=ab%3D%3D%3D"},
 ])
 def test_status_refuses_hostile_values(over):
     with pytest.raises(ev.PayloadError):
@@ -480,3 +482,19 @@ def test_load_json_refuses_duplicates_bom_nan_and_size():
         with pytest.raises(ev.EnvelopeError):
             ev.load_json(data, 10 if data == b"x" * 20 else 1000, "thing")
     assert ev.load_json(b'{"a":1}', 100, "thing") == {"a": 1}
+
+def test_status_accepts_the_link_crew_status_produces():
+    from edmrn.ext.crew_status import edsy_url
+    loadout = {"event": "Loadout", "Ship": "krait_light", "ShipName": "Wanderer", "Modules": [{"Slot": "a"}]}
+    link = edsy_url(loadout)
+    ev.validate_status(status(edsy_url=link))
+    ev.validate_status(status(edsy_url=edsy_url({"event": "Loadout", "x": "yy"})))
+
+
+def test_one_bounded_number_predicate_and_one_max_tons():
+    from edmrn.ext import crew_status
+    assert crew_status.MAX_TONS is ev.MAX_TONS
+    assert not hasattr(crew_status, "_number")
+    assert ev.bounded_number(5, 10) == 5.0
+    for bad in (True, "5", float("nan"), -1, 11, 10 ** 400):
+        assert ev.bounded_number(bad, 10) is None

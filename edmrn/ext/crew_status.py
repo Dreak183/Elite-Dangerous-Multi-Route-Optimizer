@@ -9,19 +9,17 @@ from __future__ import annotations
 import base64
 import gzip
 import json
-import math
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
-from edmrn.ext.crew_events import stamp
+from edmrn.ext.crew_events import MAX_TONS, bounded_number, stamp
 from edmrn.logger import get_logger
 
 logger = get_logger('CrewStatus')
 
 EDSY_IMPORT_URL = 'https://edsy.org/#/I='
 IN_MAIN_SHIP = 1 << 24
-MAX_TONS = 1e5
 _SHIP_FIELDS = ('ship', 'ship_name', 'ship_ident', 'edsy_url', 'fuel_capacity_main',
                 'fuel_capacity_reserve')
 
@@ -56,16 +54,6 @@ def _str(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
-def _number(value: Any, high: float) -> Optional[float]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except OverflowError:
-        return None
-    return number if math.isfinite(number) and 0.0 <= number <= high else None
-
-
 def _repairs_hull(event: dict) -> bool:
     items = []
     if isinstance(event.get('Item'), str):
@@ -86,14 +74,14 @@ def apply_journal(state: ShipStatus, event: dict) -> ShipStatus:
         return replace(state, commander=commander)
     if name == 'Loadout':
         capacity = event.get('FuelCapacity') if isinstance(event.get('FuelCapacity'), dict) else {}
-        hull = _number(event.get('HullHealth'), 1.0)
+        hull = bounded_number(event.get('HullHealth'), 1.0)
         return replace(state, ship=_str(event.get('Ship')), ship_name=_str(event.get('ShipName')),
                        ship_ident=_str(event.get('ShipIdent')), edsy_url=edsy_url(event),
                        hull=state.hull if hull is None else hull,
-                       fuel_capacity_main=_number(capacity.get('Main'), MAX_TONS),
-                       fuel_capacity_reserve=_number(capacity.get('Reserve'), MAX_TONS))
+                       fuel_capacity_main=bounded_number(capacity.get('Main'), MAX_TONS),
+                       fuel_capacity_reserve=bounded_number(capacity.get('Reserve'), MAX_TONS))
     if name == 'HullDamage':
-        health = _number(event.get('Health'), 1.0)
+        health = bounded_number(event.get('Health'), 1.0)
         if event.get('Fighter') is True or health is None:
             return state
         return replace(state, hull=health)
@@ -109,8 +97,8 @@ def apply_status(state: ShipStatus, status: dict) -> ShipStatus:
     fuel = status.get('Fuel')
     if not isinstance(fuel, dict):
         return state
-    main = _number(fuel.get('FuelMain'), MAX_TONS)
-    reserve = _number(fuel.get('FuelReservoir'), MAX_TONS)
+    main = bounded_number(fuel.get('FuelMain'), MAX_TONS)
+    reserve = bounded_number(fuel.get('FuelReservoir'), MAX_TONS)
     return replace(state, fuel_main=state.fuel_main if main is None else main,
                    fuel_reserve=state.fuel_reserve if reserve is None else reserve)
 

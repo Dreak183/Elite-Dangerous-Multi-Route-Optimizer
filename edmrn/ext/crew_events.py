@@ -384,25 +384,32 @@ def _edsy(value: Any, path: str) -> None:
     # crew_status imports this module, so its prefix (C18) is read at call time, not import time.
     from edmrn.ext.crew_status import EDSY_IMPORT_URL
     if (not isinstance(value, str) or len(value) > EDSY_MAX
-            or not re.fullmatch(re.escape(EDSY_IMPORT_URL) + r'[A-Za-z0-9_%-]+', value)):
+            or not re.fullmatch(re.escape(EDSY_IMPORT_URL) + r'[A-Za-z0-9_-]+(?:%3D){0,2}', value)):
         raise PayloadError(f'{path} must be an EDSY import link of at most {EDSY_MAX} characters')
+
+
+MAX_TONS = 1e5
+
+
+def bounded_number(value: Any, high: float) -> Optional[float]:
+    """The value as a float if it is a finite, non-bool number from 0 to `high`, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) and 0.0 <= number <= high else None
 
 
 def _bounded(high: float) -> Checker:
     def check(value: Any, path: str) -> None:
-        message = f'{path} must be a number from 0 to {high:g}'
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise PayloadError(message)
-        try:
-            number = float(value)
-        except OverflowError:
-            raise PayloadError(message) from None
-        if not (math.isfinite(number) and 0.0 <= number <= high):
-            raise PayloadError(message)
+        if bounded_number(value, high) is None:
+            raise PayloadError(f'{path} must be a number from 0 to {high:g}')
     return check
 
 
-_TONS = _nullable(_bounded(1e5))
+_TONS = _nullable(_bounded(MAX_TONS))
 _STATUS = _object({
     'commander': _NAME_OR_NULL, 'system': _NAME_OR_NULL, 'address': _nullable(_address),
     'coords': _nullable(_coords), 'ship': _NAME_OR_NULL, 'ship_name': _NAME_OR_NULL,

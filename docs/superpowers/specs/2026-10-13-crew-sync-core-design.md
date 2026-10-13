@@ -191,8 +191,8 @@ the next day.
 - S8. **Status.** `st` carries canonical bytes of `{"author", "at", "status"}`, signed by the
   author, at most 8 KiB.
   - `status` holds commander, system, address, coordinates, ship type, name and ident, EDSY link,
-    hull, fuel main and reservoir, fuel capacities and `paused`. Each field may be null; the
-    validator follows C12 and S10, and the EDSY link may be at most 6,000 characters and must start
+    hull, fuel main and reservoir, fuel capacities and `paused`. Every field except
+    `paused` (a boolean) may be null; the validator follows C12 and S10, and the EDSY link may be at most 6,000 characters and must start
     with Spec A's EDSY prefix.
   - The client sends a status when a value changed, at most every 30 s, and only for the member
     author's commander. A status for a different active commander is never sent.
