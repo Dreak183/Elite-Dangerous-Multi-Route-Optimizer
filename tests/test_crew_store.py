@@ -72,7 +72,7 @@ def test_version_1_database_migrates_and_keeps_neutron_routes(tmp_path):
 def test_transaction_rolls_back_on_error(store):
     with pytest.raises(RuntimeError):
         with store.transaction() as conn:
-            conn.execute("INSERT INTO crew_projected (event_id) VALUES ('x')")
+            conn.execute("INSERT INTO crew_projected (author, event_id) VALUES ('a', 'x')")
             raise RuntimeError("boom")
     assert projected_count(store) == 0
 
@@ -186,3 +186,44 @@ def test_received_invalid_payload_is_stored_not_projected(crew, store, friend):
                                                 "coords": None}, event_id="0" * 32)
     assert crew.insert_received(*sealed(friend, hostile, 1)) is True
     assert projected_count(store) == 0
+
+
+# --- event ids are bound to their author ------------------------------------------------
+
+def test_squatted_deterministic_id_is_not_projected_and_does_not_block_the_owner(crew, store, ring, tmp_path):
+    me = ring.for_commander("F1")
+    mallory = KeyRing(tmp_path / "mallory").for_commander("F7")
+    draft = visit()
+    my_id = draft.resolve_id(me.author)
+    env = ev.build_envelope(my_id, mallory.author, 1, "visit", draft.created_at, draft.payload)
+    assert crew.insert_received(*ev.seal(env, mallory.sign)) is True
+    assert projected_count(store) == 0
+    assert crew.append_own([(me, visit())]) == 1
+    assert projected_count(store) == 1
+
+
+def test_manual_event_with_a_non_uuid7_id_is_stored_not_projected(crew, store, friend):
+    bad = ev.Draft("note", "F9", ts(0), note(cmdr="F9").payload, event_id="0" * 32)
+    assert crew.insert_received(*sealed(friend, bad, 1)) is True
+    assert projected_count(store) == 0
+
+
+def test_note_copied_by_another_author_is_projected_for_both(crew, store, friend, tmp_path):
+    other = KeyRing(tmp_path / "other").for_commander("F8")
+    original = note(cmdr="F9")
+    crew.insert_received(*sealed(friend, original, 1))
+    crew.insert_received(*sealed(other, original, 1))
+    assert projected_count(store) == 2
+
+
+def test_unusable_key_file_after_commit_is_logged_not_raised(crew, store, ring):
+    ident = ring.for_commander("F1")
+    ident.path.write_text("garbage", encoding="utf-8")
+    assert crew.append_own([(ident, visit())]) == 1
+    assert len(log_rows(store)) == 1
+
+
+def test_own_events_are_projected(crew, ring, store):
+    ident = ring.for_commander("F1")
+    crew.append_own([(ident, visit()), (ident, honk(at=ts(1))), (ident, all_bodies(at=ts(2)))])
+    assert projected_count(store) == 3

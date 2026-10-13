@@ -52,7 +52,7 @@ MIGRATIONS: list[list[str]] = [
             PRIMARY KEY (author, seq)
         )""",
         "CREATE INDEX crew_log_event_id ON crew_log (event_id)",
-        "CREATE TABLE crew_projected (event_id TEXT PRIMARY KEY)",
+        "CREATE TABLE crew_projected (author TEXT NOT NULL, event_id TEXT NOT NULL, PRIMARY KEY (author, event_id))",
         """CREATE TABLE crew_systems (
             address        TEXT PRIMARY KEY,
             name           TEXT,

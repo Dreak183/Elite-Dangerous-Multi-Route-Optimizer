@@ -44,8 +44,17 @@ def _project(conn: sqlite3.Connection, env: dict) -> None:
     except ev.PayloadError as e:
         logger.warning(f"Crew event {env['event_id']} kept unprojected: {e}")
         return
-    if conn.execute('INSERT OR IGNORE INTO crew_projected (event_id) VALUES (?)',
-                    (env['event_id'],)).rowcount == 0:
+    key = ev.natural_key(kind, env['created_at'], env['payload'])
+    if key is not None:
+        bound = env['event_id'] == ev.deterministic_id(env['author'], kind, *key)
+    else:
+        bound = ev.is_uuid7(env['event_id'])
+    if not bound:
+        logger.warning(f"Crew event {env['event_id']} kept unprojected: "
+                       'event_id does not match its author and key')
+        return
+    if conn.execute('INSERT OR IGNORE INTO crew_projected (author, event_id) VALUES (?, ?)',
+                    (env['author'], env['event_id'])).rowcount == 0:
         return
     projector = _PROJECTORS.get(kind)
     if projector is not None:
@@ -64,8 +73,8 @@ class CrewStore:
             for identity, draft in items:
                 ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
                 event_id = draft.resolve_id(identity.author)
-                if conn.execute('SELECT 1 FROM crew_log WHERE event_id = ? LIMIT 1',
-                                (event_id,)).fetchone():
+                if conn.execute('SELECT 1 FROM crew_log WHERE author = ? AND event_id = ? LIMIT 1',
+                                (identity.author, event_id)).fetchone():
                     continue
                 if identity.author in allocated:
                     last = allocated[identity.author][1]
