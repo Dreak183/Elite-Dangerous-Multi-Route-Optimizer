@@ -105,7 +105,8 @@ def test_parse_err_unhashable_code_and_seq_bounds(me):
     for code in ([], {}, 5, None):
         assert proto.parse_err({"t": "err", "code": code}) == ("unknown", None, None)
     for seq in (-1, 2**53, True):
-        assert proto.parse_err({"t": "err", "code": "rate", "author": me.author, "seq": seq}) == ("rate", None, None)
+        assert proto.parse_err({"t": "err", "code": "rate", "author": me.author, "seq": seq}) == ("rate", me.author, None)
+    assert proto.parse_err({"t": "err", "code": "quota", "author": me.author}) == ("quota", me.author, None)
     assert proto.parse_err({"t": "err", "code": "rate", "author": "B" * 43, "seq": 1}) == ("rate", None, None)
 
 

@@ -1,4 +1,5 @@
-"""A scripted relay socket for crew sync tests: no threads, no network.
+"""A scripted relay socket for crew sync tests: no network. FakeSocket needs no threads;
+BlockingSocket and the slow-close sockets are for the few tests that run the sync thread.
 
 `FakeSocket.recv` hands out queued frames; when the queue is empty it raises SocketClosed(1006), so
 CrewSync.connect_once() returns in the test thread. `on_send(sock, frame)` may queue replies;

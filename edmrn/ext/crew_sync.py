@@ -114,7 +114,12 @@ class CrewBoard:
 
 
 class Inbox:
-    """Received envelopes waiting for the Tk loop (S19); the writer's pattern from Spec A."""
+    """Received envelopes waiting for the Tk loop (S19); the writer's pattern from Spec A.
+
+    Start order: inbox before sync. Stop order: sync before inbox, so nothing is put into an inbox
+    nobody drains. A put into a stopped inbox (or by a stopping sync) keeps at most CAP items and
+    drops the rest with a warning; the next session's `have` fetches them again.
+    """
 
     INTERVAL_MS = 250
     BATCH = 200
@@ -139,6 +144,12 @@ class Inbox:
         with self._space:
             while self._running and len(self._queue) >= self.CAP and not stop.is_set():
                 self._space.wait(0.5)
+            if not self._running or stop.is_set():  # nobody may drain: stay bounded
+                room = max(0, self.CAP - len(self._queue))
+                if len(items) > room:
+                    logger.warning(f'Crew inbox is full and not draining; dropped {len(items) - room} '
+                                   f'received envelopes')
+                    items = items[:room]
             self._queue.extend(items)
 
     def start(self) -> None:
@@ -177,12 +188,8 @@ class Inbox:
         try:
             result = self._crew_store.insert_received_batch(batch)
         except sqlite3.OperationalError as e:
-            if any(word in str(e).lower() for word in ('locked', 'busy')):
-                with self._lock:
-                    self._queue.extendleft(reversed(batch))
-                if not self._locked:
-                    self._locked = True
-                    logger.warning(f'Crew store is locked ({e}); {len(batch)} received envelopes wait')
+            if self._is_locked(e):
+                self._requeue(batch, e)
                 return 0
             return self._one_by_one(batch, e)
         except Exception as e:
@@ -197,24 +204,43 @@ class Inbox:
     def _one_by_one(self, batch: list, error: Exception) -> int:
         logger.warning(f'Crew inbox batch of {len(batch)} failed ({error}); retrying one by one')
         inserted = 0
-        for item in batch:
+        for index, item in enumerate(batch):
             try:
                 inserted += self._crew_store.insert_received_batch([item]).inserted
+            except sqlite3.OperationalError as e:
+                if self._is_locked(e):  # transient: keep this item and the rest, in order
+                    self._requeue(batch[index:], e)
+                    return inserted
+                logger.error(f'Crew received envelope dropped: {e}')
             except Exception as e:
                 logger.error(f'Crew received envelope dropped: {e}')
         return inserted
+
+    @staticmethod
+    def _is_locked(error: Exception) -> bool:
+        return any(word in str(error).lower() for word in ('locked', 'busy'))
+
+    def _requeue(self, items: list, error: Exception) -> None:
+        with self._lock:
+            self._queue.extendleft(reversed(items))
+        if not self._locked:
+            self._locked = True
+            logger.warning(f'Crew store is locked ({error}); {len(items)} received envelopes wait')
 
 
 class _Session:
     """One connection: hello, auth, have, then frames until the socket closes or sync stops."""
 
-    def __init__(self, sync: 'CrewSync', ws: Any) -> None:
+    def __init__(self, sync: 'CrewSync', ws: Any, stop: Any) -> None:
         self.sync = sync
         self.ws = ws
+        self.stop = stop
+        self.live_at: Optional[float] = None
         self.relay_heads: Optional[dict] = None
         self.received: dict[str, int] = {}
         self.blocked: set[str] = set()
         self.daily_blocked: set[str] = set()
+        self.unknown_seq: set[str] = set()
         self.logged: set[str] = set()
         self.reached_live = False
         self.last_flush = float('-inf')
@@ -246,8 +272,8 @@ class _Session:
             join = store.roster_envelope(identity.author, 'join', config.group_id)
         self.send(proto.auth_frame(config.group_id, identity.author, signature, genesis, join))
         self.send(proto.have_frame(store.heads()))
-        sync._set_state('syncing')
-        while not sync._stop.is_set():
+        sync._set_state('syncing', stop=self.stop)
+        while not self.stop.is_set():
             try:
                 text = self.ws.recv(sync.RECV_TIMEOUT)
             except TimeoutError:
@@ -265,16 +291,19 @@ class _Session:
             else:  # a fresh have after an admission (S7): keep what this session already sent
                 for author, seq in heads.items():
                     self.relay_heads[author] = max(seq, self.relay_heads.get(author, 0))
-            for author, seq in self.received.items():
-                self.relay_heads[author] = max(seq, self.relay_heads.get(author, 0))
+            for author, seq in self.received.items():  # S7: only listed authors are uploaded
+                if author in self.relay_heads:
+                    self.relay_heads[author] = max(seq, self.relay_heads[author])
             self.upload()
         elif kind == 'evs':
             items = proto.parse_evs(frame)
             self.note_received(items)
-            self.sync._inbox.put(items, self.sync._stop)
+            self.sync._inbox.put(items, self.stop)
         elif kind == 'synced':
+            if not self.reached_live:
+                self.live_at = self.sync._clock()
             self.reached_live = True
-            self.sync._set_state('live')
+            self.sync._set_state('live', stop=self.stop)
         elif kind == 'st':
             self.receive_status(frame)
         elif kind == 'err':
@@ -285,6 +314,13 @@ class _Session:
                 self.blocked.add(author)
                 if code in _DAILY_ERRORS:
                     self.daily_blocked.add(author)
+                if seq is not None and self.relay_heads is not None:
+                    # The relay refused seq: its head stays before the hole (S7), so the envelopes
+                    # sent optimistically are offered again once the block lifts.
+                    held = self.relay_heads.get(author, 0)
+                    self.relay_heads[author] = min(held, max(seq - 1, 0))
+                elif seq is None:
+                    self.unknown_seq.add(author)
 
     def note_received(self, items: list) -> None:
         """The relay holds what it forwards (S1): advance its head so uploads do not echo it back."""
@@ -295,8 +331,8 @@ class _Session:
                 continue  # the inbox's store judges it; here it only matters for bookkeeping
             author, seq = env['author'], env['seq']
             self.received[author] = max(seq, self.received.get(author, 0))
-            if self.relay_heads is not None:
-                self.relay_heads[author] = max(seq, self.relay_heads.get(author, 0))
+            if self.relay_heads is not None and author in self.relay_heads:
+                self.relay_heads[author] = max(seq, self.relay_heads[author])
 
     def tick(self) -> None:
         if self.relay_heads is None:
@@ -306,6 +342,10 @@ class _Session:
         day = sync._wall()[:10]
         if day != self.day:  # S11: quota refusals are per UTC day
             self.day = day
+            if self.daily_blocked & self.unknown_seq:
+                # The refused seq is unknown, so our idea of the relay head may be too high: end
+                # the session; the next have is authoritative.
+                raise SocketClosed(None, 'resync after a quota refusal without a seq')
             if self.daily_blocked:
                 self.blocked -= self.daily_blocked
                 self.daily_blocked.clear()
@@ -329,7 +369,7 @@ class _Session:
             if author in self.blocked or (sync._paused and author == member):
                 continue
             head = self.relay_heads[author]
-            while local.get(author, 0) > head and not sync._stop.is_set():
+            while local.get(author, 0) > head and not self.stop.is_set():
                 rows = sync._store.envelopes_after(author, head, proto.MAX_EVS_ITEMS)
                 if not rows:
                     break
@@ -356,7 +396,7 @@ class _Session:
 
 
 class CrewSync:
-    RECV_TIMEOUT = 1.0
+    RECV_TIMEOUT = 0.25  # also how soon a run notices stop()
     HELLO_TIMEOUT = 10.0
     FLUSH_INTERVAL = 5.0
     STATUS_INTERVAL = 30.0
@@ -364,6 +404,7 @@ class CrewSync:
     BACKOFF_MAX = 300.0
     REPLACED_WAIT = 60.0
     JITTER = 0.2
+    MIN_LIVE = 30.0  # a session shorter than this does not reset the backoff
 
     def __init__(self, crew_store: Any, config: GroupConfig, identity: Any, inbox: Inbox,
                  board: CrewBoard, status_source: Callable[[], Optional[dict]], *,
@@ -386,7 +427,7 @@ class CrewSync:
         self._flush_requested = False
         self._stop: Any = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._ws: Any = None
+        self._live_seconds = 0.0
         self._observers: list = []
         self.state = 'stopped'
         self.last_error: Optional[str] = None
@@ -396,22 +437,26 @@ class CrewSync:
         return self._paused
 
     def subscribe(self, observer: Callable[[str, Optional[str]], None]) -> None:
+        """Observers run on the sync thread, not the Tk thread: marshal before touching widgets."""
         self._observers.append(observer)
 
     def start(self) -> None:
-        if self._thread is not None and self._thread.is_alive():
+        """Start a run. Safe after a `stop()` whose thread is still winding down: every run has its
+        own stop event, and a superseded run no longer touches the shared state."""
+        if self._thread is not None and self._thread.is_alive() and not self._stop.is_set():
             return
-        self._stop.clear()
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name='edmrn-crew-sync', daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 0.5) -> None:
+        """Ask the run to end. No closing handshake happens on the caller's thread: the session
+        closes its own socket when its loop sees the event (within RECV_TIMEOUT)."""
         self._stop.set()
-        ws = self._ws
-        if ws is not None:
-            ws.close(1000, 'bye')
         if self._thread is not None:
             self._thread.join(timeout)
+        if self.state != 'refused':
+            self._set_state('stopped')
 
     def set_paused(self, paused: bool) -> None:
         self._paused = bool(paused)
@@ -424,7 +469,9 @@ class CrewSync:
         """Upload at the live session's next tick instead of waiting out the flush interval (B4)."""
         self._flush_requested = True
 
-    def _set_state(self, state: str, error: Optional[str] = None) -> None:
+    def _set_state(self, state: str, error: Optional[str] = None, stop: Any = None) -> None:
+        if stop is not None and stop is not self._stop:
+            return  # a superseded run
         self.state = state
         if error is not None:
             self.last_error = error
@@ -434,56 +481,65 @@ class CrewSync:
             except Exception as e:
                 logger.error(f'Crew sync observer failed: {e}')
 
-    def _note(self, message: str) -> None:
+    def _note(self, message: str, stop: Any = None) -> None:
+        if stop is not None and stop is not self._stop:
+            return
         self.last_error = message
         logger.info(f'Crew sync: {message}')
 
     def _run(self) -> None:
+        stop = self._stop
         delay = self.BACKOFF_FIRST
-        while not self._stop.is_set():
-            self._set_state('connecting')
-            outcome = self.connect_once()
-            if outcome == 'refused' or self._stop.is_set():
+        while not stop.is_set():
+            self._set_state('connecting', stop=stop)
+            outcome = self.connect_once(stop)
+            if outcome == 'refused' or stop.is_set():
                 break
-            if outcome == 'live':
+            stable = outcome == 'live' and self._live_seconds >= self.MIN_LIVE
+            if stable:
                 delay = self.BACKOFF_FIRST
             if outcome == 'replaced':
                 wait = self.REPLACED_WAIT
             else:
                 wait = delay * (1 + self.JITTER * (2 * self._rand() - 1))
-            self._set_state('waiting')
-            if self._stop.wait(wait):
+            self._set_state('waiting', stop=stop)
+            if stop.wait(wait):
                 break
-            if outcome not in ('live', 'replaced'):
+            if outcome != 'replaced' and not stable:  # a session that dies young is a failure
                 delay = min(delay * 2, self.BACKOFF_MAX)
         if self.state != 'refused':
-            self._set_state('stopped')
+            self._set_state('stopped', stop=stop)
 
-    def connect_once(self) -> str:
+    def connect_once(self, stop: Any = None) -> str:
         """One connection attempt: 'live', 'failed', 'replaced' or 'refused' (S9)."""
+        stop = stop if stop is not None else self._stop
+        self._live_seconds = 0.0
         try:
             ws = self._connect(connection_url(self._config.url, self._config.group_id))
         except Exception as e:
-            self._note(f'cannot reach the relay: {e}')
+            self._note(f'cannot reach the relay: {e}', stop)
             return 'failed'
-        self._ws = ws
-        session = _Session(self, ws)
+        if stop.is_set():  # stopped or superseded while connecting
+            ws.close()
+            return 'failed'
+        session = _Session(self, ws, stop)
         try:
             session.run()
         except SocketClosed as e:
             if e.code in (proto.CLOSE_BAD_AUTH, proto.CLOSE_FORBIDDEN):
-                self._set_state('refused', f'The relay refused this member ({e.reason or e.code}).')
+                self._set_state('refused', f'The relay refused this member ({e.reason or e.code}).', stop)
                 return 'refused'
             if e.code == proto.CLOSE_REPLACED:
-                self._note('another EDMRN with this commander took over the connection')
+                self._note('another EDMRN with this commander took over the connection', stop)
                 return 'replaced'
-            self._note(f'the connection closed ({e.code})')
+            self._note(f'the connection closed ({e.code})', stop)
         except (proto.FrameError, TimeoutError, OSError) as e:
-            self._note(f'the connection failed: {e}')
+            self._note(f'the connection failed: {e}', stop)
         except Exception as e:  # S13: nothing escapes the thread; backoff continues
             logger.exception('Crew sync session failed unexpectedly')
-            self._note(f'unexpected {type(e).__name__} in the connection')
+            self._note(f'unexpected {type(e).__name__} in the connection', stop)
         finally:
-            self._ws = None
+            if session.live_at is not None:
+                self._live_seconds = self._clock() - session.live_at
             ws.close()
         return 'live' if session.reached_live else 'failed'

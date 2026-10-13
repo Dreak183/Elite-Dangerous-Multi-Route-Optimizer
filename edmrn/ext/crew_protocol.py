@@ -188,7 +188,8 @@ def parse_err(frame: dict) -> tuple:
     if not isinstance(code, str) or code not in ERROR_CODES:
         return 'unknown', None, None
     author, seq = frame.get('author'), frame.get('seq')
-    if (not _author(author) or isinstance(seq, bool) or not isinstance(seq, int)
-            or not 0 <= seq <= ev.MAX_SAFE_INT):
+    if not _author(author):
         return code, None, None
+    if isinstance(seq, bool) or not isinstance(seq, int) or not 0 <= seq <= ev.MAX_SAFE_INT:
+        return code, author, None  # a valid author still blocks; the caller resyncs without a seq
     return code, author, seq

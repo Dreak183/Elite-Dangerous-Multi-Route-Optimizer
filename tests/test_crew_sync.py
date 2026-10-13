@@ -1,6 +1,7 @@
 import itertools
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -71,6 +72,10 @@ def stepping_clock():
 def own_visits(crew, me, count):
     crew.insert_received_batch([sealed(me, visit(at=f"2026-10-13T09:{n // 60:02d}:{n % 60:02d}Z",
                                                  address=str(n)), n) for n in range(1, count + 1)])
+
+
+def uploaded_frame(frame):
+    return [(env["author"], env["seq"]) for env in (ev.parse_envelope(d) for d, _ in proto.parse_evs(frame))]
 
 
 def uploaded(sock):
@@ -182,27 +187,44 @@ def test_an_error_for_an_author_stops_its_uploads_for_the_connection(crew, me):
     assert sock.sent_of("evs") == []
 
 
-def test_a_quota_block_lifts_when_the_utc_day_changes(crew, me):
-    # S11 (ruling): refused envelopes are offered again after 00:00 UTC on a long-lived connection.
+def quota_run(crew, me, seq):
+    """Own 1..3 are uploaded and the relay answers `err quota` to that evs; the day then changes
+    and own 4 is created. Returns (socket, sync, connect_once outcome)."""
     own_visits(crew, me, 3)
-    day = {"stamp": "2026-10-13T23:59:00Z", "n": 0, "evs_before": None}
+    day = {"stamp": "2026-10-13T23:59:00Z", "n": 0}
 
     def on_send(sock, frame):
         if frame["t"] == "auth":
-            sock.push({"t": "err", "code": "quota", "author": me.author, "seq": 1})
             sock.push({"t": "have", "heads": {me.author: 0}})
+        elif frame["t"] == "evs" and len(sock.sent_of("evs")) == 1:
+            err = {"t": "err", "code": "quota", "author": me.author}
+            if seq is not None:
+                err["seq"] = seq
+            sock.push(err)
 
     def on_recv(sock):
         day["n"] += 1
         if day["n"] == 5:
-            day["evs_before"] = len(sock.sent_of("evs"))
             day["stamp"] = "2026-10-14T00:00:01Z"
-        if day["n"] <= 6:
+            crew.insert_received_batch([sealed(me, visit(at="2026-10-14T00:00:00Z", address="4"), 4)])
+        if day["n"] <= 7 and not sock.incoming:
             sock.push({"t": "synced"})
     sock = FakeSocket(on_send, [hello()], on_recv)
-    make_sync(crew, me, sock, clock=stepping_clock(), wall=lambda: day["stamp"])[0].connect_once()
-    assert day["evs_before"] == 0
-    assert [seq for _, seq in uploaded(sock)] == [1, 2, 3]
+    sync, _ = make_sync(crew, me, sock, clock=stepping_clock(), wall=lambda: day["stamp"])
+    return sock, sync, sync.connect_once()
+
+
+def test_a_quota_block_lifts_at_the_day_change_and_resends_the_refused_envelopes(crew, me):
+    # S11 + S7: the refused envelopes 1..3 are offered again, before 4, so the relay never has a gap.
+    sock, _, _ = quota_run(crew, me, seq=1)
+    batches = [[seq for _, seq in uploaded_frame(f)] for f in sock.sent_of("evs")]
+    assert batches == [[1, 2, 3], [1, 2, 3, 4]]
+
+
+def test_a_quota_refusal_without_a_seq_ends_the_session_at_the_day_change(crew, me):
+    sock, sync, outcome = quota_run(crew, me, seq=None)
+    assert [seq for _, seq in uploaded(sock)] == [1, 2, 3]  # 4 is never sent across the unknown hole
+    assert outcome == "live" and "closed" in sync.last_error
 
 
 def test_a_non_quota_block_survives_the_day_change(crew, me):
@@ -218,7 +240,7 @@ def test_a_non_quota_block_survives_the_day_change(crew, me):
         day["n"] += 1
         if day["n"] == 5:
             day["stamp"] = "2026-10-14T00:00:01Z"
-        if day["n"] <= 6:
+        if day["n"] <= 7 and not sock.incoming:
             sock.push({"t": "synced"})
     sock = FakeSocket(on_send, [hello()], on_recv)
     make_sync(crew, me, sock, clock=stepping_clock(), wall=lambda: day["stamp"])[0].connect_once()
@@ -342,14 +364,41 @@ def test_a_full_inbox_holds_the_sync_thread_until_the_tk_loop_drains(crew, frien
     assert inbox.pending == 2
 
 
-def test_a_stopping_sync_is_not_held_by_a_full_inbox(crew, friend):
+def test_a_stopping_sync_is_not_held_by_a_full_inbox_and_the_queue_stays_bounded(crew, friend):
     inbox = Inbox(crew, Root())
     inbox.CAP = 1
     inbox.start()
     stop = threading.Event()
     stop.set()
     inbox.put([sealed(friend, visit(address=str(n)), n) for n in (1, 2)], stop)
+    assert inbox.pending == 1
+
+
+def test_a_stopped_inbox_stays_bounded(crew, friend):
+    inbox = Inbox(crew, Root())  # never started: nobody drains
+    inbox.CAP = 2
+    inbox.put([sealed(friend, visit(address=str(n)), n) for n in range(1, 5)], threading.Event())
     assert inbox.pending == 2
+
+
+def test_a_lock_during_the_one_by_one_retry_requeues_the_rest_in_order():
+    class Flaky:
+        def __init__(self):
+            self.stored, self.locked_once = [], False
+
+        def insert_received_batch(self, items):
+            if len(items) > 1:
+                raise ValueError("boom")
+            if items[0] == "b" and not self.locked_once:
+                self.locked_once = True
+                raise sqlite3.OperationalError("database is locked")
+            self.stored.append(items[0])
+            return type("R", (), {"inserted": 1, "rejected": []})()
+    flaky = Flaky()
+    inbox = Inbox(flaky, Root())
+    inbox._queue.extend(["a", "b", "c"])
+    assert inbox.drain() == 1 and list(inbox._queue) == ["b", "c"]
+    assert inbox.drain() == 2 and flaky.stored == ["a", "b", "c"]
 
 
 def test_backoff_doubles_to_five_minutes_and_has_jitter(crew, me):
@@ -463,3 +512,128 @@ def test_the_board_keeps_the_newest_status_and_notifies():
     assert board.update("A", "2026-10-13T10:00:00Z", {"system": "Sol"})
     assert not board.update("A", "2026-10-13T09:00:00Z", {"system": "Old"})
     assert board.snapshot()["A"].status == {"system": "Sol"} and len(seen) == 1
+
+
+def test_uploads_read_the_log_in_pages_of_at_most_100(crew, me, friend):
+    # Review focus 4: a first upload of thousands of envelopes never reads more than 100 at a time.
+    class Spy:
+        def __init__(self, inner):
+            self.inner, self.reads = inner, []
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def envelopes_after(self, author, after_seq, limit=100):
+            rows = self.inner.envelopes_after(author, after_seq, limit)
+            self.reads.append((limit, len(rows)))
+            return rows
+    own_visits(crew, me, 250)
+    crew.insert_received_batch([sealed(friend, visit(at="2026-10-13T09:00:00Z", address=str(n)), n)
+                                for n in range(1, 131)])
+    spy = Spy(crew)
+    sock = FakeSocket(relay(heads={me.author: 0, friend.author: 0}), [hello()])
+    make_sync(spy, me, sock)[0].connect_once()
+    assert len(spy.reads) >= 5 and all(limit <= 100 and got <= 100 for limit, got in spy.reads)
+    assert len(uploaded(sock)) == 380
+
+
+def sessions(outcomes):
+    """A connect() that serves `outcomes` in turn: an exception is raised, 'live' is a socket that
+    reaches synced and then closes, 'replaced' one that is replaced."""
+    queue = list(outcomes)
+
+    def connect(url):
+        item = queue.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        sock = FakeSocket(relay(), [hello()])
+        if item == "replaced":
+            sock.on_send = None
+            sock.push_close(proto.CLOSE_REPLACED, "replaced")
+        return sock
+    return connect
+
+
+def test_a_session_that_dies_young_does_not_reset_the_backoff(crew, me):
+    sync, _ = make_sync(crew, me, None, connect=sessions(["live"] * 3))
+    sync._stop = RecordingStop(limit=3)
+    sync._run()
+    assert sync._stop.waits == [1, 2, 4]
+
+
+def test_a_session_that_lived_long_resets_the_backoff(crew, me):
+    clock = iter(range(0, 10_000, 100))
+    sync, _ = make_sync(crew, me, None, connect=sessions([OSError("x"), "live", "live", "live"]),
+                        clock=lambda: float(next(clock)))
+    sync._stop = RecordingStop(limit=4)
+    sync._run()
+    assert sync._stop.waits == [1, 1, 1, 1]
+
+
+def test_a_replacement_neither_resets_nor_doubles_the_backoff(crew, me):
+    sync, _ = make_sync(crew, me, None, connect=sessions([OSError("x"), "replaced", OSError("y")]))
+    sync._stop = RecordingStop(limit=3)
+    sync._run()
+    assert sync._stop.waits == [1, 60, 2]
+
+
+def test_an_unlisted_author_is_neither_uploaded_nor_hides_its_join_offer(crew, me, friend):
+    # S7: evs received before `have` must not make the relay "list" an author it did not list.
+    join = ev.build_envelope(ev.uuid7(), friend.author, 4, "join", "2026-10-13T10:00:00Z",
+                             {"group_id": G, "invite_id": ev.uuid7(), "token": "11" * 32, "commander": "Fr"})
+    crew.insert_received_batch([ev.seal(join, friend.sign)])
+    data, sig = sealed(friend, visit(at="2026-10-13T09:00:00Z", address="5"), 5)
+
+    def on_send(sock, frame):
+        if frame["t"] == "auth":
+            sock.push({"t": "evs", "items": [{"e": proto.b64(data), "s": proto.b64(sig)}]})
+            sock.push({"t": "have", "heads": {me.author: 0}})
+    sock = FakeSocket(on_send, [hello()])
+    make_sync(crew, me, sock, inbox=DirectInbox(crew))[0].connect_once()
+    assert uploaded(sock) == [(friend.author, 4)]
+
+
+class SlowClose(BlockingSocket):
+    def close(self, code=1000, reason=""):
+        time.sleep(1.5)
+        super().close(code, reason)
+
+
+def test_stop_does_not_wait_for_a_closing_handshake(crew, me):
+    sock = SlowClose(relay(), [hello()])
+    sync, _ = make_sync(crew, me, sock)
+    sync.start()
+    assert wait_for(lambda: sync.state == "live")
+    began = time.monotonic()
+    sync.stop()
+    assert time.monotonic() - began < 1.0 and sync.state == "stopped"
+    sync._thread.join(5)
+    assert sock.closed == 1000
+
+
+def test_start_after_a_stop_that_timed_out_runs_a_new_session(crew, me):
+    # Task 9's reconnect(): the old run is stuck in connect() when stop() gives up waiting.
+    release, entered = threading.Event(), threading.Event()
+    old, new = BlockingSocket(relay(), [hello()]), BlockingSocket(relay(), [hello()])
+    calls = []
+
+    def connect(url):
+        calls.append(url)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(5)
+            return old
+        return new
+    sync, _ = make_sync(crew, me, None, connect=connect)
+    sync.start()
+    assert entered.wait(2)
+    first = sync._thread
+    sync.stop(timeout=0.05)
+    sync.start()
+    assert wait_for(lambda: sync.state == "live")
+    release.set()
+    first.join(3)
+    assert not first.is_alive() and old.closed == 1000 and old.sent == []
+    assert sync.state == "live" and new.closed is None
+    sync.stop()
+    sync._thread.join(3)
