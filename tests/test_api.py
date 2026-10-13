@@ -1,4 +1,6 @@
 """edmrn.ext.api: one HTTP path, retries, readable failures. No network."""
+import logging
+
 import pytest
 import requests
 
@@ -164,3 +166,25 @@ def test_json_body_rejects_html_200():
     with pytest.raises(ApiError) as info:
         json_body(FakeResponse(200, text="<html>maintenance</html>"), "Spansh")
     assert str(info.value) == "Unexpected error talking to Spansh (HTTP 200)."
+
+
+@pytest.mark.parametrize("error", [
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ConnectTimeout,
+    requests.exceptions.ChunkedEncodingError,
+    RuntimeError,
+])
+def test_call_logs_the_redacted_url_only(caplog, error):
+    """Crew sync spec B1 S5a: a secret URL never reaches a log record, at any level."""
+    secret = "https://discord.com/api/webhooks/1/SECRET-TOKEN"
+
+    def failing(*a, **k):
+        raise error(f"HTTPSConnectionPool(host='discord.com'): Max retries exceeded with url: {secret}")
+    with caplog.at_level(logging.DEBUG, logger=""):
+        with pytest.raises(ApiError) as info:
+            call("POST", secret, service="Discord", timeout=1, retries=0, transport=failing,
+                     log_url="https://discord.com/api/webhooks/1/***")
+    text = " ".join(r.getMessage() + (r.exc_text or "") + repr(r.exc_info) for r in caplog.records)
+    assert caplog.records and "SECRET-TOKEN" not in text and "webhooks/1/***" in text
+    assert "SECRET-TOKEN" not in str(info.value)
+    assert not any(r.exc_info for r in caplog.records)

@@ -22,6 +22,9 @@ Rule (API hardening spec A1–A3):
 - A path segment taken from service data is validated (an `int` id64) or quoted (a job id).
 - Failures become one `ApiFailure` sentence. "Not found" stays distinct from "service failed":
   `lookup_system` returns not found only when every service answered.
+- A URL that is itself a secret (a Discord webhook) is passed with `log_url=<redacted form>`. Log
+  lines then show `log_url` and only the exception class name, never `repr(exc)`: `requests` errors
+  embed the full URL. No other code logs such a URL or an exception raised by that call.
 - Code that shows a result in Tk receives it through `root.after`.
 - Tests inject `call`/`transport`, `sleep` and `clock`; patch the name the calling module
   imported, or pass `call=`; `call=`/`transport=` defaults are bound at import. An autouse fixture
@@ -38,3 +41,4 @@ Defect it prevents (`../knowledge/upstream-baseline.md`, "External APIs"):
 - One 502 aborted Galaxy jobs that were still running.
 - Raw HTML and exception text reached the UI.
 - A Spansh outage looked like "System Not Found".
+- A webhook token reached the log through `requests` exception text (`log_url`).

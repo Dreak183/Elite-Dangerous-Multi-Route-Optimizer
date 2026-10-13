@@ -103,26 +103,36 @@ def json_body(response, service: str) -> Any:
         raise ApiError(ApiFailure(service, "unexpected", getattr(response, "status_code", None)))
 
 
+def _exc_text(exc, log_url) -> str:
+    return type(exc).__name__ if log_url else repr(exc)
+
+
 def call(method, url, *, service, params=None, json=None, timeout, retries=2, delays=(2.0, 5.0),
-         on_retry=None, transport=requests.request, sleep=time.sleep):
+         on_retry=None, transport=requests.request, sleep=time.sleep, log_url=None):
     """Send one request; retry 502/503/504, timeouts and connection errors.
 
     Responses below 500 are returned; the caller decides what a 4xx means. Everything else ends in
-    ApiError. on_retry(attempt, failure) is called before each retry.
+    ApiError. on_retry(attempt, failure) is called before each retry. `log_url` replaces `url` in
+    log lines when the URL itself is a secret (a Discord webhook, crew sync spec B1 S5a); log lines
+    then carry only the exception class, because `requests` errors embed the full URL.
     """
     headers = {"User-Agent": USER_AGENT}
+    shown = log_url or url
     attempt = 0
     while True:
         try:
             response = transport(method, url, params=params, json=json, headers=headers, timeout=timeout)
         except requests.exceptions.Timeout as exc:
-            logger.debug(f"{service} {method} {url}: {exc!r}")
+            logger.debug(f"{service} {method} {shown}: {_exc_text(exc, log_url)}")
             failure = ApiFailure(service, "timeout", None, f"{timeout:g} s")
         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
-            logger.debug(f"{service} {method} {url}: {exc!r}")
+            logger.debug(f"{service} {method} {shown}: {_exc_text(exc, log_url)}")
             failure = ApiFailure(service, "offline")
-        except Exception:
-            logger.exception(f"{service} {method} {url} failed unexpectedly")
+        except Exception as exc:
+            if log_url:
+                logger.error(f"{service} {method} {shown} failed unexpectedly: {type(exc).__name__}")
+            else:
+                logger.exception(f"{service} {method} {url} failed unexpectedly")
             raise ApiError(ApiFailure(service, "unexpected"))
         else:
             if response.status_code in TRANSIENT_STATUSES:
