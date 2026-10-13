@@ -1,6 +1,6 @@
 # Crew capture — design (Spec A)
 
-Status: Accepted (2026-10-12)
+Status: Accepted (2026-10-12), amended 2026-10-13 with the rulings from implementation review
 Date: 2026-10-12
 Crew features: A capture (this spec) → B sync → C window. Rules: ADR-0001, ADR-0002, ADR-0004 with
 ADR-0006, ADR-0005. Journal facts: `../../../../knowledge/exploration-events.md`,
@@ -45,7 +45,8 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
   and `:`, and no ASCII escaping. The log stores exactly those bytes and the signature. Verifying
   means checking the stored bytes; nothing is re-encoded, so a TypeScript peer verifies the same
   bytes.
-  - Integers above 2^53 travel as strings: `SystemAddress` is a decimal string.
+  - Integers above 2^53 travel as strings: `SystemAddress` is a canonical decimal string (`0`, or
+    digits without a leading zero) below 2^64, so one system has exactly one spelling.
   - An envelope is at most 16 KB.
 - C3. **Ids.**
   - A journal-derived event has `event_id` = the first 32 hex characters of SHA-256 over the
@@ -53,17 +54,25 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
   - A manual event has a UUIDv7, from our own small function (Python 3.13 has no `uuid.uuid7`).
 - C4. **Log and sequence.**
   - The log's key is (`author`, `seq`).
-  - For own events, the writer skips an event whose `event_id` the log already holds under any
-    `seq`. Otherwise it allocates `seq` = max(own highest `seq` in the log, the key file's
+  - For own events, the writer skips an event whose `event_id` the log already holds for the same
+    author under any `seq`. Otherwise it allocates `seq` = max(own highest `seq` in the log, the key file's
     high-water mark) + 1, signs and inserts the event in the same transaction, and updates the key
     file after the commit. A lost database therefore never reuses a `seq`.
   - Received events enter through `crew_store.insert_received`, which keeps the sender's `seq`:
     1. check the size and envelope structure;
     2. verify the signature;
     3. `INSERT OR IGNORE` on (`author`, `seq`).
-  - The projector applies an envelope only if its `event_id` is new to the projections, and only
-    if its payload passes C12 for a known `kind` and `v`. Other envelopes are kept in the log,
-    unprojected, so a newer client's events never block catch-up.
+  - The projector applies an envelope only if its payload passes C12 for a known `kind` and `v`,
+    and only if its `event_id` is bound to its author: a journal kind's `event_id` must equal the
+    deterministic id of (`author`, `kind`, natural key from the payload), a manual kind's must be a
+    UUIDv7. A friend therefore cannot claim or suppress another member's event. Other envelopes
+    are kept in the log, unprojected, so a newer client's events never block catch-up.
+  - Every envelope that passes is projected, and every merge is idempotent, so an author who
+    repeats an `event_id` under a new `seq` (after a lost database) leaves the same result in any
+    arrival order. The first sight of each (`author`, `event_id`) is recorded and gates counting:
+    a repeated event never counts twice.
+  - The key file catches up: the first time a run writes for a commander, its high-water mark is
+    raised to that author's highest `seq` in the log.
 
 ### What is captured
 
@@ -105,8 +114,10 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 - C6. **Automatic finds**, one per subject:
   - `biological`: a `signals` event with a biological count ≥ 1. Subject: the body id. Genus names
     are shown from the merged signals, not stored in the find.
-  - `stellar_phenomenon`: `FSSSignalDiscovered` with `SignalType` `Codex`. Subject: the system
-    (one per system; every observed marker is `$Fixed_Event_Life_Cloud;`).
+  - `stellar_phenomenon`: `FSSSignalDiscovered` with `SignalType` `Codex` and a `SignalName`
+    starting with `$Fixed_Event_Life`; other Codex signals are not phenomena
+    (`exploration-events.md` §5). Subject: the system (one per system; every observed marker is
+    `$Fixed_Event_Life_Cloud;`).
   - `codex`: a `CodexEntry` whose `NearestDestination` starts with `$Fixed_Event_Life_`, or whose
     `IsNewEntry` is true (absent means false). Subject: `EntryID` and body id. Detail: the entry
     name (`$…;`), category, sub-category, and a new-entry flag.
@@ -123,31 +134,34 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
   - For the group, a system is explored when any member explored it.
 - C8. **Projections.** These tables are derived from the log, so Spec C does not read JSON. Every
   merge is deterministic, so all replicas agree whatever order events arrive in:
-  - systems (name, address, coordinates, latest body count);
+  - systems: name and coordinates from the earliest journal report carrying them, body count from
+    the latest honk or `all_bodies` report (notes and finds never name a system);
   - per-author visits (first and last time, count);
   - per-author explored (C7);
-  - per-author body facts, with the merged body chosen by best tier, then earliest
-    (`created_at`, `author`, `event_id`). `was discovered` and `was mapped` are shown per author;
+  - per-author body facts, with the merged body chosen by best tier, then the earliest report.
+    `was discovered` and `was mapped` are shown per author;
   - per-body signals: per type the highest count, plus the union of genera;
   - finds, one row per `event_id`, with the finder;
   - notes and manual finds: per (`author`, note or find id), the revision with the highest `seq` of
     that author wins, a deleted revision hides the item, and revisions by anyone else are ignored.
 
-  `rebuild_projections()` re-derives everything from the log in (`created_at`, `author`, `seq`)
+  "Earliest" and "latest" compare (`created_at`, `author`, `seq`); `seq` is unique per author, so
+  two log rows never tie. `rebuild_projections()` re-derives everything from the log in that
   order and must equal the incremental result.
 
 ### Status, replay, validation
 
-- C9. **Status (ephemeral).** A thread-safe `CrewStatus` per commander holds the latest status. It
-  notifies observers only when a value changes, and it is never written to the log.
+- C9. **Status (ephemeral).** A thread-safe `CrewStatus` holds the latest status of the active
+  commander and resets when a different commander loads. It notifies observers only when a value
+  changes, and it is never written to the log.
   - Commander and location come from `app.location_tracker`.
   - The ship comes from the last `Loadout`: ship type, name and ident, and an EDSY link built from
     the `Loadout` by EDMC's method (`edsy.md`).
   - **Hull.**
     - Start from `Loadout.HullHealth`.
-    - Then `HullDamage.Health` when `PlayerPilot` is true and `Fighter` is not true. Per the manual,
-      `PlayerPilot` false with `Fighter` false is the player's ship flown by NPC crew; this is
-      shown too.
+    - Then `HullDamage.Health` unless `Fighter` is true. Per the manual, `PlayerPilot` is true
+      when the player pilots the damaged ship or fighter and `Fighter` marks a ship-launched
+      fighter, so `PlayerPilot` false without `Fighter` is the player's ship flown by NPC crew.
     - `RepairAll`, or `Repair` whose `Item` or `Items` names the hull or `all` (case-insensitive),
       sets it to 1.0 (inferred).
   - **Fuel.**
@@ -158,9 +172,16 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 - C10. **Startup replay.**
   - At app start, the newest 5 journal files (by modification time) are replayed in a daemon
     thread, oldest first, through their own mapper instance.
-  - The replay seeds `CrewStatus` with the same rule as the location tracker's `adopt`: only if
-    newer. The live monitor reads the newest file from its end and would miss the startup
-    `Loadout`.
+  - The replay seeds `CrewStatus`, because the live monitor reads the newest file from its end and
+    would miss the startup `Loadout`. A replay whose last journal change is newer than the live
+    one replaces the status, keeping the live `Status.json` fuel. Otherwise, for the same (or an
+    unknown) commander, it only fills what the live status lacks: the ship fields as one group
+    when no live ship is known, commander and hull singly. One ship's identity never mixes with
+    another's.
+  - The live listener buffers events until the replay hands it its final mapper state, then maps
+    the buffer, skipping events older than the last line the replay read. Otherwise the live
+    mapper would not know the commander, or would re-attribute replayed events to a later one.
+  - The replay waits while the writer's queue is nearly full, so it is never cut by the cap.
   - Ids are deterministic, so the replay only adds what EDMRN missed. Older history is not
     imported.
 - C11. **Mapping is stateful.** A mapper tracks the current commander (by `FID`), the current system
@@ -190,7 +211,8 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 
 ### Our modules (`edmrn/ext/`, store layer per ADR-0006)
 
-- `store.py` gains `Store.transaction()` and the crew migrations in its single list.
+- `store.py` gains `Store.transaction(busy_timeout_ms=None)`, `Store.read()` and the crew
+  migrations in its single list.
 - `crew_identity.py`: per-commander key files, `author_id`, `sign`, `verify`, the `seq` high-water
   mark, and key export and import. New dependency `cryptography` (Apache-2.0 or BSD-3; Windows
   wheels; PyInstaller hooks), added to `requirements-edmrn.txt`.
@@ -199,15 +221,18 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 - `crew_store.py`: the own-event writer (C4), `insert_received`, the projector,
   `rebuild_projections()`, and the read queries Spec C needs. It writes only inside
   `Store.transaction()`, on the Tk thread.
-- `crew_capture.py`: the stateful mapper (C5, C6, C11), the startup replay (C10), and the manual
-  API `report_find`, `edit_find`, `delete_find`, `set_note` and `delete_note`.
+- `crew_capture.py`: the stateful mapper (C5, C6, C11), the live listener, the startup replay
+  (C10), and the validating builders for manual find and note revisions.
 - `crew_status.py`: `CrewStatus` (C9).
 - `crew.py`: `install(app)`.
   - Registers the journal and `Status.json` listeners.
   - Starts the Tk-loop writer.
   - Starts the replay.
-  - Sets `app.crew`, which exposes the queries, the manual API, the status and the identities.
+  - Sets `app.crew`, which exposes the queries, the manual API (`report_find`, `edit_find`,
+    `delete_find`, `set_note`, `delete_note`; Tk thread only), the status and the identities.
   - It is idempotent.
+  - `crew.py` imports without `cryptography`; without it, crew capture is disabled like an
+    unusable store.
 
 ### Threading and the writer
 
@@ -216,7 +241,11 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 - The Tk-loop writer runs about once per second and takes at most 500 drafts per tick. For each
   draft it does, in one transaction: compute the id, skip if known, allocate the `seq`, sign,
   insert, project.
-- If the batch fails, the writer retries its drafts one by one, drops the failing one and logs it.
+- The writer's transactions use a 200 ms busy timeout. If the batch fails because the database
+  is locked, the drafts go back to the head of the queue and wait for the next tick, with one log
+  line per locked period. If it fails for any other reason, the writer retries its drafts one by
+  one, drops the failing one and logs it.
+- The replay waits while the queue is nearly full; live listeners and the manual API never wait.
 - Signing costs tens of microseconds per event.
 - `CrewStatus` observers run on the thread that caused the change, so UI observers go through
   `root.after`.
@@ -230,7 +259,8 @@ kept, so that the sender's sequence stays contiguous, but it is projected only o
 - **Invalid mapped payload:** the draft is dropped and logged once per kind. The monitor and other
   listeners continue.
 - **Queue overflow** (store locked for a long time): the oldest drafts are dropped beyond 10,000,
-  with a log line. Deterministic ids let the next replay restore journal-derived ones.
+  with a log line every 1,000 drops. Deterministic ids let the next replay restore
+  journal-derived ones from the newest journals; manual entries cannot be restored.
 
 ## Testing
 

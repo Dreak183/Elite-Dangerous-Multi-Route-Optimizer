@@ -79,23 +79,27 @@ whenever the tracker knows a system.
 Invariant: `edmrn/ext/` code never tails journals. Live data comes only through
 `JournalMonitor.event_listeners` (ADR-0001).
 
-## Crew capture data flow (crew capture spec, ADR-0005, ADR-0006)
+## Crew capture data flow (crew capture spec, ADR-0005, ADR-0006, ADR-0007)
 
 1. Upstream's `JournalMonitor` hands each event to `LiveCapture.feed` (`event_listeners`).
    Upstream's `FuelTracker` hands each `Status.json` dict to `CrewStatus.feed_status`
    (`status_listeners`).
 2. `JournalMapper` turns events into unsigned drafts, each attributed to the commander who was
    active when the line was written. `CrewStatus` keeps ship, hull and fuel; it is never logged.
-3. The `Writer` takes drafts from any thread. Once a second, on the Tk loop, it signs at most 500
-   with the commander's key from `crew_keys/` and inserts them into `crew_log` in one transaction.
-   Each new event is projected into the `crew_*` tables.
-4. At startup, `replay` maps the newest 5 journals in the `edmrn-crew-replay` thread. Deterministic
+3. The `Writer` takes drafts from any thread. On the Tk loop it signs a bounded batch per tick with
+   the commander's key from `crew_keys/` and inserts it into `crew_log` in one transaction. Each
+   valid event is projected into the `crew_*` tables. Batch size, tick and queue cap: crew capture
+   spec, "Threading and the writer".
+   - A locked database never costs drafts: the writer's transaction gives up after a short busy
+     timeout, puts the batch back at the head of the queue and tries again on the next tick.
+4. At startup, `replay` maps the newest journals in the `edmrn-crew-replay` thread. Deterministic
    ids mean it adds only what EDMRN missed.
    - The monitor reads the newest journal from its end and never sees that session's `LoadGame`.
-     The live mapper therefore buffers events until the replay hands it its final state.
+     The live mapper therefore buffers events until the replay hands it its final state, and skips
+     buffered events older than the last line the replay read.
    - The replay enqueues with backpressure: it waits while the queue is nearly full and the writer
-     runs, so a long replay is never cut by the cap. Live listeners and the manual API never wait.
-     Past the 10,000 cap the oldest drafts are dropped (newer ones may be manual entries).
+     runs, so a long replay is never cut by the cap. Live listeners and the manual API never wait,
+     so past the cap the oldest drafts are dropped.
 
 Invariants:
 - Only the writer (own events) and `CrewStore.insert_received` (received events) write `crew_log`.
@@ -110,5 +114,6 @@ Invariants:
 - Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for
   that commander and is never replaced.
 - `app.crew` is `None` when the store is unusable (ADR-0004) or `cryptography` is not installed.
-- Before a commander's first write the writer raises the key file's high-water mark to the log's
-  highest seq, so a crash between log commit and key-file write cannot cause seq reuse.
+- The first time a run writes for a commander, the writer raises the key file's high-water mark to
+  that author's highest seq in the log. A crash between the log commit and the key-file write
+  followed by a lost database therefore cannot reuse a seq.

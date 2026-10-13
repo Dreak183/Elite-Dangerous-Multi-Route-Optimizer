@@ -53,7 +53,7 @@ exchange. It also lists the upstream defects that our features would sit on top 
 - The journal layer hands the fuel tracker only `Loadout.FuelCapacity.Main`: `_process_line` reduces
   the `{Main, Reserve}` object to a float before the callback, and the reserve tank is not passed on.
   Without a `Loadout` (the first journal is tailed from its end) the tracker takes the first `FuelMain`
-  it reads from `Status.json` as the capacity **[code, probe, 2026-10-13]**.
+  it reads from `Status.json` as the capacity **[community, probe]** (2026-10-13).
 
 ## Saved routes
 

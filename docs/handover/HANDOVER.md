@@ -2,27 +2,48 @@
 
 ## Where things stand
 
-- `main` holds API hardening, neutron save/resume and the journal location (all merged
-  2026-10-12). 278 tests pass (`.venv/Scripts/python.exe -m pytest`);
-  `tests/test_neutron_resume_gui.py` sometimes skips 5 tests with Tk's "can't find usable
-  init.tcl" (environment, intermittent). No linter is configured.
+- `main` holds API hardening, neutron save/resume and the journal location (merged 2026-10-12).
+- **Branch `feature/crew-capture` holds Spec A, crew capture, complete and not merged.**
+  - 598 tests pass (`.venv/Scripts/python.exe -m pytest`). `tests/test_neutron_resume_gui.py`
+    sometimes skips 5 tests with Tk's "can't find usable init.tcl" (environment, intermittent).
+    No linter is configured.
+  - All 12 plan tasks were reviewed one by one. The final whole-branch review said "with fixes";
+    those fixes are in `b7ddf44` and passed a re-review. An isolated smoke run of the real app
+    wrote a signed `visit` to `crew_log` (`../how-to/run.md`).
+  - The spec was amended with the implementation rulings (author-bound ids, idempotent
+    projection, status adoption, live buffer, locked store, backpressure); ADR-0007 records the
+    storage-versus-projection rule.
+  - The commander's real `edmrn.db` did not exist yet (checked read-only 2026-10-13), so the first
+    run creates schema 2 fresh.
 - **No human has looked at the window** since the location and neutron features: header location,
-  Neutron "Saved routes", a plot from an unknown start.
-- **Crew features** (the commander's priority):
-  - Transport is decided in ADR-0005. The store layer for feature modules is ADR-0006.
-  - The commander approved the decomposition: A capture → B sync → C window.
-  - **Spec A** (`../superpowers/specs/2026-10-12-crew-capture-design.md`) is accepted (2026-10-12).
-  - Its plan is `../superpowers/plans/2026-10-12-crew-capture.md`: 12 tasks in two phases, the log
-    (1–5) and capture (6–12). It records ten planning rulings that fill spec gaps. It awaits the
-    commander's review and choice of execution method; none of it is implemented.
+  Neutron "Saved routes", a plot from an unknown start. Crew capture has no UI yet (Spec C).
+- Crew features: transport ADR-0005, store layer ADR-0006 and ADR-0007, decomposition
+  A capture → B sync → C window (approved).
 
 ## Start here
 
-1. Read `../../CLAUDE.md`, ADR-0001/0002/0004/0005/0006 (`../architecture/decisions/`),
+1. Read `../../CLAUDE.md`, ADR-0001/0002/0004–0007 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
-2. Once the commander has approved the crew capture plan, execute it on a branch
-   (`feature/crew-capture`), subagent-driven unless the commander chose otherwise.
-3. Then Spec B (sync), then Spec C (window).
+2. The commander decides on merging `feature/crew-capture` into `main` (fast-forward is possible;
+   `main` has not moved since `614d608`).
+3. Then Spec B (sync). It starts from these points, decided or found during Spec A:
+   - **Received `created_at`:** today it is checked for shape only. One envelope dated
+     `0000-00-00…` renames a system for everyone, and one dated `9999-…` pins its body count.
+     Ruling: Spec B makes received stamps a plausible calendar time (a real date, not before
+     2014-12-16, not far in the future) and lets system name and coordinates prefer the
+     commander's own reports. `rebuild_projections()` re-derives after the rule change.
+   - **Characters:** U+2028/2029, U+200E/F, U+061C and U+FEFF pass C12. ADR-0005 asks for a
+     whitelist.
+   - **Log volume:** `PayloadError` messages are unbounded in length. A hostile peer's envelope logs
+     a warning on every rebuild. A different envelope arriving at an existing (author, `seq`)
+     (equivocation) is dropped silently; it should warn.
+4. Then Spec C (window), with these notes from Spec A:
+   - The manual API runs on the Tk thread only and flushes the whole writer queue (about 1.8 s at
+     10,000 drafts).
+   - During a lock, an edit right after a report raises `KeyError`.
+   - With large journals the startup replay takes seconds before the commander is known, and the
+     manual API raises until then.
+   - Notes reject newlines (C12, planning ruling 9); decide whether multi-line notes need a `v` 2.
 
 ## Crew requirements for Specs B and C (commander, 2026-10-12) — move into those specs, then delete
 
@@ -38,21 +59,50 @@
 
 ## Open decisions
 
-- **Crew capture plan review** and execution method, by the commander.
+- **Merge `feature/crew-capture` into `main`**, by the commander.
 - **Sub-domain** for the Worker (Spec B).
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
 
 ## Preconditions before friend data enters `edmrn.db` (from the neutron review)
 
-The neutron store validates types and numbers, not content. Spec A's validator (C12) and
-`insert_received` close these for crew data; any other friend data must do the same:
+The neutron store validates types and numbers, not content. For crew data, Spec A's validator
+(C12), `insert_received` and ADR-0007 close these; any other friend data must do the same:
 - bounds on names, distances and ranges;
 - a character whitelist (NUL, ANSI escapes and bidi characters are accepted today);
 - rejection of unknown keys (extra waypoint keys are silently dropped today);
 - strict `route_id` types;
 - a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
   the process (ADR-0005's `event_id` is that identity).
+
+## Follow-ups from the crew capture reviews (deferred, none blocking)
+
+- **Tests that cannot fail, or fail weakly:**
+  - the stop-wake test catches its mutant only about a quarter of the time;
+  - nothing pins the app.py hook as "directly after" the location install;
+  - untested: individual commander/hull fill in `adopt`, the 1,000-drop overflow log, "broken key
+    logged once", and the Commander event's `Name` key.
+- **Status:**
+  - The ship group in `adopt` is guarded by `ship` alone (malformed Loadout only).
+  - Hull fills individually even when the live ship differs.
+  - An unencodable Loadout string drops the whole Loadout.
+- **Mapper and replay:**
+  - The mapper's coordinate check is looser than the validator's (|v| ≤ 1e7), so such a visit is
+    dropped whole instead of losing only its coordinates.
+  - An invalid signals draft can leave its biological find alone.
+  - The seed hands drafts on outside its lock (affects `seq` order only).
+  - A negative `max_files` is not rejected.
+- **Key files:**
+  - The exists-then-write check has no file lock, so two processes can race.
+  - Write failures surface as `OSError` (the writer catches them).
+  - The `v` field accepts `true` and `1.0`.
+- **Store and log:**
+  - `Store._probe` checks only `neutron_routes`.
+  - `append_own` does not reject an own journal-kind draft with a non-matching preset id (no
+    producer exists).
+  - A `sqlite3.Error` during the writer's key-file catch-up is retried per draft (log noise).
+- **Plan text:** `../superpowers/plans/2026-10-12-crew-capture.md` predates the review rulings;
+  the spec and the code are authoritative.
 
 ## Follow-ups from the location reviews (deferred, none blocking)
 
@@ -123,6 +173,9 @@ The neutron store validates types and numbers, not content. Spec A's validator (
 - Upstream files are CRLF in the working tree (git autocrlf). Keep them CRLF, and do not "tidy" them
   (ADR-0002).
 - `uv venv` without `--python 3.13` picks 3.14.
+- `sed -i` in Git Bash rewrites CRLF files as LF. Use the Edit tool or a byte-preserving Python
+  rewrite for upstream files, and check with `file`.
+- `crew_log` holds untrusted bytes from friends (ADR-0007). Show only the validated projections.
 - `.remember/` is the remember plugin's local store, `.superpowers/` the SDD scratch. Leave both
   untracked.
 
@@ -134,5 +187,5 @@ The neutron store validates types and numbers, not content. Spec A's validator (
 - Running, testing, probing: `../how-to/run.md`. Upstream merges: `../how-to/upstream-sync.md`.
 - Shared facts: `../../../knowledge/README.md` (Spansh API: `bulk-data.md`; location events:
   `reference-data.md` §6; SQLite and folder mtime: `local-ipc-and-storage.md`; crew transport:
-  `group-sync-transport.md`; route formats: `ed-data-sharing.md`; exploration events:
+  `group-sync-transport.md`; route formats: `ed-data-sharing.md`; exploration events, hull and fuel:
   `exploration-events.md`).
