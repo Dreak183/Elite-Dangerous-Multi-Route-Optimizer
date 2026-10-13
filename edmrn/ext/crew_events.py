@@ -18,7 +18,7 @@ MAX_ENVELOPE_BYTES = 16 * 1024
 MAX_SAFE_INT = 2**53 - 1
 ENVELOPE_KEYS = frozenset({'v', 'event_id', 'author', 'seq', 'kind', 'created_at', 'payload'})
 
-_STAMP = re.compile(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z')
+_STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 _HEX_ID = re.compile(r'[0-9a-f]{32}')
 _UUID7 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 _AUTHOR = re.compile(r'[A-Za-z0-9_-]{43}')

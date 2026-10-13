@@ -69,7 +69,8 @@ def test_uuid7_counter_overflow_moves_to_the_next_millisecond():
 
 def test_stamp_accepts_only_the_exact_shape():
     assert ev.stamp("2026-10-12T10:00:00Z") == "2026-10-12T10:00:00Z"
-    for bad in ("2026-10-12 10:00:00", "2026-10-12T10:00:00.123Z", "2026-10-12T10:00:00Z\n", 5, None):
+    for bad in ("2026-10-12 10:00:00", "2026-10-12T10:00:00.123Z", "2026-10-12T10:00:00Z\n", 5, None,
+                "２０２６-10-12T10:00:00Z", "٢٠٢٦-10-12T10:00:00Z"):
         assert ev.stamp(bad) is None
     assert ev.stamp(ev.utc_now_stamp())
 
