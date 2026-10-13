@@ -173,7 +173,7 @@ MANUAL_FINDS = AUTO_FINDS + ('other',)
 NAME_MAX = 128
 TEXT_MAX = 2000
 _FORBIDDEN = re.compile('[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff]')
-_DIGITS = re.compile(r'[0-9]{1,20}')
+_DIGITS = re.compile(r'0|[1-9][0-9]{0,19}')
 
 Checker = Callable[[Any, str], None]
 
@@ -221,10 +221,16 @@ def _uuid(value: Any, path: str) -> None:
 
 
 def _coords(value: Any, path: str) -> None:
+    message = f'{path} must be three finite numbers'
     if (not isinstance(value, list) or len(value) != 3
-            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)
-            or not all(math.isfinite(v) and abs(v) <= 1e7 for v in value)):
-        raise PayloadError(f'{path} must be three finite numbers')
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
+        raise PayloadError(message)
+    try:
+        numbers = [float(v) for v in value]
+    except OverflowError:
+        raise PayloadError(message) from None
+    if not all(math.isfinite(v) and abs(v) <= 1e7 for v in numbers):
+        raise PayloadError(message)
 
 
 def _nullable(inner: Checker) -> Checker:

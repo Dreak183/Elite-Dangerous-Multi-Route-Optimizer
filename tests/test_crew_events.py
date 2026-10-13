@@ -221,11 +221,13 @@ def test_text_limit_is_2000_and_empty_text_is_allowed():
     ("visit", "coords", [0, 0, float("inf")]),
     ("visit", "coords", [0, 0]),
     ("visit", "coords", [0, 0, True]),
+    ("visit", "coords", [10**400, 0, 0]),
     ("visit", "address", 10477373803),
     ("visit", "address", "-1"),
     ("visit", "address", "1" * 21),
     ("visit", "address", str(2**64)),
     ("visit", "address", "12a"),
+    ("visit", "address", "010477373803"),
     ("body", "moon", 0),
     ("body", "tier", "great"),
     ("body", "scan_type", "NavBeacon"),
@@ -250,6 +252,10 @@ def test_unknown_and_missing_keys_are_rejected(kind):
     payload.pop(next(iter(payload)))
     with pytest.raises(ev.PayloadError):
         ev.validate_payload(kind, 1, payload)
+
+
+def test_address_zero_is_accepted():
+    ev.validate_payload("visit", 1, dict(good("visit"), address="0"))
 
 
 def test_payload_must_be_an_object():
