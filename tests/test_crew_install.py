@@ -314,3 +314,87 @@ def test_busy_timeout_is_restored_after_success_and_failure(store):
         with store.transaction(busy_timeout_ms=200):
             raise ValueError("boom")
     assert timeout() == before
+
+
+# --- end to end -------------------------------------------------------------------------
+
+def at(minute, second=0):
+    return f"2026-10-12T10:{minute:02d}:{second:02d}Z"
+
+
+SESSION = [
+    event("Fileheader", "2026-10-12T09:58:00Z", part=1, gameversion="4.4.0.0"),
+    event("Commander", "2026-10-12T09:58:30Z", FID="F100", Name="Jameson"),
+    LOAD,
+    event("Loadout", "2026-10-12T09:59:10Z", Ship="krait_light", ShipName="Wanderer", ShipIdent="DR-01",
+          HullHealth=0.92, FuelCapacity={"Main": 32.0, "Reserve": 0.63}, Modules=[]),
+    JUMP,
+    event("FSSDiscoveryScan", at(0, 30), Progress=0.5, BodyCount=3, NonBodyCount=1, SystemName="Sol",
+          SystemAddress=SOL),
+    event("FSSSignalDiscovered", at(0, 31), SystemAddress=SOL, SignalName="$Fixed_Event_Life_Cloud;",
+          SignalType="Codex"),
+    event("FSSSignalDiscovered", at(0, 32), SystemAddress=SOL, SignalName="$Fixed_Event_Life_Cloud;",
+          SignalType="Codex"),
+    event("Scan", at(1), ScanType="AutoScan", BodyName="Sol", BodyID=0, StarSystem="Sol", SystemAddress=SOL,
+          StarType="G", WasDiscovered=True, WasMapped=False),
+    event("FSSBodySignals", at(2), BodyName="Sol 3", BodyID=3, SystemAddress=SOL,
+          Signals=[{"Type": "$SAA_SignalType_Biological;", "Count": 2}]),
+    event("Scan", at(2, 1), ScanType="Detailed", BodyName="Sol 3", BodyID=3, Parents=[{"Star": 0}],
+          StarSystem="Sol", SystemAddress=SOL, PlanetClass="Earthlike body", Landable=False,
+          TerraformState="Terraformed", WasDiscovered=True, WasMapped=True),
+    event("Scan", at(3), ScanType="Detailed", BodyName="Sol 4", BodyID=4, Parents=[{"Star": 0}],
+          StarSystem="Sol", SystemAddress=SOL, PlanetClass="Rocky body", Landable=True, TerraformState="",
+          WasDiscovered=False, WasMapped=False),
+    event("FSSAllBodiesFound", at(3, 1), SystemName="Sol", SystemAddress=SOL, Count=3),
+    event("SAASignalsFound", at(10), BodyName="Sol 3", BodyID=3, SystemAddress=SOL,
+          Signals=[{"Type": "$SAA_SignalType_Biological;", "Count": 2}, {"Type": "$SAA_SignalType_Human;", "Count": 1}],
+          Genuses=[{"Genus": "$Codex_Ent_Bacterial_Genus_Name;"}, {"Genus": "$Codex_Ent_Stratum_Genus_Name;"}]),
+    event("CodexEntry", at(20), EntryID=2420101, Name="$Codex_Ent_Gas_Clds_Yellow_Name;",
+          SubCategory="$Codex_SubCategory_Organic_Structures;", Category="$Codex_Category_Biology;",
+          Region="$Codex_RegionName_18;", System="Sol", SystemAddress=SOL, BodyID=3,
+          NearestDestination="$Fixed_Event_Life_Cloud;"),
+    event("HullDamage", at(30), Health=0.61, PlayerPilot=True, Fighter=False),
+]
+
+
+def write_session(tmp_path):
+    journals = tmp_path / "journals"
+    journals.mkdir(exist_ok=True)
+    append_events(journal_file(journals, "2026-10-12T095800"), *SESSION)
+
+
+def test_a_session_journal_becomes_explored_systems_bodies_signals_finds_and_status(store, tmp_path, listeners):
+    write_session(tmp_path)
+    app, service = start(store, tmp_path)
+    app.root.fire()
+    me = service.identity().author
+    address = str(SOL)
+    assert service.commander == "F100"
+    assert service.store.explored(me) == {address}
+    assert service.store.system(address).body_count == 3
+    assert [b.name for b in service.store.bodies(address)] == ["Sol", "Sol 3", "Sol 4"]
+    s3 = service.store.signals(address)[3]
+    assert s3.counts == {"biological": 2, "human": 1} and s3.sources == frozenset({"fss", "saa"})
+    assert s3.genera == ("$Codex_Ent_Bacterial_Genus_Name;", "$Codex_Ent_Stratum_Genus_Name;")
+    finds = service.store.finds()
+    assert sorted(f.find_kind for f in finds) == ["biological", "codex", "stellar_phenomenon", "valuable_body"]
+    by_kind = {f.find_kind: f for f in finds}
+    assert by_kind["codex"].body_name == "Sol 3" and by_kind["valuable_body"].body_name == "Sol 3"
+    ship = service.ship.state
+    assert (ship.ship, ship.hull, ship.fuel_capacity_main) == ("krait_light", 0.61, 32.0)
+
+
+def test_a_restart_adds_nothing_and_live_events_continue(store, tmp_path, listeners):
+    write_session(tmp_path)
+    app, service = start(store, tmp_path)
+    app.root.fire()
+    before = log_kinds(store)
+    listeners.journal.clear()
+    listeners.status.clear()
+    app2, service2 = start(store, tmp_path)
+    app2.root.fire()
+    assert log_kinds(store) == before
+    feed(listeners, event("FSDJump", at(40), StarSystem="Alpha", SystemAddress=42, StarPos=[1, 2, 3]))
+    app2.root.fire()
+    assert log_kinds(store) == before + ["visit"]
+    assert service2.store.visits(service2.identity().author)[0].address == "42"

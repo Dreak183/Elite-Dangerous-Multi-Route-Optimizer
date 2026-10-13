@@ -38,6 +38,20 @@ To probe a module headless, put a script outside the repository and run it with
 upstream monitor threads otherwise keep the process alive and buffered output is lost. Write fake
 journals into `$H` and pass their folder as `manual_journal_path`.
 
+To check crew capture in such a run, write a journal into the default journal folder under `$H`
+before starting:
+
+```
+J="$H/Saved Games/Frontier Developments/Elite Dangerous"; mkdir -p "$J"
+printf '%s
+' '{"timestamp":"2026-10-12T10:00:00Z","event":"LoadGame","Commander":"Smoke","FID":"F1"}'   '{"timestamp":"2026-10-12T10:01:00Z","event":"FSDJump","StarSystem":"Sol","SystemAddress":10477373803,"StarPos":[0,0,0]}'   > "$J/Journal.2026-10-12T100000.01.log"
+```
+
+After the run, `$H/EDMRN_Route_Data/crew_keys/` holds one key file and the `crew_log` table of
+`$H/EDMRN_Route_Data/edmrn.db` holds one `visit`. A cold first start (matplotlib builds its font
+cache in `$H`) can take longer than 25 s to build the window; the app has not reached the crew
+install by then, so use `timeout 50` for this check.
+
 ## Run the tests
 
 ```
