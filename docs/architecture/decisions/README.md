@@ -12,3 +12,4 @@ that links back. Template: `_template.md`.
 | [0005](0005-crew-exchange-transport.md) | Crew data travels as a signed event log through a Cloudflare relay; peer-to-peer is a staged fallback (merge validation: see 0007) |
 | [0006](0006-store-layer-and-crew-modules.md) | The store layer is `store.py` (connection, lock, migrations) plus feature modules that write only through `Store.transaction()` (received-record validation: see 0007) |
 | [0007](0007-received-envelopes-stored-projection-gated.md) | A received envelope is stored once signed and well-formed; payload validation and author binding gate only its projection |
+| [0008](0008-membership-from-leader-signed-roster.md) | *Proposed* — Group membership is computed from leader-signed roster envelopes and gates projection |

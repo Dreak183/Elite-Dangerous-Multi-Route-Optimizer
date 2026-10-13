@@ -24,18 +24,14 @@
 
 1. Read `../../CLAUDE.md`, ADR-0001/0002/0004–0007 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
-2. Spec B (sync). It starts from these points, decided or found during Spec A:
-   - **Received `created_at`:** today it is checked for shape only. One envelope dated
-     `0000-00-00…` renames a system for everyone, and one dated `9999-…` pins its body count.
-     Ruling: Spec B makes received stamps a plausible calendar time (a real date, not before
-     2014-12-16, not far in the future) and lets system name and coordinates prefer the
-     commander's own reports. `rebuild_projections()` re-derives after the rule change.
-   - **Characters:** U+2028/2029, U+200E/F, U+061C and U+FEFF pass C12. ADR-0005 asks for a
-     whitelist.
-   - **Log volume:** `PayloadError` messages are unbounded in length. A hostile peer's envelope logs
-     a warning on every rebuild. A different envelope arriving at an existing (author, `seq`)
-     (equivocation) is dropped silently; it should warn.
-3. Then Spec C (window), with these notes from Spec A:
+2. Spec B1, crew sync core (`../superpowers/specs/2026-10-13-crew-sync-core-design.md`, with
+   ADR-0008 proposed), is written and awaits the commander's review. After approval:
+   `writing-plans`, then subagent-driven development. The spec's S10–S12 absorb the received-data
+   rulings found during Spec A (stamp plausibility, character whitelist, log volume).
+   - The Cloudflare setup (`wrangler login`, `CREW_LEADERS`, `wrangler deploy` to
+     `galroute.the-hub.cloud`) happens with the commander once the relay passes its tests; write
+     `../how-to/deploy-relay.md` as a step-by-step guide for that session.
+3. Then Spec B2 and Spec C (window). Notes for C from Spec A:
    - The manual API runs on the Tk thread only and flushes the whole writer queue (about 1.8 s at
      10,000 drafts).
    - During a lock, an edit right after a report raises `KeyError`.
@@ -43,21 +39,18 @@
      manual API raises until then.
    - Notes reject newlines (C12, planning ruling 9); decide whether multi-line notes need a `v` 2.
 
-## Crew requirements for Specs B and C (commander, 2026-10-12) — move into those specs, then delete
+## Crew requirements for Specs B2 and C (commander, 2026-10-12) — move into those specs, then delete
 
-- One fixed group, with named expeditions as filters. Own status is shared automatically, with a
-  "pause sharing" switch. The leader admits members; invites go by Discord DM.
-- Status per commander: ship and loadout (EDSY link), fuel, hull, current or last known location
-  (captured by Spec A's `CrewStatus`).
+The B1 requirements (group, invites, status, pause) are in the B1 spec.
+- Named expeditions as filters inside the one group (B2).
 - Window: commander cards in the header; tabs "Explored systems", "Current route", "Reported
   finds"; a live chat; notes on systems; manual finds with a note. Per explored system: planets,
-  landable planets, per-planet signals.
-- Finds are optionally mirrored to the group's Discord through a webhook (ADR-0005).
+  landable planets, per-planet signals (C).
+- Finds are optionally mirrored to the group's Discord through a webhook (ADR-0005) (B2).
 - Later: a local inbound API through which other tools (e.g. Observatory scripts) post finds.
 
 ## Open decisions
 
-- **Sub-domain** for the Worker (Spec B).
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
 
