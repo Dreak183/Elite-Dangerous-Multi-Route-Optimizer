@@ -194,7 +194,7 @@ def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
     if not journal_dir or not os.path.isdir(journal_dir):
         return None
     try:
-        files = sorted(glob.glob(os.path.join(journal_dir, 'Journal.*.log')),
+        files = sorted(glob.glob(os.path.join(glob.escape(journal_dir), 'Journal.*.log')),
                        key=_mtime_or_zero, reverse=True)
     except OSError as e:
         logger.error(f"Cold start could not list journals: {e}")
@@ -238,6 +238,13 @@ def tracked_system(app) -> Optional[str]:
         return None
 
 
+def journal_dir_for(app) -> Optional[str]:
+    """The journal folder the live monitor uses, including the manual journal_path setting."""
+    manual_path = getattr(getattr(app, 'config', None), 'journal_path', '') or None
+    live_dir = getattr(getattr(app, 'journal_monitor', None), 'journal_path', None)
+    return live_dir or JournalMonitor(None, manual_journal_path=manual_path).journal_path
+
+
 def install(app) -> LocationTracker:
     """Wire the tracker into a running EDMRN_App. Called once from EDMRN_App.__init__."""
     existing = getattr(app, 'location_tracker', None)
@@ -261,9 +268,7 @@ def install(app) -> LocationTracker:
     tracker.subscribe(on_change)
     app.cmdr_location.trace_add('write', reassert_header)
 
-    manual_path = getattr(getattr(app, 'config', None), 'journal_path', '') or None
-    live_dir = getattr(getattr(app, 'journal_monitor', None), 'journal_path', None)
-    journal_dir = live_dir or JournalMonitor(None, manual_journal_path=manual_path).journal_path
+    journal_dir = journal_dir_for(app)
     threading.Thread(target=cold_start, args=(journal_dir, tracker),
                      name='edmrn-location-cold-start', daemon=True).start()
     return tracker

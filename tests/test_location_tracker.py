@@ -330,3 +330,12 @@ def test_non_finite_star_pos_gives_no_coords_but_the_system_applies():
                 ' "SystemAddress": 5, "StarPos": [1.0, %s, 3.0]}' % literal)
         s = feed_all(json.loads(line))
         assert s.system == "Lave" and s.coords is None
+
+
+def test_cold_start_in_a_folder_with_glob_metacharacters(tmp_path):
+    folder = tmp_path / "Saved [Games]"
+    folder.mkdir()
+    append_events(journal_file(folder), event("FSDJump", StarSystem="Bracket", StarPos=[0, 0, 0]))
+    tracker = LocationTracker()
+
+    assert cold_start(str(folder), tracker).system == "Bracket"

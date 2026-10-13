@@ -40,6 +40,7 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
 | `edmrn/ui_components.py` | Two lines in `create_neutron_tab` add the "Saved routes" button (`edmrn.ext.neutron_resume`) | Neutron resume spec N3 | no |
 | `edmrn/app.py` (neutron resume) | Two lines after the first `JournalMonitor(...)` in `EDMRN_App.__init__`: `edmrn.ext.neutron_resume.install(self)` | Opens `edmrn.db` and starts the neutron autosave | no |
 | `edmrn/app.py` (location) | Two lines directly after `install_edmrn_neutron_resume(self)` in `EDMRN_App.__init__`: `edmrn.ext.location.install(self)` | Wires the location tracker, header binding and cold start | no |
+| `edmrn/app.py` (crew) | Two lines directly after `install_edmrn_location(self)` in `EDMRN_App.__init__`: `edmrn.ext.crew.install(self)` | Wires crew capture: journal and `Status.json` listeners, the Tk-loop writer, the startup replay (crew capture spec) | no |
 | `edmrn/custom_route.py` (location) | `detect_current_system` asks `edmrn.ext.location.tracked_system` before reading `cmdr_location` | The header text is compound (`Sol · Station`), so as a fallback it yielded a station name as a system name (location spec) | no |
 | `edmrn/app.py` (startup monitor) | The first `JournalMonitor(...)` in `EDMRN_App.__init__` passes `manual_journal_path=self.config.journal_path or None` | The startup monitor and the cold start ignored a configured journal folder (location spec R2) | yes |
 | `edmrn/app.py` (location fallback) | Three lines in the jump handler: `tracked_system(self)` is asked before `cmdr_location.get()` when `last_known_system` is empty | Same reason: the compound header text is not a system name (location spec) | no |
@@ -77,3 +78,32 @@ whenever the tracker knows a system.
 
 Invariant: `edmrn/ext/` code never tails journals. Live data comes only through
 `JournalMonitor.event_listeners` (ADR-0001).
+
+## Crew capture data flow (crew capture spec, ADR-0005, ADR-0006)
+
+1. Upstream's `JournalMonitor` hands each event to `LiveCapture.feed` (`event_listeners`).
+   Upstream's `FuelTracker` hands each `Status.json` dict to `CrewStatus.feed_status`
+   (`status_listeners`).
+2. `JournalMapper` turns events into unsigned drafts, each attributed to the commander who was
+   active when the line was written. `CrewStatus` keeps ship, hull and fuel; it is never logged.
+3. The `Writer` takes drafts from any thread. Once a second, on the Tk loop, it signs at most 500
+   with the commander's key from `crew_keys/` and inserts them into `crew_log` in one transaction.
+   Each new event is projected into the `crew_*` tables.
+4. At startup, `replay` maps the newest 5 journals in the `edmrn-crew-replay` thread. Deterministic
+   ids mean it adds only what EDMRN missed.
+   - The monitor reads the newest journal from its end and never sees that session's `LoadGame`.
+     The live mapper therefore buffers events until the replay hands it its final state.
+
+Invariants:
+- Only the writer (own events) and `CrewStore.insert_received` (received events) write `crew_log`.
+- Event ids are bound to their author: a journal kind is projected only if its `event_id` is the
+  deterministic id of (author, kind, natural key), a manual kind only if it is a UUIDv7. A friend
+  therefore cannot claim or suppress another member's events.
+- Every valid, author-bound envelope is projected, and every merge is idempotent. The first sight of
+  each (author, event_id), recorded in `crew_projected`, gates counting (visit counts), so a repeated
+  event never counts twice.
+- Every projection merge is independent of arrival order. `rebuild_projections()` re-derives the
+  same tables from the log.
+- Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for
+  that commander and is never replaced.
+- `app.crew` is `None` when the store is unusable (ADR-0004).
