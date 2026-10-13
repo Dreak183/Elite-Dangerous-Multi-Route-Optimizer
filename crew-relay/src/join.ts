@@ -2,9 +2,9 @@
 // send to the server; the script shows it as text, never as markup.
 export const JOIN_SCRIPT =
   "(function(){var code='';try{code=decodeURIComponent(location.hash.slice(1));}catch(e){}" +
-  "var ok=/^edmrn-crew:1:[A-Za-z0-9_-]{1,1990}$/.test(code);var out=document.getElementById('code');" +
+  "var ok=/^edmrn-crew:1:[A-Za-z0-9_-]{1,1987}$/.test(code);var out=document.getElementById('code');" +
   "out.textContent=ok?code:'This link holds no valid EDMRN crew invite.';var b=document.getElementById('copy');" +
-  "b.hidden=!ok;b.addEventListener('click',function(){navigator.clipboard.writeText(code).then(function(){b.textContent='Copied';});});})();";
+  "b.hidden=!ok;b.addEventListener('click',function(){navigator.clipboard.writeText(code).then(function(){b.textContent='Copied';},function(){b.textContent='Copy failed - select the text';});});})();";
 
 export const JOIN_STYLE =
   'body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;background:#111;color:#eee}' +

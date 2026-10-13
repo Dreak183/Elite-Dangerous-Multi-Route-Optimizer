@@ -7,7 +7,7 @@ limit operations fail until 00:00 UTC (`../../../knowledge/group-sync-transport.
 ## Before the first deploy
 
 - The zone `the-hub.cloud` is listed as Active in the Cloudflare dashboard (Websites).
-- Node 20 or newer: `node --version`.
+- Node 22 or newer (Wrangler 4 requires it): `node --version`.
 - Dependencies and tests: `cd crew-relay`, `npm ci`, `npm test`.
 
 ## First deploy

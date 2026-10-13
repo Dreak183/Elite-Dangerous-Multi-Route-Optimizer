@@ -21,15 +21,28 @@ describe('routes', () => {
     expect(csp).toContain(`script-src '${await sha(JOIN_SCRIPT)}'`);
     expect(csp).toContain(`style-src '${await sha(JOIN_STYLE)}'`);
     expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     const html = await res.text();
     expect(html).toContain(`<script>${JOIN_SCRIPT}</script>`);
     expect(JOIN_SCRIPT).toContain('textContent');
     expect(JOIN_SCRIPT).not.toContain('innerHTML');
+    expect(JOIN_SCRIPT).toContain('{1,1987}'); // 2000-character invite limit minus the 13-character prefix
+    expect(JOIN_SCRIPT).toContain('Copy failed'); // clipboard rejection is handled
   });
 
   it('refuses unknown paths, bad group ids and plain GETs on the socket path', async () => {
     expect((await SELF.fetch('https://relay.test/nope')).status).toBe(404);
     expect((await SELF.fetch('https://relay.test/v1/groups/not-a-uuid/ws', { headers: { Upgrade: 'websocket' } })).status).toBe(404);
     expect((await SELF.fetch('https://relay.test/v1/groups/01920000-0000-7000-8000-0000000000a1/ws')).status).toBe(426);
+  });
+
+  it('forwards a valid socket upgrade to the group object and refuses malformed ids', async () => {
+    const id = '01920000-0000-7000-8000-0000000000a2';
+    expect((await SELF.fetch(`https://relay.test/v1/groups/${id}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(501);
+    const upper = id.toUpperCase();
+    expect((await SELF.fetch(`https://relay.test/v1/groups/${upper}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(404);
+    const v4 = '01920000-0000-4000-8000-0000000000a2';
+    expect((await SELF.fetch(`https://relay.test/v1/groups/${v4}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(404);
   });
 });
