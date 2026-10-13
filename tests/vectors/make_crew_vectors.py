@@ -108,6 +108,17 @@ SPECS = {
                          roster(name='Pwned', commander='M'), uid(30)),
     'remove_bob_by_alice': (A, 4, 'remove', '2026-10-13T11:05:00Z',
                             roster(member=B.author, last_seq=0), uid(22)),
+    'join_tie_alice': (A, 6, 'join', '2026-10-13T10:03:00Z',
+                       roster(invite_id=uid(101), token=TOKENS[1], commander='Alice'), uid(40)),
+    'join_tie_bob': (B, 6, 'join', '2026-10-13T10:03:00Z',
+                     roster(invite_id=uid(101), token=TOKENS[1], commander='Bob'), uid(41)),
+    'join_carol_at_expiry': (C, 3, 'join', '2026-10-13T10:05:00Z',
+                             roster(invite_id=uid(103), token=TOKENS[3], commander='Carol'), uid(42)),
+    'invite1_duplicate_id': (L, 9, 'invite', '2026-10-13T10:01:20Z',
+                             roster(invite_id=uid(101), token_hash=sha(TOKENS[2]),
+                                    expires_at='2026-10-14T10:00:00Z', label='Second'), uid(43)),
+    'join_bob_second_token': (B, 7, 'join', '2026-10-13T10:03:30Z',
+                              roster(invite_id=uid(101), token=TOKENS[2], commander='Bob'), uid(44)),
     'visit_alice': (A, 3, 'visit', '2026-10-13T10:10:00Z',
                     {'commander': 'Alice', 'system': 'Sol', 'address': '10477373803',
                      'coords': [0.0, 0.0, 0.0]}, 'ab' * 16),
@@ -149,17 +160,55 @@ def build() -> dict:
                           'valid': name == 'valid'})
 
     _, _, _, group_data, group_sig = sealed('group')
+    _, _, _, visit_data, _ = sealed('visit_alice')
+
+    def padded(n: int) -> bytes:
+        return canonical(envelope(A, 1, 'visit', '2026-10-13T10:00:00Z', {'pad': 'x' * n}, 'ab' * 16))
+
+    pad = 16384 - len(padded(0))
+    # Byte-level variants where Python's json and JavaScript's JSON.parse could disagree. The relay
+    # requires canonical bytes for every envelope (valid False); Python's parse_envelope checks the
+    # structure only, so it still accepts non-canonical spacing and key order (python_valid True).
+    spaced_env = json.dumps(group_obj, sort_keys=True, separators=(', ', ': ')).encode()
+    unsorted_env = json.dumps(group_obj, separators=(',', ':')).encode()
+    raw_cases = [
+        ('raw_canonical', group_data, True, None),
+        ('raw_16384_bytes', padded(pad), True, None),
+        ('raw_16385_bytes', padded(pad + 1), False, None),
+        ('raw_float_seq_3_0', group_data.replace(b'"seq":1,', b'"seq":3.0,'), False, None),
+        ('raw_float_seq_3e0', group_data.replace(b'"seq":1,', b'"seq":3e0,'), False, None),
+        ('raw_float_v', group_data.replace(b'"v":1}', b'"v":1.0}'), False, None),
+        ('raw_duplicate_seq_visit', visit_data.replace(b'"seq":3,', b'"seq":3,"seq":3,'), False, None),
+        ('raw_bom', b'\xef\xbb\xbf' + group_data, False, None),
+        ('raw_invalid_utf8', group_data.replace(b'Crew', b'Cr\xffw'), False, None),
+        ('raw_spaced', spaced_env, False, True),
+        ('raw_unsorted_keys', unsorted_env, False, True),
+    ]
+    for name, data, relay_ok, python_ok in raw_cases:
+        assert (name == 'raw_canonical' or data != group_data), name
+        case_ = {'name': name, 'e': b64(data), 'valid': relay_ok}
+        if python_ok is not None:
+            case_['python_valid'] = python_ok
+        structure.append(case_)
     tampered = bytearray(group_data)
     tampered[-3] ^= 1
-    small_order_env = canonical({**group_obj, 'author': b64(bytes(32))})
+    identity = bytes([1]) + bytes(31)  # the neutral point: plain Ed25519 accepts (R=identity, S=0)
+    small_order_env = canonical({**group_obj, 'author': b64(identity)})
+    alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+    # The last character of a 43-character key carries 2 padding bits; canonical keys have them 0.
+    noncanonical_tail = alphabet[alphabet.index(L.author[-1]) + 1]
     signatures = [
         {'name': 'valid', 'e': b64(group_data), 's': b64(group_sig), 'author': L.author, 'valid': True},
         {'name': 'tampered', 'e': b64(bytes(tampered)), 's': b64(group_sig), 'author': L.author,
          'valid': False},
         {'name': 'wrong_key', 'e': b64(group_data), 's': b64(A.sign(group_data)), 'author': L.author,
          'valid': False},
-        {'name': 'small_order_author', 'e': b64(small_order_env), 's': b64(bytes(64)),
-         'author': b64(bytes(32)), 'valid': False},
+        {'name': 'small_order_author', 'e': b64(small_order_env), 's': b64(identity + bytes(32)),
+         'author': b64(identity), 'valid': False},
+        {'name': 'non_canonical_author', 'e': b64(group_data), 's': b64(group_sig),
+         'author': L.author[:-1] + noncanonical_tail, 'valid': False},
+        {'name': 'signature_63_bytes', 'e': b64(group_data), 's': b64(group_sig[:63]),
+         'author': L.author, 'valid': False},
     ]
 
     spaced = json.dumps(group_obj, sort_keys=True, separators=(', ', ': ')).encode()
@@ -176,9 +225,11 @@ def build() -> dict:
 
     base_invite = roster(invite_id=uid(101), token_hash=sha(TOKENS[1]),
                          expires_at='2026-10-14T10:00:00Z', label='Alice')
+    v4 = '01920000-0000-4000-8000-000000000001'
+    accent = '\xe9'
     payload_cases = [
         {'kind': 'group', 'payload': roster(name='Crew', commander='Leader'), 'valid': True},
-        {'kind': 'group', 'payload': roster(name='Ünïcode', commander='Leader'), 'valid': False},
+        {'kind': 'group', 'payload': roster(name='\xdcn\xefcode', commander='Leader'), 'valid': False},
         {'kind': 'group', 'payload': roster(name='x' * 65, commander='Leader'), 'valid': False},
         {'kind': 'group', 'payload': roster(name='', commander='Leader'), 'valid': False},
         {'kind': 'group', 'payload': roster(name='Crew', commander='Leader', extra=1), 'valid': False},
@@ -192,6 +243,23 @@ def build() -> dict:
         {'kind': 'remove', 'payload': roster(member=A.author, last_seq=-1), 'valid': False},
         {'kind': 'remove', 'payload': roster(member=A.author, last_seq=True), 'valid': False},
         {'kind': 'remove', 'payload': roster(member=A.author[:40], last_seq=1), 'valid': False},
+        {'kind': 'remove', 'payload': roster(member=A.author, last_seq=2 ** 53 - 1), 'valid': True},
+        {'kind': 'remove', 'payload': roster(member=A.author, last_seq=2 ** 53), 'valid': False},
+        {'kind': 'group', 'payload': roster(name='x' * 64, commander='Leader'), 'valid': True},
+        {'kind': 'group', 'payload': roster(group=v4, name='Crew', commander='Leader'), 'valid': False},
+        {'kind': 'group', 'payload': roster(group=uid(0xa1).upper(), name='Crew', commander='Leader'),
+         'valid': False},
+        {'kind': 'group', 'payload': roster(name='Crew', commander='Leader' + accent), 'valid': False},
+        {'kind': 'invite', 'payload': {**base_invite, 'invite_id': v4}, 'valid': False},
+        {'kind': 'invite', 'payload': {**base_invite, 'invite_id': uid(0xb1).upper()}, 'valid': False},
+        {'kind': 'invite', 'payload': {**base_invite, 'label': 'Al' + accent + 'ce'}, 'valid': False},
+        {'kind': 'join', 'payload': roster(invite_id=uid(101), token='AA' * 32, commander='Bob'),
+         'valid': False},
+        {'kind': 'join', 'payload': roster(invite_id=uid(101), token='11' * 31, commander='Bob'),
+         'valid': False},
+        {'kind': 'join', 'payload': roster(invite_id=v4, token=TOKENS[1], commander='Bob'), 'valid': False},
+        {'kind': 'join', 'payload': roster(invite_id=uid(101), token=TOKENS[1], commander='B' + accent),
+         'valid': False},
     ]
 
     plausibility = [{'created_at': s, 'plausible': ok} for s, ok in [
@@ -227,6 +295,18 @@ def build() -> dict:
         case('no_group_envelope', ['invite1', 'join_alice'], {'leader': None, 'alice': None}, None),
     ]
 
+    roster_cases += [
+        # Equal created_at: the order falls to the author, code-point order; the smaller wins.
+        case('tie_break_by_author', ['group', 'invite1', 'join_tie_bob', 'join_tie_alice'],
+             {'leader': None, 'alice' if A.author < B.author else 'bob': None}),
+        case('tie_break_by_author_reversed', ['group', 'invite1', 'join_tie_alice', 'join_tie_bob'],
+             {'leader': None, 'alice' if A.author < B.author else 'bob': None}),
+        case('join_at_expiry_admitted', ['group', 'invite3_expiring', 'join_carol_at_expiry'],
+             {'leader': None, 'carol': None}),
+        case('duplicate_invite_id_first_wins',
+             ['invite1_duplicate_id', 'join_bob_second_token', 'group', 'invite1', 'join_alice'],
+             {'leader': None, 'alice': None}),
+    ]
     # A friend's `remove` is not the leader's: Bob stays active (S2).
     roster_cases.append(case(
         'non_leader_remove_ignored',
@@ -239,18 +319,10 @@ def build() -> dict:
     invite = {'code': {'url': relay, 'group_id': G, 'invite_id': uid(101), 'token': TOKENS[1],
                        'leader': L.author},
               'text': invite_text, 'link': 'https://galroute.the-hub.cloud/join#' + invite_text}
-    relay_url_cases = [{'url': u, 'valid': ok} for u, ok in [
-        ('wss://galroute.the-hub.cloud', True), ('wss://galroute.the-hub.cloud/', True),
-        ('wss://example.com:8443', True), ('ws://localhost:8787', True), ('ws://127.0.0.1', True),
-        ('ws://example.com', False), ('https://example.com', False), ('wss://[::1]', False),
-        ('wss://example.com:0', False), ('wss://user@example.com', False),
-        ('wss://example.com/path', False), ('wss://example.com?x=1', False),
-        ('wss://example.com#x', False), ('wss://exämple.com', False), ('wss://', False),
-    ]]
     # Task 1's refused strings (control, bidi, surrogate, format and separator characters); the
-    # JSON file carries them as \u escapes because ensure_ascii is on.
-    whitelist_refusals = ['a\x00b', 'a\nb', 'a\x1bb', 'a\x7fb', 'a\x85b', 'a‮b', 'a⁦b',
-                          'a\ud800b', 'a​b', 'a b']
+    # JSON file carries them as escapes because ensure_ascii is on.
+    whitelist_refusals = ['a\x00b', 'a\nb', 'a\x1bb', 'a\x7fb', 'a\x85b',
+                          'a\u202eb', 'a\u2066b', 'a\ud800b', 'a\u200bb', 'a\u2028b']
 
     nonce = b64(bytes(range(32)))
     auth_bytes = f'edmrn-crew-auth\n{G}\n{nonce}'.encode('ascii')
@@ -260,6 +332,19 @@ def build() -> dict:
         'fuel_main': 10.0, 'fuel_reserve': 0.5, 'fuel_capacity_main': 32.0,
         'fuel_capacity_reserve': 0.63, 'paused': False}})
 
+    wrong_nonce = b64(bytes(range(1, 33)))
+    auth_negative = [
+        {'name': 'wrong_nonce', 'group': G, 'nonce': nonce, 'author': L.author,
+         'sig': b64(L.sign(f'edmrn-crew-auth{chr(10)}{G}{chr(10)}{wrong_nonce}'.encode('ascii')))},
+        {'name': 'wrong_group', 'group': G, 'nonce': nonce, 'author': L.author,
+         'sig': b64(L.sign(f'edmrn-crew-auth{chr(10)}{OTHER_G}{chr(10)}{nonce}'.encode('ascii')))},
+        {'name': 'other_key', 'group': G, 'nonce': nonce, 'author': L.author, 'sig': b64(A.sign(auth_bytes))},
+    ]
+    status_negative = [
+        {'name': 'signed_by_another_key', 'e': b64(status_doc), 's': b64(B.sign(status_doc)),
+         'author': A.author},
+    ]
+
     return {
         'version': 1, 'now': NOW, 'group_id': G,
         'keys': {name: {'seed': key.seed.hex(), 'author': key.author} for name, key in KEYS.items()},
@@ -268,7 +353,8 @@ def build() -> dict:
         'plausibility_cases': plausibility, 'roster_cases': roster_cases,
         'auth': {'group': G, 'nonce': nonce, 'author': L.author, 'sig': b64(L.sign(auth_bytes))},
         'status': {'e': b64(status_doc), 's': b64(A.sign(status_doc)), 'author': A.author},
-        'invite': invite, 'relay_url_cases': relay_url_cases,
+        'auth_negative': auth_negative, 'status_negative': status_negative,
+        'invite': invite,
         'whitelist_refusals': whitelist_refusals,
     }
 

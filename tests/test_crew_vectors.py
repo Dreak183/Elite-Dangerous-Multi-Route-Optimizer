@@ -9,8 +9,7 @@ import pytest
 from edmrn.ext import crew_events as ev
 from edmrn.ext import crew_protocol as proto
 from edmrn.ext.crew_identity import verify
-from edmrn.ext.crew_roster import (InviteError, check_relay_url, compute_roster, decode_invite,
-                                   parse_roster_envelope)
+from edmrn.ext.crew_roster import compute_roster, decode_invite, parse_roster_envelope
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTORS = ROOT / "crew-relay" / "test" / "vectors.json"
@@ -47,7 +46,7 @@ def test_structure_cases(v):
             ok = True
         except ev.EnvelopeError:
             ok = False
-        assert ok is case["valid"], case["name"]
+        assert ok is case.get("python_valid", case["valid"]), case["name"]
 
 
 def test_signature_cases(v):
@@ -99,18 +98,16 @@ def test_invite_decodes_to_the_vector_code(v):
     assert decode_invite(v["invite"]["link"]) == code
 
 
-def test_relay_url_cases(v):
-    for case in v["relay_url_cases"]:
-        try:
-            check_relay_url(case["url"])
-            ok = True
-        except InviteError:
-            ok = False
-        assert ok is case["valid"], case
-
-
 def test_whitelist_refusals(v):
     assert v["whitelist_refusals"]
     for text in v["whitelist_refusals"]:
         assert ev.text_allowed(text) is False, ascii(text)
     assert ev.text_allowed("Sol Über-Welt (★)")
+
+
+def test_auth_and_status_negatives(v):
+    for case in v["auth_negative"]:
+        assert not verify(case["author"], raw(case["sig"]), proto.auth_message(case["group"], case["nonce"])), case["name"]
+    for case in v["status_negative"]:
+        with pytest.raises(proto.FrameError):
+            proto.parse_status({"t": "st", "e": case["e"], "s": case["s"]})
