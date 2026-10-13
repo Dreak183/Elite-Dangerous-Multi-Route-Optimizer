@@ -141,6 +141,57 @@ def test_rebuilds_before_set_gate_keep_own_rows_and_the_marker(store, keys):
     assert len(systems(store)) == 1 and not marker(store)
 
 
+def key_prefix(store, address):
+    """The ordering key of a system's name: '0|' own report, '1|' a friend's."""
+    return next(row[2][:2] for row in systems(store) if row[0] == address)
+
+
+def test_a_stale_first_gate_that_fails_to_rebuild_is_repaired(store, keys):
+    an_earlier_run(store, keys)
+    other_group = "01920000-0000-7000-8000-0000000000c1"
+    crew = CrewStore(store, clock=lambda: NOW)
+    real = crew.rebuild_projections
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("rebuild failed")
+
+    crew.rebuild_projections = crash
+    with pytest.raises(RuntimeError):
+        crew.set_gate(frozenset({keys["me"].author}), other_group, keys["leader"].author)
+    assert marker(store) and len(systems(store)) == 1
+    crew.rebuild_projections = real
+    crew.set_gate(frozenset({keys["me"].author}), other_group, keys["leader"].author)
+    assert systems(store) == [] and not marker(store)
+
+
+def test_a_friends_key_becoming_own_between_runs_rebuilds_at_the_first_set_gate(store, keys):
+    an_earlier_run(store, keys)
+    assert key_prefix(store, "10477373803") == "1|"
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author, keys["alice"].author}), G, keys["leader"].author)
+    assert key_prefix(store, "10477373803") == "0|"
+
+
+def test_a_new_own_author_without_rows_costs_no_rebuild(store, keys):
+    an_earlier_run(store, keys)
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    crew.rebuild_projections = lambda: pytest.fail("no rows, no rebuild")
+    crew.append_own([(keys["bob"], visit(cmdr="bob", at="2026-10-13T09:00:00Z", address="7"))])
+    again = CrewStore(store, clock=lambda: NOW)
+    again.rebuild_projections = lambda: pytest.fail("the fingerprint was re-stored")
+    again.set_gate(frozenset({keys["me"].author, keys["bob"].author}), G, keys["leader"].author)
+
+
+def test_a_new_own_author_with_rows_rebuilds(store, keys):
+    an_earlier_run(store, keys)
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    assert key_prefix(store, "10477373803") == "1|"
+    crew.append_own([(keys["alice"], visit(cmdr="alice", at="2026-10-13T09:30:00Z", address="7"))])
+    assert key_prefix(store, "10477373803") == "0|"
+
+
 def test_a_rebuild_that_failed_after_the_commit_is_retried_at_the_next_call(store, keys):
     crew = CrewStore(store, clock=lambda: NOW)
     crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)

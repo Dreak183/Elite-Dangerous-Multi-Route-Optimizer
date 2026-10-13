@@ -116,9 +116,12 @@ Invariants:
 - Own reports win a system's name and coordinates over friends' reports; ties order by
   (`created_at`, author, `seq`).
 - A change that narrows membership (removal, a lower `last_seq`) writes a rebuild marker in the same
-  transaction and rebuilds after the commit; a failed rebuild is retried at the next call and, after
-  a crash, at the next start. A rebuild without a gate is refused. The first gate of a process
-  rebuilds only if the stored roster fingerprint differs from the computed one.
+  transaction and rebuilds after the commit, as does every other path that finds stored rows stale;
+  a failed rebuild is retried at the next call and, after a crash, at the next start through that
+  marker. A rebuild without a gate is refused. The first gate of a process rebuilds only if the
+  stored fingerprint (group, leader, members with their `last_seq`, own authors) differs from the
+  computed one, or is absent while friends' rows exist. An own author who already has rows (a
+  friend's key imported) triggers a rebuild; one without rows only re-stores the fingerprint.
 - Every projection merge is independent of arrival order. `rebuild_projections()` re-derives the
   same tables from the log.
 - Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for
