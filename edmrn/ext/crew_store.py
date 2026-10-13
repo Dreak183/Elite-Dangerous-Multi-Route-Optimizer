@@ -23,9 +23,9 @@ PROJECTION_TABLES = (
     'crew_finds', 'crew_manual_finds', 'crew_notes',
 )
 
-Projector = Callable[[sqlite3.Connection, dict], None]
+Projector = Callable[[sqlite3.Connection, dict, bool], None]
 def _order(env: dict) -> str:
-    return f"{env['created_at']}|{env['author']}|{env['event_id']}"
+    return f"{env['created_at']}|{env['author']}|{env['seq']:016d}"
 
 
 def _name_system(conn, address: str, name: Optional[str], order: str) -> None:
@@ -78,19 +78,19 @@ def _refresh_explored(conn, author: str, address: str) -> None:
         conn.execute('DELETE FROM crew_explored WHERE author = ? AND address = ?', (author, address))
 
 
-def _project_visit(conn, env: dict) -> None:
+def _project_visit(conn, env: dict, first: bool) -> None:
     p, order = env['payload'], _order(env)
     _name_system(conn, p['address'], p['system'], order)
     _place_system(conn, p['address'], p['coords'], order)
     conn.execute(
         'INSERT INTO crew_visits (author, address, first_at, last_at, visit_count) '
-        'VALUES (?, ?, ?, ?, 1) ON CONFLICT (author, address) DO UPDATE SET '
+        'VALUES (?, ?, ?, ?, ?) ON CONFLICT (author, address) DO UPDATE SET '
         'first_at = min(first_at, excluded.first_at), last_at = max(last_at, excluded.last_at), '
-        'visit_count = visit_count + 1',
-        (env['author'], p['address'], env['created_at'], env['created_at']))
+        'visit_count = visit_count + ?',
+        (env['author'], p['address'], env['created_at'], env['created_at'], int(first), int(first)))
 
 
-def _project_honk(conn, env: dict) -> None:
+def _project_honk(conn, env: dict, first: bool) -> None:
     p, order = env['payload'], _order(env)
     _name_system(conn, p['address'], p['system'], order)
     _count_system(conn, p['address'], p['body_count'], order)
@@ -102,7 +102,7 @@ def _project_honk(conn, env: dict) -> None:
     _refresh_explored(conn, env['author'], p['address'])
 
 
-def _project_all_bodies(conn, env: dict) -> None:
+def _project_all_bodies(conn, env: dict, first: bool) -> None:
     p, order = env['payload'], _order(env)
     _name_system(conn, p['address'], p['system'], order)
     _count_system(conn, p['address'], p['count'], order)
@@ -115,20 +115,27 @@ def _flag(value: Optional[bool]) -> Optional[int]:
     return None if value is None else int(value)
 
 
-def _project_body(conn, env: dict) -> None:
+def _project_body(conn, env: dict, first: bool) -> None:
     p = env['payload']
     _name_system(conn, p['address'], p['system'], _order(env))
     conn.execute(
         'INSERT INTO crew_body_reports (event_id, author, created_at, address, body_id, tier, name, '
-        'star_type, planet_class, moon, landable, terraform, was_discovered, was_mapped, scan_type) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'star_type, planet_class, moon, landable, terraform, was_discovered, was_mapped, scan_type, '
+        'report_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+        'ON CONFLICT (event_id) DO UPDATE SET created_at = excluded.created_at, '
+        'address = excluded.address, body_id = excluded.body_id, tier = excluded.tier, '
+        'name = excluded.name, star_type = excluded.star_type, planet_class = excluded.planet_class, '
+        'moon = excluded.moon, landable = excluded.landable, terraform = excluded.terraform, '
+        'was_discovered = excluded.was_discovered, was_mapped = excluded.was_mapped, '
+        'scan_type = excluded.scan_type, report_key = excluded.report_key '
+        'WHERE excluded.report_key < crew_body_reports.report_key',
         (env['event_id'], env['author'], env['created_at'], p['address'], p['body_id'], p['tier'],
          p['name'], p['star_type'], p['planet_class'], int(p['moon']), _flag(p['landable']),
-         p['terraform'], int(p['was_discovered']), int(p['was_mapped']), p['scan_type']))
+         p['terraform'], int(p['was_discovered']), int(p['was_mapped']), p['scan_type'], _order(env)))
     _refresh_explored(conn, env['author'], p['address'])
 
 
-def _project_signals(conn, env: dict) -> None:
+def _project_signals(conn, env: dict, first: bool) -> None:
     p = env['payload']
     _name_system(conn, p['address'], p['system'], _order(env))
     conn.executemany(
@@ -145,15 +152,19 @@ def _project_signals(conn, env: dict) -> None:
         (p['address'], p['body_id'], p['source'], p['body_name']))
 
 
-def _project_find(conn, env: dict) -> None:
+def _project_find(conn, env: dict, first: bool) -> None:
     p = env['payload']
     if p['mode'] == 'auto':
         conn.execute(
             'INSERT INTO crew_finds (event_id, author, created_at, find_kind, system, address, '
-            'body_name, body_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'body_name, body_id, detail, report_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+            'ON CONFLICT (event_id) DO UPDATE SET created_at = excluded.created_at, '
+            'find_kind = excluded.find_kind, system = excluded.system, address = excluded.address, '
+            'body_name = excluded.body_name, body_id = excluded.body_id, detail = excluded.detail, '
+            'report_key = excluded.report_key WHERE excluded.report_key < crew_finds.report_key',
             (env['event_id'], env['author'], env['created_at'], p['find_kind'], p['system'],
              p['address'], p['body_name'], p['body_id'],
-             ev.canonical_bytes(p['detail']).decode('utf-8')))
+             ev.canonical_bytes(p['detail']).decode('utf-8'), _order(env)))
         return
     conn.execute(
         'INSERT INTO crew_manual_finds (author, find_id, seq, event_id, created_at, find_kind, '
@@ -169,7 +180,7 @@ def _project_find(conn, env: dict) -> None:
          int(p['deleted'])))
 
 
-def _project_note(conn, env: dict) -> None:
+def _project_note(conn, env: dict, first: bool) -> None:
     p = env['payload']
     conn.execute(
         'INSERT INTO crew_notes (author, note_id, seq, event_id, created_at, system, address, text, '
@@ -199,7 +210,7 @@ def _insert(conn: sqlite3.Connection, env: dict, data: bytes, signature: bytes) 
 
 
 def _project(conn: sqlite3.Connection, env: dict) -> None:
-    """Apply an envelope once per (author, event_id), if its kind, v and payload are known-good (C4)."""
+    """Project every valid, author-bound envelope; first sight per (author, event_id) gates counting."""
     kind, v = env['kind'], env['v']
     if not ev.is_known(kind, v):
         return
@@ -217,10 +228,9 @@ def _project(conn: sqlite3.Connection, env: dict) -> None:
         logger.warning(f"Crew event {env['event_id']} kept unprojected: "
                        'event_id does not match its author and key')
         return
-    if conn.execute('INSERT OR IGNORE INTO crew_projected (author, event_id) VALUES (?, ?)',
-                    (env['author'], env['event_id'])).rowcount == 0:
-        return
-    _PROJECTORS[kind](conn, env)
+    first = conn.execute('INSERT OR IGNORE INTO crew_projected (author, event_id) VALUES (?, ?)',
+                         (env['author'], env['event_id'])).rowcount == 1
+    _PROJECTORS[kind](conn, env, first)
 
 
 @dataclass(frozen=True)
@@ -405,7 +415,7 @@ class CrewStore:
     def visits(self, author: str) -> list[VisitRow]:
         with self.store.read() as conn:
             rows = conn.execute('SELECT address, first_at, last_at, visit_count FROM crew_visits '
-                                'WHERE author = ? ORDER BY last_at DESC', (author,)).fetchall()
+                                'WHERE author = ? ORDER BY last_at DESC, address', (author,)).fetchall()
         return [VisitRow(*row) for row in rows]
 
     def bodies(self, address: str) -> list[BodyRow]:
@@ -413,7 +423,7 @@ class CrewStore:
             rows = conn.execute(
                 'SELECT body_id, name, tier, star_type, planet_class, moon, landable, terraform, '
                 'scan_type, author FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY body_id '
-                "ORDER BY tier = 'full' DESC, created_at, author, event_id) AS rank "
+                "ORDER BY tier = 'full' DESC, report_key) AS rank "
                 'FROM crew_body_reports WHERE address = ?) WHERE rank = 1 ORDER BY body_id',
                 (address,)).fetchall()
         return [BodyRow(r[0], r[1], r[2], r[3], r[4], bool(r[5]), _optional_bool(r[6]), r[7], r[8],
@@ -423,7 +433,7 @@ class CrewStore:
         with self.store.read() as conn:
             rows = conn.execute(
                 'SELECT author, body_id, tier, was_discovered, was_mapped, created_at '
-                'FROM crew_body_reports WHERE address = ? ORDER BY body_id, created_at, author',
+                'FROM crew_body_reports WHERE address = ? ORDER BY body_id, created_at, author, tier',
                 (address,)).fetchall()
         return [BodyReport(r[0], r[1], r[2], bool(r[3]), bool(r[4]), r[5]) for r in rows]
 
@@ -456,7 +466,7 @@ class CrewStore:
     def finds(self) -> list[FindRow]:
         with self.store.read() as conn:
             rows = conn.execute(f'{_AUTO_FINDS_SELECT} UNION ALL {_MANUAL_FINDS_SELECT} '
-                                'WHERE deleted = 0 ORDER BY 3 DESC, 1 DESC').fetchall()
+                                'WHERE deleted = 0 ORDER BY 3 DESC, 1 DESC, 2').fetchall()
         return [_find_row(row) for row in rows]
 
     def manual_find(self, author: str, find_id: str) -> Optional[FindRow]:
@@ -469,10 +479,10 @@ class CrewStore:
         with self.store.read() as conn:
             if address is None:
                 rows = conn.execute(f'{_NOTE_SELECT} WHERE deleted = 0 '
-                                    'ORDER BY created_at DESC').fetchall()
+                                    'ORDER BY created_at DESC, author, note_id').fetchall()
             else:
                 rows = conn.execute(f'{_NOTE_SELECT} WHERE deleted = 0 AND address = ? '
-                                    'ORDER BY created_at DESC', (address,)).fetchall()
+                                    'ORDER BY created_at DESC, author, note_id', (address,)).fetchall()
         return [_note_row(row) for row in rows]
 
     def note(self, author: str, note_id: str) -> Optional[NoteRow]:

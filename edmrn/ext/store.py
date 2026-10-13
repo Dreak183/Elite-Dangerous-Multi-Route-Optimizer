@@ -96,7 +96,8 @@ MIGRATIONS: list[list[str]] = [
             terraform      TEXT,
             was_discovered INTEGER NOT NULL,
             was_mapped     INTEGER NOT NULL,
-            scan_type      TEXT NOT NULL
+            scan_type      TEXT NOT NULL,
+            report_key     TEXT NOT NULL
         )""",
         "CREATE INDEX crew_body_reports_body ON crew_body_reports (address, body_id)",
         """CREATE TABLE crew_signals (
@@ -128,7 +129,8 @@ MIGRATIONS: list[list[str]] = [
             address    TEXT NOT NULL,
             body_name  TEXT,
             body_id    INTEGER,
-            detail     TEXT NOT NULL
+            detail     TEXT NOT NULL,
+            report_key TEXT NOT NULL
         )""",
         """CREATE TABLE crew_manual_finds (
             author     TEXT NOT NULL,

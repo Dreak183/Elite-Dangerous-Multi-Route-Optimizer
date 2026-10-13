@@ -411,3 +411,76 @@ def test_rebuild_equals_the_incremental_result(tmp_path, crew, store, ring):
     before = dump(store)
     crew.rebuild_projections()
     assert dump(store) == before
+
+
+# --- repeated event ids and surviving-mutant guards ---------------------------------------
+
+def _duplicate_pairs(friend):
+    """Same author, same deterministic id, two seqs, differing payload (a replay after data loss)."""
+    pairs = {
+        "body": [(body("F9", at=ts(1), body_id=4, mapped=False), 2),
+                 (body("F9", at=ts(40), body_id=4, mapped=True), 7)],
+        "signals": [(signals("F9", at=ts(1), counts={"biological": 1}), 2),
+                    (signals("F9", at=ts(40), counts={"biological": 4}), 7)],
+        "all_bodies": [(all_bodies("F9", at=ts(1), count=3), 2),
+                       (all_bodies("F9", at=ts(40), count=9), 7)],
+        "find": [(bio_find("F9", at=ts(1), count=2), 2), (bio_find("F9", at=ts(40), count=5), 7)],
+    }
+    return {name: [sealed(friend, draft, seq) for draft, seq in items] for name, items in pairs.items()}
+
+
+@pytest.mark.parametrize("name", ["body", "signals", "all_bodies", "find"])
+def test_a_repeated_event_id_projects_the_same_in_every_order(tmp_path, friend, name):
+    first, second = _duplicate_pairs(friend)[name]
+    dumps = []
+    for attempt, order in enumerate(([first, second], [second, first])):
+        s = Store(tmp_path / f"dup{attempt}.db")
+        try:
+            crew_store = CrewStore(s)
+            for data, signature in order:
+                assert crew_store.insert_received(data, signature)
+            incremental = dump(s)
+            crew_store.rebuild_projections()
+            assert dump(s) == incremental
+            dumps.append(incremental)
+        finally:
+            s.close()
+    assert dumps[0] == dumps[1]
+
+
+def test_a_repeated_visit_counts_once(crew, friend):
+    draft = visit("F9", at=ts(1))
+    crew.insert_received(*sealed(friend, draft, 2))
+    crew.insert_received(*sealed(friend, draft, 7))
+    [v] = crew.visits(friend.author)
+    assert v.count == 1
+
+
+def test_an_older_honk_arriving_late_does_not_replace_the_latest(crew, friend):
+    crew.insert_received(*sealed(friend, body("F9", at=ts(1), body_id=0, star_type="G"), 1))
+    crew.insert_received(*sealed(friend, body("F9", at=ts(2), body_id=1, tier="basic"), 2))
+    crew.insert_received(*sealed(friend, honk("F9", at=ts(9), bodies=5), 3))
+    assert crew.explored(friend.author) == set()
+    crew.insert_received(*sealed(friend, honk("F9", at=ts(3), bodies=2), 4))
+    assert crew.explored(friend.author) == set()
+
+
+def test_manual_find_revision_with_a_lower_seq_arriving_late_is_ignored(crew, friend):
+    find_id = ev.uuid7()
+    crew.insert_received(*sealed(friend, manual_find("F9", at=ts(2), find_id=find_id, note_text="new"), 5))
+    crew.insert_received(*sealed(friend, manual_find("F9", at=ts(1), find_id=find_id, note_text="old"), 2))
+    assert crew.manual_find(friend.author, find_id).note == "new"
+
+
+def test_signal_source_body_name_is_the_smallest_whatever_the_arrival(crew, friend):
+    crew.insert_received(*sealed(friend, signals("F9", at=ts(1), body_name="Zed 1", source="fss"), 1))
+    crew.insert_received(*sealed(friend, signals("F9", at=ts(2), body_name="Alpha 1", source="fss"), 2))
+    assert crew.signals(ADDR)[1].body_name == "Alpha 1"
+
+
+def test_notes_by_address_hide_deleted_notes(crew, ring):
+    me = ring.for_commander("F1")
+    note_id = ev.uuid7()
+    crew.append_own([(me, note(note_id=note_id, text="x")), (me, note(note_id=note_id, text="x",
+                                                                       deleted=True, at=ts(1)))])
+    assert crew.notes(ADDR) == [] and crew.notes() == []
