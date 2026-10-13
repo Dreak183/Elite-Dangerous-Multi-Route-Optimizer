@@ -102,13 +102,23 @@ Invariant: `edmrn/ext/` code never tails journals. Live data comes only through
      so past the cap the oldest drafts are dropped.
 
 Invariants:
-- Only the writer (own events) and `CrewStore.insert_received` (received events) write `crew_log`.
+- Only the writer (own events) and `CrewStore.insert_received_batch` (received events, one transaction
+  per batch; `insert_received` wraps it) write `crew_log`.
 - Event ids are bound to their author: a journal kind is projected only if its `event_id` is the
   deterministic id of (author, kind, natural key), a manual kind only if it is a UUIDv7. A friend
   therefore cannot claim or suppress another member's events.
-- Every valid, author-bound envelope is projected, and every merge is idempotent. The first sight of
+- A received envelope is stored once signed and well-formed, and projected only if it passes the gate
+  (ADR-0007): a valid payload, an author-bound `event_id`, a plausible `created_at` and, for
+  non-roster kinds, an author the roster admits up to that `seq`. Own authors always project. Roster
+  kinds change membership, not projection tables. Every merge is idempotent. The first sight of
   each (author, event_id), recorded in `crew_projected`, gates counting (visit counts), so a repeated
   event never counts twice.
+- Own reports win a system's name and coordinates over friends' reports; ties order by
+  (`created_at`, author, `seq`).
+- A change that narrows membership (removal, a lower `last_seq`) writes a rebuild marker in the same
+  transaction and rebuilds after the commit; a failed rebuild is retried at the next call and, after
+  a crash, at the next start. A rebuild without a gate is refused. The first gate of a process
+  rebuilds only if the stored roster fingerprint differs from the computed one.
 - Every projection merge is independent of arrival order. `rebuild_projections()` re-derives the
   same tables from the log.
 - Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for

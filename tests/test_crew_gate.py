@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from crew_helpers import ADDR, dump, sealed, visit
+from crew_helpers import dump, sealed, visit
 from edmrn.ext import crew_events as ev
 from edmrn.ext.crew_identity import KeyRing
 from edmrn.ext.crew_roster import token_hash
@@ -89,22 +89,91 @@ def test_removal_withdraws_rows_above_last_seq(store, keys):
     assert {row[0] for row in systems(store)} == {"1"}
 
 
+def an_earlier_run(store, keys):
+    """A process that gated, admitted alice and projected her visit; its projections persist."""
+    run = CrewStore(store, clock=lambda: NOW)
+    run.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    run.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
+    run.insert_received_batch([sealed(keys["alice"], visit(at="2026-10-13T09:00:00Z"), 2)])
+    assert len(systems(store)) == 1
+
+
 def test_the_first_set_gate_per_process_projects_nothing(store, keys):
     # Spec B1 S2: projections persist, so the first gate of a process is only a baseline.
-    before = CrewStore(store, clock=lambda: NOW)
-    before.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
-    before.insert_received_batch([sealed(keys["alice"], visit(at="2026-10-13T09:00:00Z"), 2)])
-    assert systems(store) == []
+    an_earlier_run(store, keys)
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM crew_systems")
     crew = CrewStore(store, clock=lambda: NOW)
     crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
     assert systems(store) == [] and keys["alice"].author in crew.roster.members
 
 
+def test_a_roster_changed_while_closed_rebuilds_at_the_first_set_gate_only(store, keys):
+    an_earlier_run(store, keys)
+    other_group = "01920000-0000-7000-8000-0000000000c1"
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}), other_group, keys["leader"].author)
+    assert systems(store) == [] and keys["alice"].author not in crew.roster.members
+    again = CrewStore(store, clock=lambda: NOW)
+    again.rebuild_projections = lambda: pytest.fail("an unchanged roster must not rebuild")
+    again.set_gate(frozenset({keys["me"].author}), other_group, keys["leader"].author)
+
+
+def test_friends_envelopes_stored_before_any_gate_are_projected_at_the_first_set_gate(store, keys):
+    before = CrewStore(store, clock=lambda: NOW)
+    before.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
+    before.insert_received_batch([sealed(keys["alice"], visit(at="2026-10-13T09:00:00Z"), 2)])
+    assert systems(store) == []
+    CrewStore(store, clock=lambda: NOW).set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    assert len(systems(store)) == 1
+
+
+def test_rebuilds_before_set_gate_keep_own_rows_and_the_marker(store, keys):
+    # A rebuild without a gate cannot tell own authors from friends and would wipe own rows.
+    CrewStore(store, clock=lambda: NOW).append_own([(keys["me"], visit(cmdr="me", at="2026-10-13T09:00:00Z"))])
+    assert len(systems(store)) == 1 and marker(store)
+    crew = CrewStore(store, clock=lambda: NOW)
+    assert crew.rebuild_if_marked() is False
+    crew.rebuild_projections()
+    assert len(systems(store)) == 1 and marker(store)
+    crew.set_gate(frozenset({keys["me"].author}))
+    assert crew.rebuild_if_marked() is True
+    assert len(systems(store)) == 1 and not marker(store)
+
+
+def test_a_rebuild_that_failed_after_the_commit_is_retried_at_the_next_call(store, keys):
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    crew.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
+    crew.insert_received_batch([sealed(keys["alice"], visit(at="2026-10-13T09:00:00Z", address="2"), 2)])
+    real = crew.rebuild_projections
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("rebuild failed")
+
+    crew.rebuild_projections = crash
+    with pytest.raises(RuntimeError):
+        crew.insert_received_batch([roster_env(keys["leader"], 3, "remove", "2026-10-13T11:00:00Z",
+                                               member=keys["alice"].author, last_seq=1)])
+    crew.rebuild_projections = real
+    assert len(systems(store)) == 1
+    crew.insert_received_batch([])
+    assert systems(store) == [] and not marker(store)
+
+
+def test_an_implausible_stamp_warns_once_per_author(store, keys, caplog):
+    crew = CrewStore(store, clock=lambda: NOW, admit=lambda a, s: True)
+    batch = [sealed(keys["bob"], visit(at="2014-12-15T23:59:59Z", address=str(n)), n) for n in range(1, 4)]
+    with caplog.at_level(logging.WARNING):
+        crew.insert_received_batch(batch)
+    assert sum("implausible" in r.message for r in caplog.records) == 1
+
+
 def test_narrowing_writes_the_rebuild_marker_in_the_same_transaction(store, keys):
     # Spec B1 S2: a crash between the commit and the rebuild is repaired at the next start.
     crew = CrewStore(store, clock=lambda: NOW)
-    crew.rebuild_if_marked()
     crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    crew.rebuild_if_marked()
     crew.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
     crew.insert_received_batch([sealed(keys["alice"], visit(at="2026-10-13T09:00:00Z", address="2"), 2)])
     assert not marker(store) and len(systems(store)) == 1
@@ -125,8 +194,8 @@ def test_narrowing_writes_the_rebuild_marker_in_the_same_transaction(store, keys
 
 def test_a_completed_narrowing_leaves_no_marker(store, keys):
     crew = CrewStore(store, clock=lambda: NOW)
-    crew.rebuild_if_marked()
     crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    crew.rebuild_if_marked()
     crew.insert_received_batch(group_and_invite(keys["leader"]) + [join_of(keys["alice"], seq=1)])
     crew.insert_received_batch([roster_env(keys["leader"], 3, "remove", "2026-10-13T11:00:00Z",
                                            member=keys["alice"].author, last_seq=1)])
@@ -200,6 +269,7 @@ def test_insert_received_still_raises_on_a_bad_structure(store, keys):
 
 def test_migration_marks_a_rebuild_once(store, keys):
     crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}))
     assert crew.rebuild_if_marked() is True
     assert crew.rebuild_if_marked() is False
 

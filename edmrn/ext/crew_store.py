@@ -6,6 +6,7 @@ Store.read() and may come from any thread. Values reach SQL only as parameters.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import sqlite3
 from collections import Counter
@@ -278,9 +279,19 @@ def _project(conn: sqlite3.Connection, env: dict, ctx: _Context) -> Optional[str
 _QUIET_REASONS = ('unknown kind or version', 'author is not a member')
 
 
-def _warn_unprojected(env: dict, reason: Optional[str]) -> None:
-    if reason is not None and reason not in _QUIET_REASONS:
-        logger.warning(f"Crew event {env['event_id']} kept unprojected: {reason}")
+def _project_logged(conn: sqlite3.Connection, rows: list, ctx: _Context) -> Counter:
+    """Project stored envelopes in the order given; the count of each reason they stayed unprojected."""
+    reasons: Counter = Counter()
+    for (data,) in rows:
+        try:
+            env = ev.parse_envelope(bytes(data))
+        except ev.EnvelopeError:
+            reasons['unreadable'] += 1
+            continue
+        reason = _project(conn, env, ctx)
+        if reason is not None:
+            reasons[reason.split(':')[0]] += 1
+    return reasons
 
 
 @dataclass(frozen=True)
@@ -391,12 +402,50 @@ class CrewStore:
         self._admit_override = admit
         self._gate = Gate()
         self._baselined = False
+        self._rebuild_pending = False
         self._roster: Optional[Roster] = None
         self._equivocators: set[str] = set()
+        self._warned: set[tuple] = set()
 
     @property
     def roster(self) -> Optional[Roster]:
         return self._roster
+
+    @property
+    def _gated(self) -> bool:
+        """False until set_gate ran: an ungated store cannot tell own authors from friends."""
+        return self._baselined or self._admit_override is not None
+
+    def _warn_unprojected(self, env: dict, reason: Optional[str]) -> None:
+        """Live path: warn once per author and reason per run, then debug (a friend with a wrong
+        clock must not flood the log)."""
+        if reason is None or reason in _QUIET_REASONS:
+            return
+        key = (env['author'], reason.split(':')[0])
+        message = f"Crew event {env['event_id']} kept unprojected: {reason}"
+        if key in self._warned:
+            logger.debug(message)
+        else:
+            self._warned.add(key)
+            logger.warning(message)
+
+    def _retry_rebuild(self) -> None:
+        """A rebuild that failed after its commit is retried at the next call (spec B1 S2)."""
+        if self._rebuild_pending and self._gated:
+            try:
+                self.rebuild_projections()
+            except Exception:
+                logger.exception('Crew rebuild retry failed')
+
+    def _fingerprint(self, roster: Optional[Roster]) -> str:
+        """What the persisted projections depend on: the group and who may project up to which seq."""
+        members = [] if roster is None else sorted((m.author, m.last_seq) for m in roster.members.values())
+        blob = json.dumps([self._gate.group_id, self._gate.leader, members])
+        return hashlib.sha256(blob.encode('utf-8')).hexdigest()
+
+    def _store_fingerprint(self, conn, roster: Optional[Roster]) -> None:
+        conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('roster', ?)",
+                     (self._fingerprint(roster),))
 
     def _context(self, roster: Optional[Roster]) -> _Context:
         if self._admit_override is not None:
@@ -412,8 +461,9 @@ class CrewStore:
         if gate.group_id is None or gate.leader is None:
             return None
         now = self._clock()
-        rows = conn.execute("SELECT envelope FROM crew_log WHERE kind IN "
-                            "('group', 'invite', 'join', 'remove')").fetchall()
+        marks = ', '.join('?' * len(ev.ROSTER_KINDS))
+        rows = conn.execute(f'SELECT envelope FROM crew_log WHERE kind IN ({marks})',
+                            ev.ROSTER_KINDS).fetchall()
         envelopes = [e for e in (parse_roster_envelope(bytes(r[0]), gate.own, now) for r in rows)
                      if e is not None]
         return compute_roster(envelopes, gate.group_id, gate.leader)
@@ -436,12 +486,7 @@ class CrewStore:
         for author in sorted(authors - ctx.own):
             rows = conn.execute('SELECT envelope FROM crew_log WHERE author = ? ORDER BY seq',
                                 (author,)).fetchall()
-            for (data,) in rows:
-                try:
-                    env = ev.parse_envelope(bytes(data))
-                except ev.EnvelopeError:
-                    continue
-                _project(conn, env, ctx)
+            _project_logged(conn, rows, ctx)
 
     def _apply_roster_change(self, conn) -> tuple[Optional[Roster], bool]:
         """Inside a transaction: recompute membership and project newly admitted authors.
@@ -453,30 +498,46 @@ class CrewStore:
         admitted, narrowed = self._membership_change(self._roster, new)
         if narrowed:
             conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('rebuild', 'roster')")
+            self._rebuild_pending = True
         elif admitted:
             self._project_authors(conn, admitted, self._context(new))
+        self._store_fingerprint(conn, new)
         return new, narrowed
 
     def set_gate(self, own: frozenset, group_id: Optional[str] = None,
                  leader: Optional[str] = None) -> None:
         """Tk thread. Own authors and the group of this installation (spec B1 S3, S4).
 
-        The first call per process only records the roster as baseline: projections persist, so
-        nothing is projected or rebuilt (S2)."""
+        Projections persist, so the first call per process only records the roster as baseline
+        (S2). It rebuilds only when the stored roster fingerprint differs: the group or its members
+        changed while EDMRN was closed, or friends' envelopes were stored before any gate."""
         self._gate = Gate(frozenset(own), group_id, leader)
         if not self._baselined:
             self._baselined = True
-            with self.store.read() as conn:
-                self._roster = self._compute_roster(conn)
+            with self.store.transaction() as conn:
+                roster = self._compute_roster(conn)
+                row = conn.execute("SELECT value FROM crew_meta WHERE key = 'roster'").fetchone()
+                stale = row is not None and row[0] != self._fingerprint(roster)
+                if row is None:
+                    marks = ', '.join('?' * len(self._gate.own))
+                    stale = conn.execute(f'SELECT 1 FROM crew_log WHERE author NOT IN ({marks}) LIMIT 1',
+                                         tuple(self._gate.own)).fetchone() is not None
+                if not stale:
+                    self._store_fingerprint(conn, roster)
+            self._roster = roster
+            if stale:
+                self.rebuild_projections()
             return
+        self._retry_rebuild()
         with self.store.transaction() as conn:
             new, narrowed = self._apply_roster_change(conn)
         self._roster = new
         if narrowed:
-            self.rebuild_projections(clear_marker=True)
+            self.rebuild_projections()
 
     def append_own(self, items: list[tuple[Identity, ev.Draft]]) -> int:
         """Sign and log own drafts in one transaction (C4); the key files follow after the commit."""
+        self._retry_rebuild()
         written = 0
         allocated: dict[str, tuple[Identity, int]] = {}
         new_own = frozenset(identity.author for identity, _ in items)
@@ -503,7 +564,7 @@ class CrewStore:
                                         draft.created_at, draft.payload)
                 data, signature = ev.seal(env, identity.sign)
                 _insert(conn, env, data, signature)
-                _warn_unprojected(env, _project(conn, env, ctx))
+                self._warn_unprojected(env, _project(conn, env, ctx))
                 roster_touched = roster_touched or draft.kind in ev.ROSTER_KINDS
                 allocated[identity.author] = (identity, last + 1)
                 written += 1
@@ -516,7 +577,7 @@ class CrewStore:
             except (OSError, KeyFileError) as e:
                 logger.error(f"Crew key file not updated ({identity.path.name}): {e}")
         if narrowed:
-            self.rebuild_projections(clear_marker=True)
+            self.rebuild_projections()
         return written
 
     def max_seq(self, author: str) -> int:
@@ -528,6 +589,7 @@ class CrewStore:
     def insert_received_batch(self, items: list) -> ReceivedBatch:
         """Received envelopes in one transaction (B1 S19): structure and signature first, then
         INSERT OR IGNORE on (author, seq), the gated projection, and the roster refresh."""
+        self._retry_rebuild()
         parsed, rejected = [], []
         for index, (data, signature) in enumerate(items):
             try:
@@ -549,14 +611,14 @@ class CrewStore:
                 if _insert(conn, env, data, signature):
                     inserted += 1
                     roster_touched = roster_touched or env['kind'] in ev.ROSTER_KINDS
-                    _warn_unprojected(env, _project(conn, env, ctx))
+                    self._warn_unprojected(env, _project(conn, env, ctx))
                 else:
                     self._check_equivocation(conn, env, data)
             if roster_touched:
                 new_roster, narrowed = self._apply_roster_change(conn)
         self._roster = new_roster
         if narrowed:
-            self.rebuild_projections(clear_marker=True)
+            self.rebuild_projections()
         return ReceivedBatch(inserted, rejected, narrowed)
 
     def insert_received(self, envelope: bytes, signature: bytes) -> bool:
@@ -576,9 +638,14 @@ class CrewStore:
             logger.warning(f"Crew author {env['author'][:12]}... sent two different envelopes "
                            f"for seq {env['seq']}; the first one is kept")
 
-    def rebuild_projections(self, clear_marker: bool = False) -> None:
-        """Re-derive every projection from the log in (created_at, author, seq) order (C8)."""
-        reasons: Counter = Counter()
+    def rebuild_projections(self) -> None:
+        """Re-derive every projection from the log in (created_at, author, seq) order (C8).
+
+        Clears the rebuild marker and records the roster fingerprint. Refused before set_gate:
+        without the own authors it would drop every own row."""
+        if not self._gated:
+            logger.warning('Crew rebuild skipped: set_gate has not run, so own authors are unknown')
+            return
         with self.store.transaction() as conn:
             for table in PROJECTION_TABLES:
                 conn.execute(f'DELETE FROM {table}')
@@ -586,28 +653,25 @@ class CrewStore:
             ctx = self._context(roster)
             rows = conn.execute(
                 'SELECT envelope FROM crew_log ORDER BY created_at, author, seq').fetchall()
-            for (data,) in rows:
-                try:
-                    env = ev.parse_envelope(bytes(data))
-                except ev.EnvelopeError:
-                    reasons['unreadable'] += 1
-                    continue
-                reason = _project(conn, env, ctx)
-                if reason is not None:
-                    reasons[reason.split(':')[0]] += 1
-            if clear_marker:
-                conn.execute("DELETE FROM crew_meta WHERE key = 'rebuild'")
+            reasons = _project_logged(conn, rows, ctx)
+            conn.execute("DELETE FROM crew_meta WHERE key = 'rebuild'")
+            self._store_fingerprint(conn, roster)
         self._roster = roster
+        self._rebuild_pending = False
         if reasons:
             summary = ', '.join(f'{count} {reason}' for reason, count in sorted(reasons.items()))
             logger.warning(f'Crew rebuild left envelopes unprojected: {summary}')
 
     def rebuild_if_marked(self) -> bool:
+        """Rebuild once if a migration or an interrupted narrowing marked it; False before set_gate
+        (the marker stays for the run that has a gate)."""
+        if not self._gated:
+            return False
         with self.store.read() as conn:
             marked = conn.execute("SELECT 1 FROM crew_meta WHERE key = 'rebuild'").fetchone()
         if marked is None:
             return False
-        self.rebuild_projections(clear_marker=True)
+        self.rebuild_projections()
         return True
 
     def heads(self) -> dict[str, int]:
