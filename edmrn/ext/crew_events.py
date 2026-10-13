@@ -11,8 +11,9 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 ENVELOPE_VERSION = 1
@@ -32,7 +33,16 @@ class EnvelopeError(ValueError):
 
 
 class PayloadError(ValueError):
-    """A payload that breaks its kind's schema (C12)."""
+    """A payload that breaks its kind's schema (C12). The message is cut to 200 characters (B1 S12):
+    a hostile peer's keys and values end up in it and must not flood the log."""
+
+    MAX_MESSAGE = 200
+
+    def __init__(self, message: Any) -> None:
+        text = str(message)
+        if len(text) > self.MAX_MESSAGE:
+            text = text[:self.MAX_MESSAGE - 3] + '...'
+        super().__init__(text)
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -147,20 +157,24 @@ def _reject_constant(name: str) -> Any:
     raise EnvelopeError(f'non-finite number {name}')
 
 
-def parse_envelope(data: Any) -> dict:
-    """Envelope dict from received bytes; the bytes themselves are what the signature covers."""
+def load_json(data: Any, limit: int, what: str) -> Any:
+    """JSON from received bytes: at most `limit` bytes, UTF-8 without BOM, no duplicate keys, no NaN."""
     if not isinstance(data, (bytes, bytearray)):
-        raise EnvelopeError('envelope must be bytes')
-    if len(data) > MAX_ENVELOPE_BYTES:
-        raise EnvelopeError('envelope larger than 16 KB')
+        raise EnvelopeError(f'{what} must be bytes')
+    if len(data) > limit:
+        raise EnvelopeError(f'{what} larger than {limit // 1024} KB')
     try:
-        env = json.loads(bytes(data).decode('utf-8'), object_pairs_hook=_no_duplicate_keys,
-                         parse_constant=_reject_constant)
+        return json.loads(bytes(data).decode('utf-8'), object_pairs_hook=_no_duplicate_keys,
+                          parse_constant=_reject_constant)
     except EnvelopeError:
         raise
     except (ValueError, RecursionError) as e:
-        raise EnvelopeError(f'envelope is not JSON: {e}') from e
-    return check_structure(env)
+        raise EnvelopeError(f'{what} is not JSON: {e}') from e
+
+
+def parse_envelope(data: Any) -> dict:
+    """Envelope dict from received bytes; the bytes themselves are what the signature covers."""
+    return check_structure(load_json(data, MAX_ENVELOPE_BYTES, 'envelope'))
 
 
 # --- payload validation (C12) -----------------------------------------------------------
@@ -172,10 +186,17 @@ MANUAL_FINDS = AUTO_FINDS + ('other',)
 
 NAME_MAX = 128
 TEXT_MAX = 2000
-_FORBIDDEN = re.compile('[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069\ud800-\udfff]')
+# S10: letters, marks, numbers, punctuation, symbols and space separators only.
+_ALLOWED_CATEGORIES = frozenset({
+    'Lu', 'Ll', 'Lt', 'Lm', 'Lo', 'Mn', 'Mc', 'Me', 'Nd', 'Nl', 'No',
+    'Pc', 'Pd', 'Ps', 'Pe', 'Pi', 'Pf', 'Po', 'Sm', 'Sc', 'Sk', 'So', 'Zs'})
 _DIGITS = re.compile(r'0|[1-9][0-9]{0,19}')
 
 Checker = Callable[[Any, str], None]
+
+
+def text_allowed(value: str) -> bool:
+    return all(unicodedata.category(ch) in _ALLOWED_CATEGORIES for ch in value)
 
 
 def _string(max_len: int, allow_empty: bool) -> Checker:
@@ -186,8 +207,9 @@ def _string(max_len: int, allow_empty: bool) -> Checker:
             raise PayloadError(f'{path} must not be empty')
         if len(value) > max_len:
             raise PayloadError(f'{path} is longer than {max_len} characters')
-        if _FORBIDDEN.search(value):
-            raise PayloadError(f'{path} contains a control, bidi or surrogate character')
+        if not text_allowed(value):
+            raise PayloadError(f'{path} contains a character outside letters, marks, numbers, '
+                               'punctuation, symbols and spaces')
     return check
 
 
@@ -281,6 +303,120 @@ _NAME_OR_NULL = _nullable(_NAME)
 _TEXT = _string(TEXT_MAX, allow_empty=True)
 _BODY_ID = _integer(0, 65535)
 
+ROSTER_KINDS = ('group', 'invite', 'join', 'remove')
+ROSTER_NAME_MAX = 64
+_ROSTER_NAME = re.compile(r'[\x20-\x7e]{1,64}')
+_HEX64 = re.compile(r'[0-9a-f]{64}')
+FLOOR = datetime(2014, 12, 16, tzinfo=timezone.utc)
+FUTURE_SLACK = timedelta(hours=24)
+
+
+def is_author(value: Any) -> bool:
+    return isinstance(value, str) and _AUTHOR.fullmatch(value) is not None
+
+
+def is_hex64(value: Any) -> bool:
+    return isinstance(value, str) and _HEX64.fullmatch(value) is not None
+
+
+def is_roster_name(value: Any) -> bool:
+    return isinstance(value, str) and _ROSTER_NAME.fullmatch(value) is not None
+
+
+def parse_stamp(value: Any) -> Optional[datetime]:
+    """The stamp as an aware UTC datetime, or None if its shape or its calendar date is wrong."""
+    if stamp(value) is None:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def plausible_received(created_at: Any, now: datetime) -> bool:
+    """S11: a real time, not before the game's journal existed, not more than a day ahead."""
+    moment = parse_stamp(created_at)
+    return moment is not None and FLOOR <= moment <= now + FUTURE_SLACK
+
+
+def ascii_name(text: str) -> str:
+    """A roster name (S1) from any commander name: non-ASCII as '?', at most 64 characters."""
+    cleaned = ''.join(ch if '\x20' <= ch <= '\x7e' else '?' for ch in str(text))
+    cleaned = cleaned[:ROSTER_NAME_MAX].strip()
+    return cleaned or 'CMDR'
+
+
+def _roster_name(value: Any, path: str) -> None:
+    if not is_roster_name(value):
+        raise PayloadError(f'{path} must be 1-64 printable ASCII characters')
+
+
+def _hex64(value: Any, path: str) -> None:
+    if not is_hex64(value):
+        raise PayloadError(f'{path} must be 64 lowercase hex characters')
+
+
+def _author_field(value: Any, path: str) -> None:
+    if not is_author(value):
+        raise PayloadError(f'{path} must be 43 base64url characters')
+
+
+def _real_stamp(value: Any, path: str) -> None:
+    if parse_stamp(value) is None:
+        raise PayloadError(f'{path} must be a real YYYY-MM-DDTHH:MM:SSZ time')
+
+
+_GROUP = _object({'group_id': _uuid, 'name': _roster_name, 'commander': _roster_name})
+_INVITE = _object({'group_id': _uuid, 'invite_id': _uuid, 'token_hash': _hex64,
+                   'expires_at': _real_stamp, 'label': _nullable(_roster_name)})
+_JOIN = _object({'group_id': _uuid, 'invite_id': _uuid, 'token': _hex64,
+                 'commander': _roster_name})
+_REMOVE = _object({'group_id': _uuid, 'member': _author_field,
+                   'last_seq': _integer(0, MAX_SAFE_INT)})
+
+STATUS_FIELDS = ('commander', 'system', 'address', 'coords', 'ship', 'ship_name', 'ship_ident',
+                 'edsy_url', 'hull', 'fuel_main', 'fuel_reserve', 'fuel_capacity_main',
+                 'fuel_capacity_reserve', 'paused')
+EDSY_MAX = 6000
+
+
+def _edsy(value: Any, path: str) -> None:
+    # crew_status imports this module, so its prefix (C18) is read at call time, not import time.
+    from edmrn.ext.crew_status import EDSY_IMPORT_URL
+    if (not isinstance(value, str) or len(value) > EDSY_MAX
+            or not re.fullmatch(re.escape(EDSY_IMPORT_URL) + r'[A-Za-z0-9_%-]+', value)):
+        raise PayloadError(f'{path} must be an EDSY import link of at most {EDSY_MAX} characters')
+
+
+def _bounded(high: float) -> Checker:
+    def check(value: Any, path: str) -> None:
+        message = f'{path} must be a number from 0 to {high:g}'
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise PayloadError(message)
+        try:
+            number = float(value)
+        except OverflowError:
+            raise PayloadError(message) from None
+        if not (math.isfinite(number) and 0.0 <= number <= high):
+            raise PayloadError(message)
+    return check
+
+
+_TONS = _nullable(_bounded(1e5))
+_STATUS = _object({
+    'commander': _NAME_OR_NULL, 'system': _NAME_OR_NULL, 'address': _nullable(_address),
+    'coords': _nullable(_coords), 'ship': _NAME_OR_NULL, 'ship_name': _NAME_OR_NULL,
+    'ship_ident': _NAME_OR_NULL, 'edsy_url': _nullable(_edsy), 'hull': _nullable(_bounded(1.0)),
+    'fuel_main': _TONS, 'fuel_reserve': _TONS, 'fuel_capacity_main': _TONS,
+    'fuel_capacity_reserve': _TONS, 'paused': _boolean})
+_STATUS_DOC = _object({'author': _author_field, 'at': _real_stamp, 'status': _STATUS})
+
+
+def validate_status(doc: Any) -> None:
+    """S8: a signed status document {author, at, status}."""
+    _STATUS_DOC(doc, 'status')
+
+
 _VISIT = _object({'commander': _NAME, 'system': _NAME, 'address': _address,
                   'coords': _nullable(_coords)})
 _HONK = _object({'system': _NAME, 'address': _address, 'body_count': _integer(0, 10000),
@@ -345,6 +481,7 @@ def _find(value: Any, path: str) -> None:
 _VALIDATORS: dict[tuple[str, int], Checker] = {
     ('visit', 1): _VISIT, ('honk', 1): _HONK, ('all_bodies', 1): _ALL_BODIES,
     ('body', 1): _body, ('signals', 1): _signals, ('find', 1): _find, ('note', 1): _NOTE,
+    ('group', 1): _GROUP, ('invite', 1): _INVITE, ('join', 1): _JOIN, ('remove', 1): _REMOVE,
 }
 
 

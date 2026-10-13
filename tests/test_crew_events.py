@@ -1,5 +1,6 @@
 import hashlib
 import re
+from datetime import datetime, timezone
 
 import pytest
 
@@ -322,3 +323,160 @@ def test_draft_resolves_a_deterministic_or_preset_id():
     assert manual.resolve_id(AUTHOR) == NOTE_ID
     with pytest.raises(ev.PayloadError):
         ev.Draft("note", "F1", t, good("note")).resolve_id(AUTHOR)
+
+
+# --- Task 1 (B1 S1, S8, S10-S12): whitelist, roster and status validators -----------------
+
+NOW = datetime(2026, 10, 13, 12, 0, 0, tzinfo=timezone.utc)
+UUID = "01920000-0000-7000-8000-000000000001"
+UUID2 = "01920000-0000-7000-8000-000000000002"
+HEX64 = "ab" * 32
+
+
+@pytest.mark.parametrize("bad", [
+    "a‎b", "a﻿b", "a؜b", "a b", "a b", "a­b", "a\U000e0001b",
+    "a\x00b", "a͸b", "a\ud800b", "a\nb", "a‮b", "a\u0085b", "ab",
+])
+def test_whitelist_refuses_every_excluded_category(bad):
+    assert not ev.text_allowed(bad)
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("note", 1, {"note_id": UUID, "system": None, "address": "1",
+                                        "text": bad, "deleted": False})
+
+
+@pytest.mark.parametrize("good", ["Ünïcödé", "Σ Sagittarii", "日本", "🚀 Mk II", "é", "a b",
+                                  "x-y_z.(1)", "<b>x</b>", "<script>alert(1)</script>"])
+def test_whitelist_accepts_letters_marks_numbers_punctuation_symbols_spaces(good):
+    # Markup is inert data here: the UI shows it as text, never as markup (spec S2).
+    assert ev.text_allowed(good)
+
+
+def test_a_10000_character_text_is_refused_by_the_length_limit():
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("note", 1, {"note_id": UUID, "system": None, "address": "1",
+                                        "text": "x" * 10000, "deleted": False})
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("group", 1, group(name="x" * 10000))
+
+
+def test_payload_error_message_is_cut_to_200_characters():
+    with pytest.raises(ev.PayloadError) as info:
+        ev.validate_payload("visit", 1, {"x" * 5000: 1})
+    assert len(str(info.value)) <= 200
+
+
+def group(**over):
+    p = {"group_id": UUID, "name": "Deep Space Crew", "commander": "Jameson"}
+    p.update(over)
+    return p
+
+
+def invite(**over):
+    p = {"group_id": UUID, "invite_id": UUID2, "token_hash": HEX64,
+         "expires_at": "2026-10-14T12:00:00Z", "label": "Alice"}
+    p.update(over)
+    return p
+
+
+def join(**over):
+    p = {"group_id": UUID, "invite_id": UUID2, "token": HEX64, "commander": "Alice"}
+    p.update(over)
+    return p
+
+
+def remove(**over):
+    p = {"group_id": UUID, "member": AUTHOR, "last_seq": 7}
+    p.update(over)
+    return p
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("group", group()), ("invite", invite()), ("invite", invite(label=None)), ("join", join()),
+    ("remove", remove()), ("remove", remove(last_seq=0)),
+])
+def test_roster_payloads_accept_the_spec_shapes(kind, payload):
+    assert ev.is_known(kind, 1)
+    ev.validate_payload(kind, 1, payload)
+
+
+@pytest.mark.parametrize("kind,payload", [
+    ("group", group(name="Ünïcode")),
+    ("group", group(name="x" * 65)),
+    ("group", group(name="")),
+    ("group", group(commander="tab\there")),
+    ("invite", invite(token_hash="AB" * 32)),
+    ("invite", invite(expires_at="2026-02-30T00:00:00Z")),
+    ("invite", invite(label="")),
+    ("join", join(token="ab" * 31)),
+    ("join", join(group_id="not-a-uuid")),
+    ("remove", remove(member="short")),
+    ("remove", remove(last_seq=-1)),
+    ("remove", remove(last_seq=True)),
+    ("group", dict(group(), extra=1)),
+])
+def test_roster_payloads_refuse_hostile_values(kind, payload):
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload(kind, 1, payload)
+
+
+@pytest.mark.parametrize("stamp,ok", [
+    ("2026-10-13T12:00:00Z", True),
+    ("2014-12-16T00:00:00Z", True),
+    ("2014-12-15T23:59:59Z", False),
+    ("2026-10-14T12:00:00Z", True),
+    ("2026-10-14T12:00:01Z", False),
+    ("2026-02-30T00:00:00Z", False),
+    ("0000-01-01T00:00:00Z", False),
+    ("9999-12-31T23:59:59Z", False),
+    ("2026-10-13T12:00:60Z", False),
+    ("2026-10-13 12:00:00", False),
+])
+def test_plausible_received(stamp, ok):
+    assert ev.plausible_received(stamp, NOW) is ok
+
+
+def test_ascii_name_replaces_and_cuts():
+    assert ev.ascii_name("Jämeson") == "J?meson"
+    assert ev.ascii_name("x" * 100) == "x" * 64
+    assert ev.ascii_name("   ") == "CMDR"
+    assert ev.is_roster_name(ev.ascii_name("日本"))
+
+
+def status(**over):
+    s = {name: None for name in ev.STATUS_FIELDS}
+    s["paused"] = False
+    s.update(over)
+    return {"author": AUTHOR, "at": "2026-10-13T12:00:00Z", "status": s}
+
+
+def test_status_accepts_a_full_and_an_empty_status():
+    ev.validate_status(status())
+    ev.validate_status(status(commander="Jameson", system="Sol", address="10477373803",
+                              coords=[0.0, 0.0, 0.0], ship="anaconda", ship_name="Mule",
+                              ship_ident="MU-01", edsy_url="https://edsy.org/#/I=H4sIAAAA%3D",
+                              hull=0.87, fuel_main=12.5, fuel_reserve=0.5, fuel_capacity_main=32,
+                              fuel_capacity_reserve=0.63))
+
+
+@pytest.mark.parametrize("over", [
+    {"hull": 1.5}, {"hull": True}, {"fuel_main": float("nan")}, {"fuel_main": 1e6},
+    {"edsy_url": "https://evil.example/#/I=x"}, {"edsy_url": "https://edsy.org/#/I=" + "a" * 6000},
+    {"paused": None}, {"commander": "a‮b"}, {"address": "007"},
+])
+def test_status_refuses_hostile_values(over):
+    with pytest.raises(ev.PayloadError):
+        ev.validate_status(status(**over))
+
+
+def test_status_refuses_unknown_keys():
+    doc = status()
+    doc["status"]["extra"] = 1
+    with pytest.raises(ev.PayloadError):
+        ev.validate_status(doc)
+
+
+def test_load_json_refuses_duplicates_bom_nan_and_size():
+    for data in (b'{"a":1,"a":2}', b'\xef\xbb\xbf{}', b'{"a":NaN}', b"x" * 20):
+        with pytest.raises(ev.EnvelopeError):
+            ev.load_json(data, 10 if data == b"x" * 20 else 1000, "thing")
+    assert ev.load_json(b'{"a":1}', 100, "thing") == {"a": 1}
