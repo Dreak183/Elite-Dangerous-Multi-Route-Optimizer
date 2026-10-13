@@ -7,6 +7,10 @@ uv venv --python 3.13 .venv
 uv pip install --python .venv/Scripts/python.exe -r requirements.txt -r requirements-edmrn.txt
 ```
 
+`requirements-edmrn.txt` carries pytest, `cryptography` (crew signatures) and `websockets` (crew relay
+connection, `edmrn/ext/crew_sync.py`). To add one to an existing environment:
+`uv pip install --python .venv/Scripts/python.exe "websockets>=15"`.
+
 Pin 3.13 rather than the newest installed interpreter. It matches `setup.py`'s minimum, while
 upstream's README says 3.12+. Later versions have not been tried with this project.
 

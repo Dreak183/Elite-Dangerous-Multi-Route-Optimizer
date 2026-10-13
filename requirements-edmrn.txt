@@ -2,3 +2,5 @@
 pytest>=8.0
 # Ed25519 signatures for the crew event log (ADR-0005); Apache-2.0 OR BSD-3-Clause.
 cryptography>=42
+# Crew relay WebSocket client (spec B1 S19); BSD-3-Clause (license file verified in 17.2, 2026-10-13).
+websockets>=15
