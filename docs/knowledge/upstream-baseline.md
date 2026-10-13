@@ -50,10 +50,10 @@ exchange. It also lists the upstream defects that our features would sit on top 
   `_handle_system_jump` instead of `_journal_callback`, so `Loadout` takes a different path after a
   settings change **[community]**.
 - `Status.json` is read only by `fuel_tracker` (fuel and flags, 1 s polling thread) **[community]**.
-- `_journal_callback` hands `Loadout.FuelCapacity` to the fuel tracker only if `fuel_capacity > 0`,
-  but the field is an object (`{Main, Reserve}`). The comparison raises `TypeError` inside the
-  callback's `try`, so the tracker never gets the journal capacity and treats the first `FuelMain`
-  it reads as the capacity **[probe, 2026-10-12]**.
+- The journal layer hands the fuel tracker only `Loadout.FuelCapacity.Main`: `_process_line` reduces
+  the `{Main, Reserve}` object to a float before the callback, and the reserve tank is not passed on.
+  Without a `Loadout` (the first journal is tailed from its end) the tracker takes the first `FuelMain`
+  it reads from `Status.json` as the capacity **[code, probe, 2026-10-13]**.
 
 ## Saved routes
 
