@@ -338,7 +338,7 @@ class _Session:
         if self.relay_heads is None:
             return
         sync = self.sync
-        due = sync._flush_requested
+        due = sync._flush_requested and self.stop is sync._stop
         day = sync._wall()[:10]
         if day != self.day:  # S11: quota refusals are per UTC day
             self.day = day
@@ -359,7 +359,8 @@ class _Session:
     def upload(self) -> None:
         """Send, per author in ascending seq, what the relay lacks (S7). Paused: nothing own."""
         sync = self.sync
-        sync._flush_requested = False
+        if self.stop is sync._stop:  # a superseded session must not consume the new one's request
+            sync._flush_requested = False
         self.last_flush = sync._clock()
         if self.relay_heads is None:
             return
@@ -427,7 +428,7 @@ class CrewSync:
         self._flush_requested = False
         self._stop: Any = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._live_seconds = 0.0
+        self._state_lock = threading.Lock()
         self._observers: list = []
         self.state = 'stopped'
         self.last_error: Optional[str] = None
@@ -445,8 +446,12 @@ class CrewSync:
         own stop event, and a superseded run no longer touches the shared state."""
         if self._thread is not None and self._thread.is_alive() and not self._stop.is_set():
             return
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name='edmrn-crew-sync', daemon=True)
+        stop = threading.Event()
+        self._stop = stop
+        # The run gets its own event as an argument: reading self._stop when the thread first runs
+        # would let a delayed old run adopt the next run's event.
+        self._thread = threading.Thread(target=self._run, args=(stop,), name='edmrn-crew-sync',
+                                        daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 0.5) -> None:
@@ -470,11 +475,13 @@ class CrewSync:
         self._flush_requested = True
 
     def _set_state(self, state: str, error: Optional[str] = None, stop: Any = None) -> None:
-        if stop is not None and stop is not self._stop:
-            return  # a superseded run
-        self.state = state
-        if error is not None:
-            self.last_error = error
+        with self._state_lock:  # check and write are one step against a concurrent stop()
+            if stop is not None and (stop is not self._stop
+                                     or (stop.is_set() and state != 'stopped')):
+                return  # a superseded or stopped run publishes nothing but its final 'stopped'
+            self.state = state
+            if error is not None:
+                self.last_error = error
         for observer in list(self._observers):
             try:
                 observer(state, self.last_error)
@@ -482,20 +489,21 @@ class CrewSync:
                 logger.error(f'Crew sync observer failed: {e}')
 
     def _note(self, message: str, stop: Any = None) -> None:
-        if stop is not None and stop is not self._stop:
-            return
-        self.last_error = message
+        with self._state_lock:
+            if stop is not None and (stop is not self._stop or stop.is_set()):
+                return
+            self.last_error = message
         logger.info(f'Crew sync: {message}')
 
-    def _run(self) -> None:
-        stop = self._stop
+    def _run(self, stop: Any = None) -> None:
+        stop = stop if stop is not None else self._stop
         delay = self.BACKOFF_FIRST
         while not stop.is_set():
             self._set_state('connecting', stop=stop)
-            outcome = self.connect_once(stop)
+            outcome, live_seconds = self._attempt(stop)
             if outcome == 'refused' or stop.is_set():
                 break
-            stable = outcome == 'live' and self._live_seconds >= self.MIN_LIVE
+            stable = outcome == 'live' and live_seconds >= self.MIN_LIVE
             if stable:
                 delay = self.BACKOFF_FIRST
             if outcome == 'replaced':
@@ -512,26 +520,30 @@ class CrewSync:
 
     def connect_once(self, stop: Any = None) -> str:
         """One connection attempt: 'live', 'failed', 'replaced' or 'refused' (S9)."""
+        return self._attempt(stop)[0]
+
+    def _attempt(self, stop: Any = None) -> tuple:
+        """(outcome, seconds the session was live); nothing here is shared with other runs."""
         stop = stop if stop is not None else self._stop
-        self._live_seconds = 0.0
+        live_seconds = 0.0
         try:
             ws = self._connect(connection_url(self._config.url, self._config.group_id))
         except Exception as e:
             self._note(f'cannot reach the relay: {e}', stop)
-            return 'failed'
+            return 'failed', 0.0
         if stop.is_set():  # stopped or superseded while connecting
             ws.close()
-            return 'failed'
+            return 'failed', 0.0
         session = _Session(self, ws, stop)
         try:
             session.run()
         except SocketClosed as e:
             if e.code in (proto.CLOSE_BAD_AUTH, proto.CLOSE_FORBIDDEN):
                 self._set_state('refused', f'The relay refused this member ({e.reason or e.code}).', stop)
-                return 'refused'
+                return 'refused', 0.0
             if e.code == proto.CLOSE_REPLACED:
                 self._note('another EDMRN with this commander took over the connection', stop)
-                return 'replaced'
+                return 'replaced', 0.0
             self._note(f'the connection closed ({e.code})', stop)
         except (proto.FrameError, TimeoutError, OSError) as e:
             self._note(f'the connection failed: {e}', stop)
@@ -540,6 +552,6 @@ class CrewSync:
             self._note(f'unexpected {type(e).__name__} in the connection', stop)
         finally:
             if session.live_at is not None:
-                self._live_seconds = self._clock() - session.live_at
+                live_seconds = self._clock() - session.live_at
             ws.close()
-        return 'live' if session.reached_live else 'failed'
+        return ('live' if session.reached_live else 'failed'), live_seconds

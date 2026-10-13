@@ -637,3 +637,74 @@ def test_start_after_a_stop_that_timed_out_runs_a_new_session(crew, me):
     assert sync.state == "live" and new.closed is None
     sync.stop()
     sync._thread.join(3)
+
+
+class DeferredThread:
+    """A thread that does not run until the test says so: the old run is 'not yet scheduled'."""
+    made = []
+
+    def __init__(self, target=None, args=(), name=None, daemon=None):
+        self.target, self.args, self.started, self.ran = target, args, False, False
+        DeferredThread.made.append(self)
+
+    def start(self):
+        self.started = True
+
+    def is_alive(self):
+        return self.started and not self.ran
+
+    def join(self, timeout=None):
+        pass
+
+    def run(self):
+        self.target(*self.args)
+        self.ran = True
+
+
+def test_a_delayed_old_run_does_not_adopt_the_next_runs_stop_event(crew, me, monkeypatch):
+    # start(); stop(); start() before the first thread is scheduled: only the last run may connect.
+    DeferredThread.made = []
+    monkeypatch.setattr(threading, "Thread", DeferredThread)
+    calls = []
+
+    def connect(url):
+        calls.append(url)
+        sync._stop.set()  # end the run after this one attempt
+        raise OSError("offline")
+    sync, _ = make_sync(crew, me, None, connect=connect)
+    sync.start()
+    sync.stop()
+    sync.start()
+    first, second = DeferredThread.made
+    first.run()
+    assert calls == []
+    second.run()
+    assert len(calls) == 1
+
+
+def test_a_superseded_session_does_not_consume_a_flush_request(crew, me):
+    sync, _ = make_sync(crew, me, None)
+    from edmrn.ext.crew_sync import _Session
+    old = threading.Event()
+    session = _Session(sync, FakeSocket(), old)
+    session.relay_heads = {}
+    sync.flush_soon()
+    session.upload()
+    assert sync._flush_requested is True
+    current = _Session(sync, FakeSocket(), sync._stop)
+    current.relay_heads = {}
+    current.upload()
+    assert sync._flush_requested is False
+
+
+def test_a_stopped_run_publishes_no_state_but_its_final_stopped(crew, me):
+    sync, _ = make_sync(crew, me, None)
+    stop = sync._stop
+    stop.set()
+    sync._set_state("live", stop=stop)
+    sync._set_state("refused", "late", stop=stop)
+    sync._note("late", stop)
+    assert sync.state == "stopped" and sync.last_error is None
+    sync.state = "waiting"
+    sync._set_state("stopped", stop=stop)
+    assert sync.state == "stopped"
