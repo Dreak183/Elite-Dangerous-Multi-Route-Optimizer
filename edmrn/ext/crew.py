@@ -201,6 +201,10 @@ class CrewService:
     def commander(self) -> Optional[str]:
         return self.live.mapper.state.commander
 
+    @property
+    def commander_name(self) -> Optional[str]:
+        return self.live.mapper.state.commander_name
+
     def identity(self) -> Optional[Identity]:
         commander = self.commander
         if commander is None:

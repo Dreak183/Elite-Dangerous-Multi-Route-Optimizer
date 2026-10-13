@@ -10,6 +10,7 @@ import random
 import sqlite3
 import threading
 import time
+from datetime import datetime, timezone
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -86,12 +87,16 @@ class BoardEntry:
 class CrewBoard:
     """Friends' latest statuses, in memory only (S8). Observers run on the sync thread."""
 
-    def __init__(self) -> None:
+    def __init__(self, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> None:
+        self._now = now
         self._lock = threading.Lock()
         self._entries: dict[str, BoardEntry] = {}
         self._observers: list = []
 
     def update(self, author: str, at: str, status: dict) -> bool:
+        moment = ev.parse_stamp(at)
+        if moment is not None and moment > self._now() + ev.FUTURE_SLACK:
+            return False  # S11: a far-future `at` would freeze the entry against every later status
         with self._lock:
             held = self._entries.get(author)
             if held is not None and held.at > at:
@@ -384,6 +389,8 @@ class _Session:
         """Re-seed (S7): once per connection, offer the join of every author the relay does not list."""
         sync = self.sync
         for author in sorted(set(local) - set(self.relay_heads) - self.offered):
+            if sync._paused and author == sync._identity.author:
+                continue  # S8: a paused client sends nothing of its own
             self.offered.add(author)
             pair = sync._store.roster_envelope(author, 'join', sync._config.group_id)
             if pair is not None:
@@ -410,25 +417,50 @@ class _Session:
         if not sync._status_dirty and self.last_status is not None:
             return
         sync._status_dirty = False
-        self.last_status_at = now  # any evaluation spends the interval, a refusal to send included
         if sync._paused:
             status = PAUSED_STATUS
         else:
-            built = sync._status_source()
+            try:
+                built = sync._status_source()
+            except Exception:  # a broken source must not end the session before catch-up
+                if 'status-source' not in self.logged:
+                    logger.exception('Crew status source failed')
+                self.log_once('status-source', 'the status source failed; no status is sent')
+                built = None
             if built is None:  # no commander, or an alt that is not the member (Review Focus 2)
+                self.last_status_at = now
                 return
             status = {**built, 'paused': False}
         if status == self.last_status:
-            return
+            return  # nothing to send: the interval is not spent
         doc = {'author': sync._identity.author, 'at': sync._wall(), 'status': status}
         try:
-            ev.validate_status(doc)
-            data = proto.status_bytes(doc)
+            data = self.signable(doc)
         except (ev.PayloadError, proto.FrameError) as e:
             self.log_once('own-status', f'own status not sent: {e}')
+            self.last_status_at = now
             return
         self.send(proto.status_frame(data, sync._identity.sign(data)))
         self.last_status = status
+        self.last_status_at = now
+
+    @staticmethod
+    def signable(doc: dict) -> bytes:
+        """Canonical bytes of the status document; a field that fails validation is nulled alone."""
+        try:
+            ev.validate_status(doc)
+        except ev.PayloadError:
+            status = dict(doc['status'])
+            for name, value in doc['status'].items():
+                if name == 'paused' or value is None:
+                    continue
+                try:
+                    ev.validate_status({**doc, 'status': {**PAUSED_STATUS, name: value, 'paused': False}})
+                except ev.PayloadError:
+                    status[name] = None
+            doc['status'] = status
+            ev.validate_status(doc)
+        return proto.status_bytes(doc)
 
 
 _SHIP_FIELDS = ('ship', 'ship_name', 'ship_ident', 'hull', 'fuel_main', 'fuel_reserve',
@@ -455,11 +487,20 @@ def status_from(location: Any, ship: Any) -> dict:
 def make_status_source(service: Any, member_path: Any) -> Callable[[], Optional[dict]]:
     """Status of the active commander, but only if it is the group member (Review Focus 2)."""
     def source() -> Optional[dict]:
-        commander = service.commander
-        if commander is None or service.keyring.path_for(commander) != member_path:
+        # The mapper state, the location tracker and the ship status update independently: take
+        # the commander once, then accept the others only if they name the same commander.
+        commander, name = service.commander, getattr(service, 'commander_name', None)
+        if commander is None or name is None or service.keyring.path_for(commander) != member_path:
             return None
         location, ship = service.status()
-        return status_from(location, ship)
+        for holder in (location, ship):
+            held = getattr(holder, 'commander', None)
+            if held is not None and held != name:
+                return None
+        built = status_from(location, ship)
+        if service.commander != commander:  # switched while the status was built
+            return None
+        return built
     return source
 
 
