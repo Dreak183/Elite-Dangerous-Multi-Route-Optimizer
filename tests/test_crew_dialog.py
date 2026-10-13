@@ -480,3 +480,53 @@ def test_a_failing_card_shows_unavailable_and_does_not_raise(root):
     assert card is not None
     assert [c.cget("text") for c in card.winfo_children() if isinstance(c, ctk.CTkLabel)] == [
         "Crew is unavailable."]
+
+
+# --- fix round 2 ---------------------------------------------------------------------------
+
+def test_a_render_keeps_the_placeholders_active(root):
+    dialog = dialog_for(root, FakeGroup())
+    dialog.render()
+    assert dialog.name_entry._placeholder_text_active
+    leader = dialog_for(root, leader_group())
+    leader.render()
+    assert leader.label_entry._placeholder_text_active
+
+
+def test_the_label_is_cleared_after_a_created_invite(root):
+    group = leader_group()
+    dialog = dialog_for(root, group)
+    dialog.label_entry.insert(0, "Alice")
+    dialog.invite_button.invoke()
+    assert group.calls[-1] == ("invite", "Alice", 24) and dialog.label_entry.get() == ""
+    dialog.invite_button.invoke()
+    assert group.calls[-1] == ("invite", "", 24)
+
+
+def test_a_render_disarms_a_pending_confirmation(root):
+    group = leader_group()
+    dialog = dialog_for(root, group)
+    dialog.remove_buttons[ALICE].invoke()  # armed
+    dialog.render()
+    dialog.remove_buttons[ALICE].invoke()  # the new button asks again
+    assert ("remove", ALICE) not in group.calls
+    dialog.remove_buttons[ALICE].invoke()
+    assert group.calls[-1] == ("remove", ALICE)
+
+
+def test_the_identity_is_not_read_on_every_tick(root):
+    reads = []
+
+    def identity():
+        reads.append(1)
+        return SimpleNamespace(author=LEADER)
+    crew = SimpleNamespace(commander="F1", commander_name="Jameson", group=leader_group(),
+                           identity=identity)
+    dialog = open_dialog(SimpleNamespace(root=root, crew=crew))
+    first = len(reads)
+    for _ in range(5):
+        dialog._tick()
+    assert len(reads) == first
+    crew.commander, crew.commander_name = "F2", "Alt"
+    dialog._tick()
+    assert len(reads) == first + 1

@@ -78,7 +78,12 @@ def open_dialog(app: Any) -> Optional['CrewDialog']:
                 identity.author if identity is not None else None)
 
     crew = getattr(app, 'crew', None)
-    dialog = CrewDialog(app.root, getattr(crew, 'group', None), commander=None, author=None, who=who)
+    def who_key() -> tuple:  # cheap, no key file: tells the dialog when to call `who` again
+        crew = getattr(app, 'crew', None)
+        return (getattr(crew, 'commander', None), getattr(crew, 'commander_name', None))
+
+    dialog = CrewDialog(app.root, getattr(crew, 'group', None), commander=None, author=None,
+                        who=who, who_key=who_key)
     app._edmrn_crew_dialog = dialog
     return dialog
 
@@ -104,12 +109,14 @@ class CrewDialog(ctk.CTkToplevel):
 
     def __init__(self, master: Any, group: Any, *, commander: Optional[str], author: Optional[str],
                  copy: Optional[Callable[[str], None]] = None,
-                 who: Optional[Callable[[], tuple]] = None) -> None:
+                 who: Optional[Callable[[], tuple]] = None,
+                 who_key: Optional[Callable[[], Any]] = None) -> None:
         super().__init__(master)
         self.title('Crew')
         self.geometry('560x640')
         self.group = group
         self._who = who or (lambda: (commander, author))
+        self._who_key = who_key or (lambda: None)
         self._copy = copy or self._clipboard
         self.message = ctk.StringVar(value='')
         self.invite: Optional[CreatedInvite] = None
@@ -161,7 +168,7 @@ class CrewDialog(ctk.CTkToplevel):
             (m.author, m.commander or '', m.leader, m.last_seq is not None)
             for m in roster.members.values()))
         name = roster.name if roster is not None else None
-        return (g.config, g.problem, name, members, self._who())
+        return (g.config, g.problem, name, members, self._who_key())
 
     def _tick(self) -> None:
         if not self._alive():
@@ -262,7 +269,7 @@ class CrewDialog(ctk.CTkToplevel):
     def _restore(self, typed: dict) -> None:
         for name, value in typed.items():
             widget = getattr(self, name, None)
-            if widget is None:
+            if widget is None or not value:  # an empty field keeps its placeholder
                 continue
             if name == 'expiry':
                 widget.set(value)
@@ -432,6 +439,7 @@ class CrewDialog(ctk.CTkToplevel):
 
         def create() -> CreatedInvite:
             invite = g.create_invite(self.label_entry.get(), EXPIRY[self.expiry.get()])
+            self.label_entry.delete(0, 'end')  # the next invite is for someone else
             self.invite, self._invite_group = invite, cfg.group_id
             return invite
         self.invite_button = ctk.CTkButton(
