@@ -21,6 +21,7 @@ class FuelConfig:
 
 
 class FuelTracker:
+    status_listeners = []
     
     def __init__(self, app):
         self.app = app
@@ -72,6 +73,7 @@ class FuelTracker:
             try:
                 status = self._read_status()
                 if status:
+                    self._dispatch_status(status)
                     self._update_fuel(status)
                 else:
                     if self.current_fuel > 0:
@@ -89,6 +91,13 @@ class FuelTracker:
                 return json.load(f)
         except Exception:
             return None
+    
+    def _dispatch_status(self, status):
+        for listener in list(FuelTracker.status_listeners):
+            try:
+                listener(status)
+            except Exception as e:
+                logger.error(f"Status listener error: {e}")
     
     def _update_fuel(self, status: Dict):
         flags = status.get('Flags', 0)
