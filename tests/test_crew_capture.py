@@ -1,7 +1,7 @@
 import pytest
 
 from edmrn.ext import crew_events as ev
-from edmrn.ext.crew_capture import JournalMapper, MapperState, commander_key
+from edmrn.ext.crew_capture import JournalMapper, MapperState, commander_key, find_revision, note_revision
 from journal_helpers import event
 
 SOL = 10477373803
@@ -173,3 +173,147 @@ def test_garbage_parents_mean_not_a_moon():
     [d] = run(LOAD, event("Scan", ScanType="Detailed", BodyName="X", BodyID=3, SystemAddress=SOL,
                           PlanetClass="Rocky body", Parents="garbage", WasDiscovered=True, WasMapped=False))
     assert d.payload["moon"] is False and d.payload["system"] is None
+
+BIO = {"Type": "$SAA_SignalType_Biological;", "Type_Localised": "Biologisch", "Count": 2}
+
+
+def body_signals(name="FSSBodySignals", body_id=3, body_name="Sol 3", ts="2026-10-12T10:02:00Z",
+                 signals=(BIO,), genuses=None):
+    fields = {"BodyName": body_name, "BodyID": body_id, "SystemAddress": SOL,
+              "Signals": [dict(s) for s in signals]}
+    if genuses is not None:
+        fields["Genuses"] = [{"Genus": g, "Genus_Localised": g.strip("$;")} for g in genuses]
+    return event(name, ts, **fields)
+
+
+def test_fss_body_signals_give_counts_and_a_biological_find():
+    drafts = run(LOAD, jump(), body_signals(signals=(
+        BIO, {"Type": "$SAA_SignalType_Geological;", "Count": 1},
+        {"Type": "$PlanetaryMiningLocation_Name;", "Type_Localised": "Planetary mining location", "Count": 3})))
+    assert drafts[1].payload == {"system": "Sol", "address": str(SOL), "body_id": 3, "body_name": "Sol 3",
+                                 "source": "fss", "counts": {"biological": 2, "geological": 1, "mining": 3},
+                                 "genera": []}
+    [find] = [d for d in drafts if d.kind == "find"]
+    assert (find.payload["find_kind"], find.payload["body_name"], find.payload["detail"]) == (
+        "biological", "Sol 3", {"count": 2})
+
+
+def test_saa_signals_classify_types_and_carry_sorted_unique_genera():
+    signals = [BIO] + [{"Type": f"$SAA_SignalType_{t};", "Count": 1}
+                       for t in ("Human", "Guardian", "Thargoid", "PlanetAnomaly", "Other")]
+    signals.append({"Type": "$SAA_SignalType_FutureThing;", "Count": 2})
+    drafts = run(LOAD, jump(), body_signals("SAASignalsFound", signals=signals, genuses=[
+        "$Codex_Ent_Stratum_Genus_Name;", "$Codex_Ent_Bacterial_Genus_Name;", "$Codex_Ent_Bacterial_Genus_Name;"]))
+    payload = drafts[1].payload
+    assert payload["source"] == "saa"
+    assert payload["counts"] == {"biological": 2, "human": 1, "guardian": 1, "thargoid": 2, "other": 3}
+    assert payload["genera"] == ["$Codex_Ent_Bacterial_Genus_Name;", "$Codex_Ent_Stratum_Genus_Name;"]
+
+
+def test_biological_from_fss_then_saa_is_one_find():
+    drafts = run(LOAD, jump(), body_signals(),
+                 body_signals("SAASignalsFound", ts="2026-10-12T10:09:00Z",
+                              genuses=["$Codex_Ent_Bacterial_Genus_Name;", "$Codex_Ent_Stratum_Genus_Name;"]))
+    finds = [d for d in drafts if d.kind == "find"]
+    assert len(finds) == 2
+    assert finds[0].resolve_id(AUTHOR) == finds[1].resolve_id(AUTHOR)
+    signal_ids = {d.resolve_id(AUTHOR) for d in drafts if d.kind == "signals"}
+    assert len(signal_ids) == 2
+
+
+def test_ring_signal_events_are_skipped():
+    drafts = run(LOAD, jump(),
+                 body_signals("SAASignalsFound", body_id=7, body_name="Sol 3 A Ring", genuses=[]),
+                 body_signals("SAASignalsFound", body_id=9, body_name="Sol 9 B",
+                              signals=({"Type": "Painite", "Count": 4},), genuses=[]))
+    assert [d.kind for d in drafts] == ["visit"]
+
+
+def test_signals_without_biology_give_no_find():
+    drafts = run(LOAD, jump(), body_signals(signals=({"Type": "$SAA_SignalType_Geological;", "Count": 1},)))
+    assert [d.kind for d in drafts] == ["visit", "signals"]
+
+
+@pytest.mark.parametrize("signals", [
+    "not a list",
+    [{"Type": "$SAA_SignalType_Biological;", "Count": "2"}],
+    [{"Type": 5, "Count": 2}],
+    ["not a dict"],
+])
+def test_malformed_signal_lists_give_nothing(signals):
+    bad = event("FSSBodySignals", BodyName="Sol 3", BodyID=3, SystemAddress=SOL, Signals=signals)
+    assert run(LOAD, bad) == []
+
+
+def nsp(ts, name="$Fixed_Event_Life_Cloud;", signal_type="Codex"):
+    return event("FSSSignalDiscovered", ts, SystemAddress=SOL, SignalName=name,
+                 SignalName_Localised="Bemerkenswerte Sternenphänomene", SignalType=signal_type)
+
+
+def test_several_nsp_markers_in_one_system_give_one_find():
+    drafts = run(LOAD, jump(), nsp("2026-10-12T10:00:10Z"), nsp("2026-10-12T10:00:11Z"),
+                 nsp("2026-10-12T10:00:12Z", "$MULTIPLAYER_SCENARION_TITLE;", "ResourceExtraction"),
+                 nsp("2026-10-12T10:00:13Z", "$Codex_Something_Else;"))
+    finds = [d for d in drafts if d.kind == "find"]
+    assert len(finds) == 2 and len({f.resolve_id(AUTHOR) for f in finds}) == 1
+    p = finds[0].payload
+    assert (p["find_kind"], p["system"], p["body_id"], p["body_name"], p["detail"]) == (
+        "stellar_phenomenon", "Sol", None, None, {"signal": "$Fixed_Event_Life_Cloud;"})
+
+
+def codex(**fields):
+    base = dict(EntryID=2420101, Name="$Codex_Ent_Gas_Clds_Yellow_Name;", Name_Localised="Croceum Lagrange Cloud",
+                SubCategory="$Codex_SubCategory_Organic_Structures;", Category="$Codex_Category_Biology;",
+                Region="$Codex_RegionName_18;", System="Sol", SystemAddress=SOL, BodyID=3)
+    base.update(fields)
+    return event("CodexEntry", "2026-10-12T10:04:00Z", **base)
+
+
+def test_a_codex_find_at_a_phenomenon_carries_the_body_name_from_the_earlier_scan():
+    drafts = run(LOAD, jump(), planet(), codex(NearestDestination="$Fixed_Event_Life_Cloud;"))
+    [find] = [d for d in drafts if d.kind == "find"]
+    p = find.payload
+    assert (p["find_kind"], p["body_name"], p["body_id"], p["system"]) == ("codex", "Sol 3", 3, "Sol")
+    assert p["detail"] == {"entry_id": 2420101, "name": "$Codex_Ent_Gas_Clds_Yellow_Name;",
+                           "category": "$Codex_Category_Biology;",
+                           "subcategory": "$Codex_SubCategory_Organic_Structures;", "new_entry": False}
+
+
+def test_a_new_codex_entry_is_a_find_and_other_entries_are_not():
+    drafts = run(LOAD, jump(), codex(IsNewEntry=True),
+                 codex(EntryID=1, NearestDestination="$Ancient:#index=1;"),
+                 codex(EntryID=2, IsNewEntry=False), codex(EntryID=3))
+    finds = [d for d in drafts if d.kind == "find"]
+    assert len(finds) == 1
+    assert finds[0].payload["detail"]["new_entry"] is True and finds[0].payload["body_name"] is None
+
+
+def test_a_location_entered_system_names_signals_and_phenomena():
+    drafts = run(LOAD, event("Location", StarSystem="Sol", SystemAddress=SOL), body_signals(),
+                 nsp("2026-10-12T10:00:10Z"))
+    [signals] = [d for d in drafts if d.kind == "signals"]
+    assert signals.payload["system"] == "Sol"
+    [phenomenon] = [d for d in drafts if d.kind == "find" and d.payload["find_kind"] == "stellar_phenomenon"]
+    assert phenomenon.payload["system"] == "Sol"
+
+
+def test_a_jump_to_another_system_forgets_body_names():
+    drafts = run(LOAD, jump(), planet(), jump(system="Alpha", address=42, ts="2026-10-12T10:05:00Z"),
+                 codex(SystemAddress=42, System="Alpha", NearestDestination="$Fixed_Event_Life_Cloud;"))
+    [find] = [d for d in drafts if d.kind == "find"]
+    assert find.payload["body_name"] is None
+
+
+def test_manual_find_and_note_revisions():
+    first = find_revision("F100", ev.uuid7(), "other", "Sol", str(SOL), None, None, "Wreck")
+    second = find_revision("F100", first.payload["find_id"], "other", "Sol", str(SOL), None, None,
+                           "Wreck, 2 pods")
+    assert first.event_id != second.event_id and ev.is_uuid7(first.event_id)
+    assert first.payload["mode"] == "manual" and ev.stamp(first.created_at)
+    assert first.resolve_id(AUTHOR) == first.event_id
+    note = note_revision("F100", ev.uuid7(), "Sol", str(SOL), "Nice rings")
+    assert note.kind == "note" and note.payload["deleted"] is False
+    with pytest.raises(ev.PayloadError):
+        note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x‮")
+    with pytest.raises(ev.PayloadError):
+        find_revision("F100", ev.uuid7(), "treasure", "Sol", str(SOL), None, None, "")
