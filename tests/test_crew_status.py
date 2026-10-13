@@ -45,6 +45,7 @@ def test_edsy_link_round_trips_to_the_loadout():
     ({"Health": 0.55, "PlayerPilot": True}, 0.55),
     ({"Health": 0.55, "PlayerPilot": True, "Fighter": False}, 0.55),
     ({"Health": 0.55, "PlayerPilot": False, "Fighter": False}, 0.55),
+    ({"Health": 0.55, "PlayerPilot": False}, 0.55),
     ({"Health": 0.55, "PlayerPilot": True, "Fighter": True}, 0.87),
     ({"Health": 0.55, "PlayerPilot": False, "Fighter": True}, 0.87),
     ({"Health": float("nan"), "PlayerPilot": True}, 0.87),
@@ -74,7 +75,8 @@ def test_status_json_fuel_only_while_in_the_ship():
     s = status.state
     assert (s.fuel_main, s.fuel_reserve) == (20.5, 0.4)
     assert s.timestamp == "2026-10-12T10:01:00Z" and s.journal_at == "2026-10-12T10:00:00Z"
-    status.feed_status({"timestamp": "2026-10-12T10:02:00Z", "event": "Status", "Flags": 0})
+    status.feed_status({"timestamp": "2026-10-12T10:02:00Z", "event": "Status", "Flags": 0,
+                        "Fuel": {"FuelMain": 1.0, "FuelReservoir": 0.1}})
     status.feed_status({"timestamp": "2026-10-12T10:03:00Z", "event": "Status", "Flags": IN_MAIN_SHIP,
                         "Fuel": {"FuelMain": True, "FuelReservoir": float("nan")}})
     status.feed_status({"timestamp": "2026-10-12T10:04:00Z", "Flags": True, "Fuel": {"FuelMain": 1.0}})
@@ -113,8 +115,28 @@ def test_adopt_keeps_live_fuel_and_takes_newer_journal_fields():
 
 
 def test_adopt_rejects_an_older_or_empty_replay():
-    live = fed(event("Loadout", "2026-10-12T11:00:00Z", Ship="anaconda", HullHealth=1.0,
-                     FuelCapacity={"Main": 64.0, "Reserve": 1.0}))
+    live = fed(event("Loadout", "2026-10-12T11:00:00Z", Ship="anaconda", ShipName="Big", ShipIdent="AB-01",
+                     HullHealth=1.0, FuelCapacity={"Main": 64.0, "Reserve": 1.0}))
     assert live.adopt(fed(LOADOUT).state) is False
     assert live.state.ship == "anaconda"
     assert live.adopt(ShipStatus()) is False
+
+
+def test_adopt_fills_missing_ship_fields_when_a_live_change_got_there_first():
+    damage = event("HullDamage", "2026-10-12T10:00:30Z", Health=0.61, PlayerPilot=True)
+    live = fed(damage)
+    assert live.state.ship is None
+    replayed = fed(LOADOUT, damage).state
+    assert live.adopt(replayed) is True
+    s = live.state
+    assert s.ship == "krait_light" and (s.fuel_capacity_main, s.fuel_capacity_reserve) == (32.0, 0.63)
+    assert s.edsy_url and s.hull == 0.61
+    assert s.journal_at == s.timestamp == "2026-10-12T10:00:30Z"
+    assert live.adopt(replayed) is False
+
+
+def test_adopt_does_not_fill_across_commanders():
+    live = fed(event("LoadGame", "2026-10-12T10:00:30Z", Commander="Other"))
+    replayed = fed(event("LoadGame", "2026-10-12T09:00:00Z", Commander="Jameson"), LOADOUT).state
+    assert live.adopt(replayed) is False
+    assert live.state.ship is None and live.state.commander == "Other"

@@ -22,6 +22,8 @@ logger = get_logger('CrewStatus')
 EDSY_IMPORT_URL = 'https://edsy.org/#/I='
 IN_MAIN_SHIP = 1 << 24
 MAX_TONS = 1e5
+_FILLABLE = ('commander', 'ship', 'ship_name', 'ship_ident', 'edsy_url', 'hull',
+              'fuel_capacity_main', 'fuel_capacity_reserve')
 
 
 @dataclass(frozen=True)
@@ -154,18 +156,28 @@ class CrewStatus:
         self._notify()
 
     def adopt(self, replayed: ShipStatus) -> bool:
-        """Take a replayed state's journal fields if newer; keep live Status.json fuel (plan ruling 5)."""
+        """Merge a replayed state into the live one (plan ruling 5); live Status.json fuel always wins.
+
+        A newer (or first) replay replaces the journal fields. A replay that is not newer, because a
+        live event landed during the replay, only fills fields still empty, and only for the same
+        commander.
+        """
         with self._lock:
             current = self._state
-            if replayed.journal_at is None or (
-                    current.journal_at is not None and replayed.journal_at <= current.journal_at):
+            if replayed.journal_at is None:
                 return False
-            stamps = [t for t in (current.timestamp, replayed.timestamp) if t is not None]
-            new = replace(replayed,
-                          fuel_main=replayed.fuel_main if current.fuel_main is None else current.fuel_main,
-                          fuel_reserve=(replayed.fuel_reserve if current.fuel_reserve is None
-                                        else current.fuel_reserve),
-                          timestamp=max(stamps) if stamps else None)
+            if current.journal_at is None or replayed.journal_at > current.journal_at:
+                stamps = [t for t in (current.timestamp, replayed.timestamp) if t is not None]
+                new = replace(replayed,
+                              fuel_main=replayed.fuel_main if current.fuel_main is None else current.fuel_main,
+                              fuel_reserve=(replayed.fuel_reserve if current.fuel_reserve is None
+                                            else current.fuel_reserve),
+                              timestamp=max(stamps) if stamps else None)
+            elif current.commander is None or current.commander == replayed.commander:
+                new = replace(current, **{name: getattr(replayed, name) for name in _FILLABLE
+                                          if getattr(current, name) is None})
+            else:
+                return False
             if new == current:
                 return False
             self._state = new
