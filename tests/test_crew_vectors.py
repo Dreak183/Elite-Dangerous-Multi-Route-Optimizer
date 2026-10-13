@@ -57,6 +57,14 @@ def test_signature_cases(v):
         assert verify(case["author"], raw(case["s"]), raw(case["e"])) is case["valid"], case["name"]
 
 
+def test_small_order_cases_pass_plain_verification(v):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    cases = [c for c in v["signature_cases"] if c["name"].startswith("small_order_")]
+    assert len(cases) == 15
+    for case in cases:
+        Ed25519PublicKey.from_public_bytes(raw(case["author"])).verify(raw(case["s"]), raw(case["e"]))
+
+
 def test_canonical_cases(v):
     for case in v["canonical_cases"]:
         parsed = parse_roster_envelope(raw(case["e"]), frozenset(), now(v))
@@ -85,6 +93,7 @@ def test_roster_cases(v):
         roster = compute_roster([e for e in entries if e is not None], v["group_id"], case["leader"])
         assert {a: m.last_seq for a, m in roster.members.items()} == case["members"], case["name"]
         assert roster.name == case["name_of_group"], case["name"]
+        assert {a: {"commander": m.commander, "leader": m.leader} for a, m in roster.members.items()}             == case["member_details"], case["name"]
 
 
 def test_auth_and_status(v):

@@ -124,7 +124,11 @@ def parse_roster_envelope(data: Any, own: frozenset, now: datetime) -> Optional[
         return None
     if env['kind'] not in ev.ROSTER_KINDS or env['v'] != 1 or not ev.is_uuid7(env['event_id']):
         return None
-    if ev.canonical_bytes(env) != bytes(data):
+    try:
+        canonical = ev.canonical_bytes(env)
+    except ValueError:  # a lone surrogate escape cannot be encoded as UTF-8
+        return None
+    if canonical != bytes(data):
         return None
     try:
         ev.validate_payload(env['kind'], 1, env['payload'])

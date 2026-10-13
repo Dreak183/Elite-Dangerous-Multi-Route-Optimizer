@@ -14,13 +14,19 @@ import json
 import sys
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 OUT = Path(__file__).resolve().parents[2] / 'crew-relay' / 'test' / 'vectors.json'
 NOW = '2026-10-13T12:00:00Z'
 G = '01920000-0000-7000-8000-0000000000a1'
 OTHER_G = '01920000-0000-7000-8000-0000000000ff'
+SMALL_ORDER = (  # libsodium's blocklist; the sign bit of the last byte is varied below
+    '00' * 32, '01' + '00' * 31,
+    '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+    'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+    'ec' + 'ff' * 30 + '7f', 'ed' + 'ff' * 30 + '7f', 'ee' + 'ff' * 30 + '7f')
 TOKENS = {1: '11' * 32, 2: '22' * 32, 3: '33' * 32}
 
 
@@ -172,6 +178,9 @@ def build() -> dict:
     # cannot reproduce Python's float spelling, so canonical bytes of other kinds are not checkable
     # there). For every kind it refuses a BOM and invalid UTF-8. Float-spelled seq/v and duplicate keys
     # in non-roster envelopes are a relay leniency that clients refuse (relay true, python false).
+    # The same class: 5000-deep nesting, a 5000-digit integer, an overflowing float (1e400) and
+    # `"seq":2.9999999999999999` (JavaScript reads 3). Python refuses all four; the relay does not
+    # judge them, and a non-roster envelope's content never reaches the roster.
     # `layer: roster` cases are judged by the client's parse_roster_envelope, the roster entry point.
     plain = envelope(A, 3, 'visit', '2026-10-13T10:10:00Z',
                      {'commander': 'Alice', 'system': 'Sol', 'address': '1', 'coords': None}, 'ab' * 16)
@@ -181,6 +190,7 @@ def build() -> dict:
                        'coords': [100.0, -0.0, 1e-07], 'extra': [0.0, -0.0, 1e16, 1e-07, 100.0]},
                       'ab' * 16)
     join_obj = envelope(*SPECS['join_alice'])
+    coords_null = b'"coords":null'
     join_data = canonical(join_obj)
     raw_cases = [
         # (name, bytes, relay verdict, python verdict or None when equal, layer)
@@ -196,10 +206,23 @@ def build() -> dict:
         ('raw_float_v', plain_data.replace(b'"v":1}', b'"v":1.0}'), True, False, None),
         ('raw_duplicate_seq_visit', plain_data.replace(b'"seq":3,', b'"seq":3,"seq":3,'), True, False,
          None),
+        ('raw_deep_nesting', plain_data.replace(coords_null, b'"coords":' + b'[' * 5000 + b']' * 5000),
+         True, False, None),
+        ('raw_5000_digit_int', plain_data.replace(coords_null, b'"coords":' + b'1' * 5000), True, False,
+         None),
+        ('raw_float_overflow', plain_data.replace(coords_null, b'"coords":1e400'), True, False, None),
+        ('raw_seq_rounds_to_3', plain_data.replace(b'"seq":3,', b'"seq":2.9999999999999999,'), True,
+         False, None),
         ('raw_spaced', json.dumps(plain, sort_keys=True, separators=(', ', ': ')).encode(), True, None,
          None),
         ('raw_unsorted_keys', json.dumps(plain, separators=(',', ':')).encode(), True, None, None),
     ]
+    # A roster envelope with a lone-surrogate escape: well-formed JSON for both parsers, but it
+    # cannot be re-encoded as UTF-8, so no implementation may count it (and none may raise).
+    raw_cases.append(('raw_group_lone_surrogate',
+                      group_data.replace(b'"name":"Crew"', b'"name":"\\ud800"'), False, None, 'roster'))
+    raw_cases.append(('raw_group_lone_surrogate_low',
+                      group_data.replace(b'"name":"Crew"', b'"name":"\\udc00"'), False, None, 'roster'))
     for label, obj, data in (('group', group_obj, group_data), ('join', join_obj, join_data)):
         raw_cases += [
             (f'raw_{label}_spaced', json.dumps(obj, sort_keys=True, separators=(', ', ': ')).encode(),
@@ -237,6 +260,29 @@ def build() -> dict:
         {'name': 'signature_63_bytes', 'e': b64(group_data), 's': b64(group_sig[:63]),
          'author': L.author, 'valid': False},
     ]
+
+    # Every blocklist entry with the sign bit clear and set. R = identity and S = 0 verify under plain
+    # Ed25519 once the message makes the challenge a multiple of the point's order, so a message is
+    # ground until the library accepts; a relay or client without the blocklist (or without the
+    # sign-bit mask) then accepts the case.
+    for index, hex_key in enumerate(SMALL_ORDER):
+        for top in (0, 0x80):
+            key = bytearray.fromhex(hex_key)
+            key[31] = (key[31] & 0x7f) | top
+            sig = identity + bytes(32)
+            public = Ed25519PublicKey.from_public_bytes(bytes(key))
+            for n in range(10000):
+                message = f'small-order-{index}-{top}-{n}'.encode()
+                try:
+                    public.verify(sig, message)
+                    break
+                except InvalidSignature:
+                    continue
+            else:
+                raise AssertionError(hex_key)
+            signatures.append({'name': f'small_order_{index}_{"high" if top else "low"}',
+                               'e': b64(message), 's': b64(sig), 'author': b64(bytes(key)),
+                               'valid': False})
 
     spaced = json.dumps(group_obj, sort_keys=True, separators=(', ', ': ')).encode()
     duplicate = group_data.replace(b'"kind":"group"', b'"kind":"group","kind":"group"', 1)
@@ -297,9 +343,16 @@ def build() -> dict:
         ('2026-10-13T24:00:00Z', False),
     ]]
 
+    commanders = {'leader': 'Leader', 'alice': 'Alice', 'bob': 'Bob', 'carol': 'Carol'}
+
     def case(name, names, members, group_name='Crew'):
+        # Every join in these cases carries its key's own commander name; the leader's comes from
+        # the group envelope, so it is None when that envelope is absent.
+        details = {KEYS[k].author: {'commander': None if k == 'leader' and group_name is None
+                                    else commanders[k], 'leader': k == 'leader'} for k in members}
         return {'name': name, 'leader': L.author, 'envelopes': names,
-                'members': {KEYS[k].author: v for k, v in members.items()}, 'name_of_group': group_name}
+                'members': {KEYS[k].author: v for k, v in members.items()},
+                'member_details': details, 'name_of_group': group_name}
 
     removal = ['group', 'invite1', 'join_alice', 'remove_alice_5', 'remove_alice_3', 'remove_leader']
     roster_cases = [

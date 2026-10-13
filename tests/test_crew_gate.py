@@ -333,3 +333,16 @@ def test_keyring_lists_own_authors_and_finds_identities(tmp_path):
     assert fresh.own_authors() == frozenset({a.author, b.author})
     assert fresh.identity_for_author(b.author).author == b.author
     assert fresh.identity_for_author("Z" * 43) is None
+
+
+def test_a_lone_surrogate_roster_envelope_neither_raises_nor_blocks_the_batch(store, keys):
+    """Review: such an envelope used to raise from the roster rebuild and roll the batch back."""
+    crew = CrewStore(store, clock=lambda: NOW)
+    crew.set_gate(frozenset({keys["me"].author}), G, keys["leader"].author)
+    crew.insert_received_batch(group_and_invite(keys["leader"]))
+    env = ev.build_envelope(ev.uuid7(), keys["alice"].author, 1, "group", "2026-10-13T10:02:00Z",
+                            {"group_id": G, "name": "x", "commander": "x"})
+    data = ev.canonical_bytes(env).replace(b'"name":"x"', rb'"name":"\ud800"')
+    bad = (data, keys["alice"].sign(data))
+    result = crew.insert_received_batch([bad, join_of(keys["alice"], seq=2)])
+    assert result.inserted == 2 and keys["alice"].author in crew.roster.members

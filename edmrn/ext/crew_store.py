@@ -464,8 +464,15 @@ class CrewStore:
         marks = ', '.join('?' * len(ev.ROSTER_KINDS))
         rows = conn.execute(f'SELECT envelope FROM crew_log WHERE kind IN ({marks})',
                             ev.ROSTER_KINDS).fetchall()
-        envelopes = [e for e in (parse_roster_envelope(bytes(r[0]), gate.own, now) for r in rows)
-                     if e is not None]
+        envelopes = []
+        for row in rows:
+            try:
+                entry = parse_roster_envelope(bytes(row[0]), gate.own, now)
+            except Exception:  # one stored row must never stall the roster for the whole group
+                logger.exception('roster envelope skipped')
+                continue
+            if entry is not None:
+                envelopes.append(entry)
         return compute_roster(envelopes, gate.group_id, gate.leader)
 
     @staticmethod

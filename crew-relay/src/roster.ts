@@ -93,7 +93,7 @@ export function rosterEntry(env: Envelope, text: string, nowMs: number): RosterE
 }
 
 export async function sha256hex(hex: string): Promise<string> {
-  const bytes = new Uint8Array(hex.match(/../g)!.map((h) => parseInt(h, 16)));
+  const bytes = new Uint8Array((hex.match(/../g) ?? []).map((h) => parseInt(h, 16)));
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   return [...digest].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
