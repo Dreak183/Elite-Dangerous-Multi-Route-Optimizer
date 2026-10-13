@@ -47,6 +47,8 @@ class SettingsManager:
                                   border_color=colors['border'], border_width=1)
         fuel_frame.grid(row=1, column=1, padx=5, pady=5, sticky="nsew")
         self.create_fuel_settings_card(fuel_frame)
+        from edmrn.ext.crew_dialog import add_settings_card  # EDMRN fork hook (ADR-0002)
+        add_settings_card(self.app, scroll_frame, colors)
         
     def create_overlay_settings_card(self, parent):
         ctk.CTkLabel(parent, text="📺 Overlay",
