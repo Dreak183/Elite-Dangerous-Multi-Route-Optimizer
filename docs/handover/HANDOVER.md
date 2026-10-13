@@ -2,11 +2,11 @@
 
 ## Where things stand
 
-- `main` holds API hardening, neutron save/resume and the journal location (merged 2026-10-12).
-- **Branch `feature/crew-capture` holds Spec A, crew capture, complete and not merged.**
+- `main` holds API hardening, neutron save/resume and the journal location (merged 2026-10-12)
+  and Spec A, crew capture (merged 2026-10-13, fast-forward to `d8ada51`).
   - 598 tests pass (`.venv/Scripts/python.exe -m pytest`). `tests/test_neutron_resume_gui.py`
-    sometimes skips 5 tests with Tk's "can't find usable init.tcl" (environment, intermittent).
-    No linter is configured.
+    sometimes skips 5 tests with Tk's "can't find usable init.tcl" (environment, intermittent;
+    they pass when rerun). No linter is configured.
   - All 12 plan tasks were reviewed one by one. The final whole-branch review said "with fixes";
     those fixes are in `b7ddf44` and passed a re-review. An isolated smoke run of the real app
     wrote a signed `visit` to `crew_log` (`../how-to/run.md`).
@@ -24,9 +24,7 @@
 
 1. Read `../../CLAUDE.md`, ADR-0001/0002/0004–0007 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
-2. The commander decides on merging `feature/crew-capture` into `main` (fast-forward is possible;
-   `main` has not moved since `614d608`).
-3. Then Spec B (sync). It starts from these points, decided or found during Spec A:
+2. Spec B (sync). It starts from these points, decided or found during Spec A:
    - **Received `created_at`:** today it is checked for shape only. One envelope dated
      `0000-00-00…` renames a system for everyone, and one dated `9999-…` pins its body count.
      Ruling: Spec B makes received stamps a plausible calendar time (a real date, not before
@@ -37,7 +35,7 @@
    - **Log volume:** `PayloadError` messages are unbounded in length. A hostile peer's envelope logs
      a warning on every rebuild. A different envelope arriving at an existing (author, `seq`)
      (equivocation) is dropped silently; it should warn.
-4. Then Spec C (window), with these notes from Spec A:
+3. Then Spec C (window), with these notes from Spec A:
    - The manual API runs on the Tk thread only and flushes the whole writer queue (about 1.8 s at
      10,000 drafts).
    - During a lock, an edit right after a report raises `KeyError`.
@@ -59,7 +57,6 @@
 
 ## Open decisions
 
-- **Merge `feature/crew-capture` into `main`**, by the commander.
 - **Sub-domain** for the Worker (Spec B).
 - **Own GitHub fork as `origin`.** The commander provides it later. Upstream PRs (rows marked "yes"
   in `../architecture/overview.md`) and the updater's target wait for it.
