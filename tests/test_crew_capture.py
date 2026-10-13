@@ -299,7 +299,7 @@ def test_a_location_entered_system_names_signals_and_phenomena():
 
 def test_a_jump_to_another_system_forgets_body_names():
     drafts = run(LOAD, jump(), planet(), jump(system="Alpha", address=42, ts="2026-10-12T10:05:00Z"),
-                 codex(SystemAddress=42, System="Alpha", NearestDestination="$Fixed_Event_Life_Cloud;"))
+                 jump(ts="2026-10-12T10:10:00Z"), codex(NearestDestination="$Fixed_Event_Life_Cloud;"))
     [find] = [d for d in drafts if d.kind == "find"]
     assert find.payload["body_name"] is None
 
@@ -317,3 +317,17 @@ def test_manual_find_and_note_revisions():
         note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x‮")
     with pytest.raises(ev.PayloadError):
         find_revision("F100", ev.uuid7(), "treasure", "Sol", str(SOL), None, None, "")
+
+
+def test_a_phenomenon_signal_of_another_type_is_not_a_find():
+    drafts = run(LOAD, jump(), nsp("2026-10-12T10:00:10Z", signal_type="USS"))
+    assert [d.kind for d in drafts] == ["visit"]
+
+
+def test_manual_builders_reject_an_invalid_created_at():
+    with pytest.raises(ev.PayloadError):
+        find_revision("F100", ev.uuid7(), "other", "Sol", str(SOL), None, None, "x", created_at="garbage")
+    with pytest.raises(ev.PayloadError):
+        note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x", created_at="2026-10-12 10:00:00")
+    ok = note_revision("F100", ev.uuid7(), "Sol", str(SOL), "x", created_at="2026-10-12T10:00:00Z")
+    assert ok.created_at == "2026-10-12T10:00:00Z"

@@ -289,7 +289,11 @@ def find_revision(commander: str, find_id: str, find_kind: str, system: Optional
                'address': address, 'body_name': body_name, 'body_id': body_id, 'note': note,
                'deleted': deleted}
     ev.validate_payload('find', ev.ENVELOPE_VERSION, payload)
-    return ev.Draft('find', commander, created_at or ev.utc_now_stamp(), payload, event_id=ev.uuid7())
+    if created_at is None:
+        created_at = ev.utc_now_stamp()
+    elif ev.stamp(created_at) is None:
+        raise ev.PayloadError('created_at is not a UTC timestamp')
+    return ev.Draft('find', commander, created_at, payload, event_id=ev.uuid7())
 
 
 def note_revision(commander: str, note_id: str, system: Optional[str], address: str, text: str,
@@ -298,4 +302,8 @@ def note_revision(commander: str, note_id: str, system: Optional[str], address: 
     payload = {'note_id': note_id, 'system': system, 'address': address, 'text': text,
                'deleted': deleted}
     ev.validate_payload('note', ev.ENVELOPE_VERSION, payload)
-    return ev.Draft('note', commander, created_at or ev.utc_now_stamp(), payload, event_id=ev.uuid7())
+    if created_at is None:
+        created_at = ev.utc_now_stamp()
+    elif ev.stamp(created_at) is None:
+        raise ev.PayloadError('created_at is not a UTC timestamp')
+    return ev.Draft('note', commander, created_at, payload, event_id=ev.uuid7())
