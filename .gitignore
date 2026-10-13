@@ -53,3 +53,5 @@ dist/*.exe
 .ruff_cache/
 .superpowers/
 .claude/settings.local.json
+crew-relay/node_modules/
+crew-relay/.wrangler/

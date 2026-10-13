@@ -8,7 +8,7 @@ Everything a new agent, developer or project manager needs, and nothing that dup
 | `handover/` | `HANDOVER.md` — the single, always-current pickup point; `protocol.md` — when and how to write one | Starting a new session. **Read this first.** |
 | `architecture/` | `overview.md` (layers, invariants), `patterns.md` (binding code patterns) | Before writing or reviewing any code |
 | `architecture/decisions/` | Numbered ADRs — one durable decision each, with its consequence | Before changing something an ADR already settled |
-| `how-to/` | Running, testing, releasing | Running, testing, committing, releasing |
+| `how-to/` | Running, testing, releasing; `deploy-relay.md` — deploying and operating the crew relay | Running, testing, committing, releasing, deploying the relay |
 | `knowledge/` | Project-specific notes on external facts; shared facts live in `../../knowledge/` | Before touching external data |
 | `cowork/` | `BACKLOG.md` — this project's research brief for Claude Cowork (rules: `../../cowork/INSTRUCTIONS.md`) | Handing research to Cowork |
 | `superpowers/specs/` | Approved design specs — the binding authority | Resolving what the system is supposed to do |
