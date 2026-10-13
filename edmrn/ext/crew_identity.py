@@ -130,12 +130,14 @@ class Identity:
             return
         if self.path.exists():
             try:
-                disk_key, _hw = _parse_record(self.path.read_text(encoding='utf-8'))
+                disk_key, disk_hw = _parse_record(self.path.read_text(encoding='utf-8'))
                 on_disk_author = _author_of(disk_key)
             except (OSError, UnicodeDecodeError, KeyFileError) as e:
                 raise KeyFileError(f'{self.path.name}: {e}') from e
             if on_disk_author != self.author:
                 raise KeyFileError(f'{self.path.name}: author changed on disk; key file not overwritten')
+            seq = max(seq, disk_hw)
+        seq = max(seq, self.high_water)
         _write(self.path, self._key, seq)
         self.high_water = seq
 

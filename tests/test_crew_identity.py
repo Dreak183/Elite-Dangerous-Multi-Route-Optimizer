@@ -223,14 +223,21 @@ def _add(p, q):
     return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
 
 
-@pytest.mark.parametrize("name", sorted(_SMALL_ORDER))
+_NON_CANONICAL = ("p_noncanon0", "p_plus_1_noncanon1")
+
+
+@pytest.mark.parametrize("name", sorted(set(_SMALL_ORDER) - set(_NON_CANONICAL)))
 def test_blocklist_points_really_have_small_order(name):
     pt = _decode(_SMALL_ORDER[name])
-    if pt is None:
-        pytest.skip("non-canonical y; does not decode under RFC 8032")
+    assert pt is not None
     for _ in range(3):
         pt = _add(pt, pt)
     assert pt[0] % _P == 0 and (pt[1] - pt[2]) % _P == 0
+
+
+@pytest.mark.parametrize("name", _NON_CANONICAL)
+def test_non_canonical_blocklist_entries_do_not_decode(name):
+    assert _decode(_SMALL_ORDER[name]) is None
 
 
 @pytest.mark.parametrize("name", sorted(_SMALL_ORDER))
@@ -248,3 +255,12 @@ def test_identity_point_forgery_is_rejected():
 def test_normal_key_still_verifies(ring):
     ident = ring.for_commander("F1")
     assert verify(ident.author, ident.sign(b"m"), b"m") is True
+
+
+def test_stale_identity_never_lowers_the_on_disk_high_water(ring, tmp_path):
+    a = ring.for_commander("F1")
+    b = KeyRing(tmp_path / "crew_keys").for_commander("F1")
+    b.raise_high_water(10)
+    a.raise_high_water(3)
+    assert json.loads(a.path.read_text(encoding="utf-8"))["high_water"] == 10
+    assert a.high_water == 10
