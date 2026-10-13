@@ -389,6 +389,7 @@ def test_a_restart_adds_nothing_and_live_events_continue(store, tmp_path, listen
     app, service = start(store, tmp_path)
     app.root.fire()
     before = log_kinds(store)
+    assert "visit" in before and "all_bodies" in before
     listeners.journal.clear()
     listeners.status.clear()
     app2, service2 = start(store, tmp_path)

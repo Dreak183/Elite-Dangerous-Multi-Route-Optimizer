@@ -26,11 +26,12 @@ directory, so that neither the journal nor the app data dir resolves to real fol
 
 ```
 H=<empty temp dir>
-HOME="$H" USERPROFILE="$H" APPDATA="$H" LOCALAPPDATA="$H" timeout 25 .venv/Scripts/python.exe -u main.py
+HOME="$H" USERPROFILE="$H" APPDATA="$H" LOCALAPPDATA="$H" timeout 50 .venv/Scripts/python.exe -u main.py
 ```
 
-Exit code 124 is the timeout ending a healthy run. Expect "Default journal path not found"
-warnings. The data dir appears as `$H/EDMRN_Route_Data`, because `$H/Documents` does not exist. The
+A first start in a fresh `$H` builds matplotlib's font cache first and can take over 25 s to open
+the window. Exit code 124 is the timeout ending a healthy run only once the
+window was built. Expect "Default journal path not found" warnings. The data dir appears as `$H/EDMRN_Route_Data`, because `$H/Documents` does not exist. The
 update check still goes out to GitHub.
 
 To probe a module headless, put a script outside the repository and run it with
@@ -38,19 +39,18 @@ To probe a module headless, put a script outside the repository and run it with
 upstream monitor threads otherwise keep the process alive and buffered output is lost. Write fake
 journals into `$H` and pass their folder as `manual_journal_path`.
 
-To check crew capture in such a run, write a journal into the default journal folder under `$H`
-before starting:
+To check crew capture in an isolated app run, write a journal into the default journal folder under
+`$H` before starting (the "Default journal path not found" warning then does not appear):
 
 ```
 J="$H/Saved Games/Frontier Developments/Elite Dangerous"; mkdir -p "$J"
-printf '%s
-' '{"timestamp":"2026-10-12T10:00:00Z","event":"LoadGame","Commander":"Smoke","FID":"F1"}'   '{"timestamp":"2026-10-12T10:01:00Z","event":"FSDJump","StarSystem":"Sol","SystemAddress":10477373803,"StarPos":[0,0,0]}'   > "$J/Journal.2026-10-12T100000.01.log"
+printf '%s\n' '{"timestamp":"2026-10-12T10:00:00Z","event":"LoadGame","Commander":"Smoke","FID":"F1"}' \
+  '{"timestamp":"2026-10-12T10:01:00Z","event":"FSDJump","StarSystem":"Sol","SystemAddress":10477373803,"StarPos":[0,0,0]}' \
+  > "$J/Journal.2026-10-12T100000.01.log"
 ```
 
 After the run, `$H/EDMRN_Route_Data/crew_keys/` holds one key file and the `crew_log` table of
-`$H/EDMRN_Route_Data/edmrn.db` holds one `visit`. A cold first start (matplotlib builds its font
-cache in `$H`) can take longer than 25 s to build the window; the app has not reached the crew
-install by then, so use `timeout 50` for this check.
+`$H/EDMRN_Route_Data/edmrn.db` holds one `visit`.
 
 ## Run the tests
 
