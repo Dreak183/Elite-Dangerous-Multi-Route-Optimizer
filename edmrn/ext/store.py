@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 class StoreError(Exception):
@@ -284,20 +284,30 @@ class Store:
             self._conn.close()
 
     @contextmanager
-    def _transaction(self):
+    def _transaction(self, busy_timeout_ms: Optional[int] = None):
         with self._lock:
-            self._conn.execute('BEGIN IMMEDIATE')
+            previous = None
+            if busy_timeout_ms is not None:
+                previous = self._conn.execute('PRAGMA busy_timeout').fetchone()[0]
+                self._conn.execute(f'PRAGMA busy_timeout = {int(busy_timeout_ms)}')
             try:
-                yield self._conn
-                self._conn.execute('COMMIT')
-            except BaseException:
-                if self._conn.in_transaction:
-                    self._conn.execute('ROLLBACK')
-                raise
+                self._conn.execute('BEGIN IMMEDIATE')
+                try:
+                    yield self._conn
+                    self._conn.execute('COMMIT')
+                except BaseException:
+                    if self._conn.in_transaction:
+                        self._conn.execute('ROLLBACK')
+                    raise
+            finally:
+                if previous is not None:
+                    self._conn.execute(f'PRAGMA busy_timeout = {int(previous)}')
 
-    def transaction(self):
-        """BEGIN IMMEDIATE ... COMMIT under the store lock, for feature modules (ADR-0006)."""
-        return self._transaction()
+    def transaction(self, busy_timeout_ms: Optional[int] = None):
+        """BEGIN IMMEDIATE ... COMMIT under the store lock, for feature modules (ADR-0006).
+
+        `busy_timeout_ms` replaces sqlite's busy timeout for this transaction only."""
+        return self._transaction(busy_timeout_ms)
 
     @contextmanager
     def read(self):

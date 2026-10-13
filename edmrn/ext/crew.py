@@ -4,6 +4,7 @@ Listeners and the replay only queue drafts; the writer alone signs and inserts, 
 """
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections import deque
 from pathlib import Path
@@ -36,6 +37,7 @@ class Writer:
         self._dropped = 0
         self._bad_kinds: set[str] = set()
         self._broken: set[str] = set()
+        self._locked = False
         self._running = False
 
     @property
@@ -51,8 +53,10 @@ class Writer:
         try:
             ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
         except ev.PayloadError as e:
-            if draft.kind not in self._bad_kinds:
+            with self._lock:
+                first = draft.kind not in self._bad_kinds
                 self._bad_kinds.add(draft.kind)
+            if first:
                 logger.warning(f"Crew {draft.kind} draft dropped: {e}")
             return
         with self._lock:
@@ -99,7 +103,17 @@ class Writer:
         if not items:
             return 0
         try:
-            return self._crew_store.append_own(items)
+            written = self._crew_store.append_own(items)
+            self._locked = False
+            return written
+        except sqlite3.OperationalError as e:
+            if any(word in str(e).lower() for word in ('locked', 'busy')):
+                self._requeue(drafts)
+                if not self._locked:
+                    self._locked = True
+                    logger.warning(f"Crew store is locked ({e}); {len(drafts)} drafts stay queued")
+                return 0
+            logger.warning(f"Crew batch of {len(items)} failed ({e}); retrying one by one")
         except Exception as e:
             logger.warning(f"Crew batch of {len(items)} failed ({e}); retrying one by one")
         written = 0
@@ -109,6 +123,15 @@ class Writer:
             except Exception as e:
                 logger.error(f"Crew {item[1].kind} draft dropped: {e}")
         return written
+
+    def _requeue(self, drafts: list) -> None:
+        """Put a failed batch back ahead of newer drafts; past the cap the newest are dropped, so
+        the oldest stay first (the same ones a longer wait would have written)."""
+        with self._lock:
+            self._queue.extendleft(reversed(drafts))
+            while len(self._queue) > self.QUEUE_CAP:
+                self._queue.pop()
+                self._dropped += 1
 
     def _identity(self, commander: Any) -> Optional[Identity]:
         if not isinstance(commander, str) or commander in self._broken:
@@ -122,7 +145,9 @@ class Writer:
 
 
 class CrewService:
-    """`app.crew`: the queries (`store`), the manual API, the status and identities."""
+    """`app.crew`: the queries (`store`), the manual API, the status and identities.
+
+    The manual API and `Writer.drain` run on the Tk thread only: the `KeyRing` is not locked."""
 
     def __init__(self, crew_store: CrewStore, keyring: KeyRing, writer: Writer, live: LiveCapture,
                  ship: CrewStatus, app: Any = None) -> None:

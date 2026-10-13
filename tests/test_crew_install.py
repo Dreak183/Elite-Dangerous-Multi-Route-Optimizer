@@ -1,4 +1,6 @@
 import ast
+import sqlite3
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -262,3 +264,53 @@ def test_manual_api_without_a_commander_raises(store, tmp_path):
     app, service = start(store, tmp_path)
     with pytest.raises(RuntimeError):
         service.report_find("other", "Sol", ADDR)
+
+
+# --- a locked store ---------------------------------------------------------------------
+
+def test_a_locked_store_keeps_drafts_queued_and_returns_quickly(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    for i in range(3):
+        writer.enqueue(visit(at=ts(0, i), system=f"S{i}", address=str(100 + i)))
+    other = sqlite3.connect(store.path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        started = time.monotonic()
+        assert writer.drain() == 0
+        assert time.monotonic() - started < 1.5
+        assert writer.pending == 3
+    finally:
+        other.execute("COMMIT")
+        other.close()
+    assert writer.drain() == 3 and writer.pending == 0
+    assert len(log_kinds(store)) == 3
+
+
+def test_a_requeued_batch_keeps_its_order_ahead_of_newer_drafts(store, tmp_path):
+    writer, root = writer_for(store, tmp_path)
+    for i in range(3):
+        writer.enqueue(visit(at=ts(0, i), system=f"S{i}", address=str(100 + i)))
+    other = sqlite3.connect(store.path, isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        writer.drain(2)
+        writer.enqueue(visit(at=ts(0, 9), system="S9", address="109"))
+    finally:
+        other.execute("COMMIT")
+        other.close()
+    assert [d.payload["system"] for d in writer._queue] == ["S0", "S1", "S2", "S9"]
+
+
+def test_busy_timeout_is_restored_after_success_and_failure(store):
+    def timeout():
+        with store.read() as conn:
+            return conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    before = timeout()
+    with store.transaction(busy_timeout_ms=200) as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 200
+    assert timeout() == before
+    with pytest.raises(ValueError):
+        with store.transaction(busy_timeout_ms=200):
+            raise ValueError("boom")
+    assert timeout() == before

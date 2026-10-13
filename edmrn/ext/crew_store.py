@@ -17,6 +17,9 @@ from edmrn.logger import get_logger
 
 logger = get_logger('CrewStore')
 
+# The Tk thread writes; a locked database must cost it only this long per attempt.
+BUSY_TIMEOUT_MS = 200
+
 PROJECTION_TABLES = (
     'crew_projected', 'crew_systems', 'crew_visits', 'crew_honks', 'crew_all_bodies',
     'crew_explored', 'crew_body_reports', 'crew_signals', 'crew_genera', 'crew_signal_sources',
@@ -341,7 +344,7 @@ class CrewStore:
         """Sign and log own drafts in one transaction (C4); the key files follow after the commit."""
         written = 0
         allocated: dict[str, tuple[Identity, int]] = {}
-        with self.store.transaction() as conn:
+        with self.store.transaction(busy_timeout_ms=BUSY_TIMEOUT_MS) as conn:
             for identity, draft in items:
                 ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
                 event_id = draft.resolve_id(identity.author)
@@ -373,7 +376,7 @@ class CrewStore:
         env = ev.parse_envelope(envelope)
         if not verify(env['author'], signature, envelope):
             raise ev.EnvelopeError('signature does not verify')
-        with self.store.transaction() as conn:
+        with self.store.transaction(busy_timeout_ms=BUSY_TIMEOUT_MS) as conn:
             inserted = _insert(conn, env, bytes(envelope), bytes(signature))
             if inserted:
                 _project(conn, env)
