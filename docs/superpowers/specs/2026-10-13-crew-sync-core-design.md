@@ -1,6 +1,6 @@
 # Crew sync core — design (Spec B1)
 
-Status: Proposed
+Status: Accepted (2026-10-13)
 Date: 2026-10-13
 Crew features: A capture → **B1 sync core (this spec)** → B2 chat, route, expeditions, Discord → C
 window. Rules: ADR-0005 (transport), ADR-0006 (store layer), ADR-0007 (stored versus projected),
@@ -21,8 +21,10 @@ the next day.
 
 ## Commander's requirements carried into this spec (2026-10-12/13)
 
-- One fixed group per installation. The leader admits members; invites go by Discord DM. An invite
-  admits on its own; the leader need not be online when it is redeemed.
+- One fixed group per installation. The leader admits members with invites. An invite admits on
+  its own; the leader need not be online when it is redeemed.
+- An invite exists as copyable text and as a link, to send by hand (for example a Discord DM), or
+  is posted through a Discord webhook the leader configures (2026-10-13).
 - Own status is shared automatically, with a "pause sharing" switch.
 - Status per commander: ship and loadout (EDSY link), fuel, hull, current or last known location.
 - The relay lives at `galroute.the-hub.cloud`, a sub-domain of a zone the commander already manages
@@ -41,7 +43,7 @@ the next day.
   | Kind | Signed by | Payload |
   |---|---|---|
   | `group` | the leader | `group_id` (UUIDv7), `name` |
-  | `invite` | the leader | `group_id`, `invite_id` (UUIDv7), `token_hash` (64 lowercase hex), `expires_at` (stamp) |
+  | `invite` | the leader | `group_id`, `invite_id` (UUIDv7), `token_hash` (64 lowercase hex), `expires_at` (stamp), `label` (name or null: whom the leader meant it for) |
   | `join` | the new member | `group_id`, `invite_id`, `token` (64 lowercase hex), `commander` |
   | `remove` | the leader | `group_id`, `member` (author), `last_seq` (0 … 2^53−1) |
 
@@ -76,8 +78,30 @@ the next day.
 - S5. **Invite string.** `edmrn-crew:1:` followed by base64url (no padding) of the canonical JSON
   object `{"g": group_id, "i": invite_id, "k": token, "l": leader, "u": url}`. The token is 32
   random bytes from `secrets`. The URL must be `wss://` with a host name and no user info, query or
-  fragment. Invites expire 7 days after creation. A string that fails any check is rejected whole,
-  with one sentence saying why.
+  fragment. A string that fails any check is rejected whole, with one sentence saying why.
+  - **Expiry.** The leader chooses 1 hour, 24 hours (the default) or 7 days.
+  - **Link form.** `https://<relay host>/join#<invite string>`. The relay serves a static page at
+    `/join`: a script reads the fragment, shows it as text (never as markup) with a copy button and
+    the steps "EDMRN → Settings → Crew… → Join with invite". The fragment never reaches the relay,
+    so the token stays out of its logs.
+  - **Join box.** "Join with invite" accepts the bare string or the link and takes everything after
+    the first `#`.
+- S5a. **Invite delivery.** "Create invite" always shows the string and the link with copy buttons.
+  If the leader has configured a Discord webhook, a "Post to Discord" button also posts the invite.
+  - **The message** names the group, the label, the expiry and the link. It is sent with
+    `allowed_mentions` `{"parse": []}`, so a group name or label never pings anyone.
+  - **The webhook URL** is a secret: whoever has it can post to the channel. It is stored only in
+    the leader's `crew_keys/group.json`, never sent to the relay, never logged, and never shown in
+    an error text.
+    - It must be `https://discord.com/api/webhooks/<digits>/<token>`; `discordapp.com`, `ptb.` and
+      `canary.` hosts are accepted.
+    - Spec B2's find mirror may reuse it, with the commander's consent then.
+  - **Sending.** The post goes through `edmrn/ext/api.py` like every external request, with a
+    redacted URL in any log line. It sends `?wait=true`, honours a 429's `retry_after` once, and
+    reports success or the reason in the dialog.
+  - **Warning.** A webhook posts into a channel, not a DM. Whoever reads the channel first can
+    redeem the invite. The dialog says this next to the button and recommends a private channel and
+    a short expiry.
 
 ### Protocol
 
@@ -221,6 +245,8 @@ the next day.
     by `idFromName(group_id)`.
   - **Routes:**
     - `GET /` answers a plain-text greeting naming the source URL (Worker variable `SOURCE_URL`).
+    - `GET /join` answers the static invite page (S5), with a strict Content-Security-Policy and no
+      external resources.
     - `GET /v1/groups/<group_id>/ws` with a WebSocket upgrade goes to the group's object.
     - Anything else answers 404.
 
@@ -263,8 +289,10 @@ the next day.
     address plus `/v1/groups/<group_id>/ws`;
   - in a group: the connection state, the member list, "Pause sharing", and "Leave", which deletes
     `group.json` and nothing else;
-  - for the leader: "Create invite", which signs the `invite`, copies the invite string to the
-    clipboard and shows its expiry, and "Remove" per member.
+  - for the leader:
+    - "Create invite", with a label and an expiry, which signs the `invite` and shows S5a;
+    - a field for the Discord webhook URL;
+    - "Remove" per member.
 
   The dialog's text is English, like all UI text.
 - S21. **No real folders and no network in tests** (Spec A C13).
@@ -367,12 +395,23 @@ pytest for the client, Vitest for the relay; neither touches real folders or the
   - an own report of a system name wins over an earlier friend's;
   - equivocation warns once per author;
   - a rebuild logs one summary.
+- **Invite delivery (client):**
+  - the link and the bare string both parse;
+  - a hostile fragment (markup, a 10,000-character string, a wrong prefix) is refused;
+  - the webhook URL validator accepts the four hosts and refuses others, `http:`, and extra path
+    parts;
+  - the post sends `allowed_mentions` with an empty `parse` and `wait=true` through a fake
+    transport;
+  - no log line and no error text contains the webhook token.
+- **Invite page (relay):** it renders the fragment as text, and its CSP allows only its own
+  script, by hash.
 - **End to end (opt-in, marked, not in the default run):** two clients against `wrangler dev` on
   localhost exchange a visit, a status and an invite. This needs Node but no Cloudflare account.
 
 ## Not in scope
 
-- Chat, the leader's route, expeditions, the Discord webhook (Spec B2).
+- Chat, the leader's route, expeditions, mirroring finds to Discord (Spec B2).
+- Revoking an unredeemed invite before it expires.
 - Peer-to-peer transports (ADR-0005's staged fallback).
 - Leadership transfer, re-admitting a removed key, several groups per installation.
 - The crew window, commander cards, key export and import UI (Spec C).

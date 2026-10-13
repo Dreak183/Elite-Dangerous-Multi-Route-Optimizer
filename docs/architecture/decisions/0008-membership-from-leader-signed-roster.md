@@ -1,6 +1,6 @@
 # ADR-0008: Group membership is computed from leader-signed roster envelopes and gates projection
 
-Status: Proposed
+Status: Accepted
 Date: 2026-10-13
 
 ## Context
