@@ -366,6 +366,20 @@ def test_sync_state_and_board_observers_reach_tk_only_through_root_after(world):
     assert states == ["live"] and [e.author for e in entries] == ["A" * 43]
 
 
+def test_unsubscribed_observers_receive_nothing_more(world):
+    world.group.create_group("Crew")
+    states, entries = [], []
+    off_state = world.group.subscribe_state(lambda: states.append(1))
+    off_board = world.group.subscribe_board(entries.append)
+    off_state()
+    off_board()
+    off_state()  # idempotent
+    FakeSync.instances[-1].observers[0]("live", None)
+    world.group.board.update("A" * 43, "2026-10-13T09:00:00Z", {})
+    world.root.run_now()
+    assert states == [] and entries == []
+
+
 def test_a_failing_observer_does_not_break_the_others(world):
     world.group.create_group("Crew")
     seen = []

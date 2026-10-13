@@ -43,6 +43,20 @@ class GroupConfigError(ValueError):
     """group.json exists but cannot be used."""
 
 
+class GroupError(Exception):
+    """A refused group action; the message is one sentence for the dialog.
+
+    Lives here, not in crew_group, so the dialog can import it without `cryptography` (S4)."""
+
+
+@dataclass(frozen=True)
+class CreatedInvite:
+    code: str
+    link: str
+    expires_at: str
+    label: Optional[str]
+
+
 @dataclass(frozen=True)
 class RosterEnvelope:
     author: str

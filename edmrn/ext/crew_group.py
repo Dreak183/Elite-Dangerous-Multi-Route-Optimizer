@@ -11,33 +11,20 @@ import contextlib
 import importlib.util
 import sqlite3
 import threading
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
 from edmrn.ext import crew_discord
 from edmrn.ext import crew_events as ev
 from edmrn.ext.api import ApiError
-from edmrn.ext.crew_roster import (DEFAULT_RELAY, INVITE_HOURS, GroupConfig, GroupConfigError,
-                                   InviteCode, InviteError, check_relay_url, check_webhook,
+from edmrn.ext.crew_roster import (DEFAULT_RELAY, INVITE_HOURS, CreatedInvite, GroupConfig,
+                                   GroupConfigError, GroupError, InviteCode, InviteError, check_relay_url, check_webhook,
                                    decode_invite, delete_group, encode_invite, invite_link,
                                    load_group, new_token, save_group, token_hash)
 from edmrn.ext.crew_sync import CrewBoard, CrewSync, Inbox, make_status_source, websockets_connect
 from edmrn.logger import get_logger
 
 logger = get_logger('CrewGroup')
-
-
-class GroupError(Exception):
-    """A refused group action; the message is one sentence for the dialog."""
-
-
-@dataclass(frozen=True)
-class CreatedInvite:
-    code: str
-    link: str
-    expires_at: str
-    label: Optional[str]
 
 
 class CrewGroup:
@@ -105,14 +92,22 @@ class CrewGroup:
             return 'no group'
         return self.sync.state if self.sync is not None else 'stopped'
 
-    def subscribe_state(self, observer: Callable[[], None]) -> None:
+    def subscribe_state(self, observer: Callable[[], None]) -> Callable[[], None]:
         """`observer()` runs on the Tk loop when the sync state changes; re-read `state` there,
-        notifications can arrive out of order."""
+        notifications can arrive out of order. Returns the function that unsubscribes."""
         self._state_observers.append(observer)
+        return lambda: self._unsubscribe(self._state_observers, observer)
 
-    def subscribe_board(self, observer: Callable[[Any], None]) -> None:
-        """`observer(entry)` runs on the Tk loop for each friend status that is accepted."""
+    def subscribe_board(self, observer: Callable[[Any], None]) -> Callable[[], None]:
+        """`observer(entry)` runs on the Tk loop for each friend status that is accepted.
+        Returns the function that unsubscribes."""
         self._board_observers.append(observer)
+        return lambda: self._unsubscribe(self._board_observers, observer)
+
+    @staticmethod
+    def _unsubscribe(observers: list, observer: Callable) -> None:
+        with contextlib.suppress(ValueError):  # already removed
+            observers.remove(observer)
 
     def _to_tk(self, fn: Callable[[], None]) -> None:
         if self.root is None:

@@ -1,6 +1,8 @@
 import ast
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -171,20 +173,33 @@ def test_app_installs_crew_right_after_location():
     assert imports and imports[0].names[0].name == "install"
 
 
-def test_a_missing_cryptography_disables_crew_without_raising(store, tmp_path, monkeypatch, listeners):
-    import importlib
-    import edmrn.ext as ext_package
-    for name in [n for n in sys.modules if n.startswith(("edmrn.ext.crew", "cryptography."))]:
-        monkeypatch.delitem(sys.modules, name)
-        attribute = name.rpartition(".")[2]
-        if name.startswith("edmrn.ext.") and hasattr(ext_package, attribute):
-            monkeypatch.setattr(ext_package, attribute, getattr(ext_package, attribute))  # restored later
-    monkeypatch.setitem(sys.modules, "cryptography", None)
-    fresh = importlib.import_module("edmrn.ext.crew")
-    app = make_app(store, tmp_path / "journals")
-    assert fresh.install(app) is None
-    assert "edmrn.ext.crew_group" not in sys.modules  # sync is imported only behind the crypto check
-    assert app.crew is None and listeners.journal == [] and listeners.status == []
+def test_a_missing_cryptography_disables_crew_without_raising(tmp_path):
+    """A clean interpreter with `cryptography` unimportable. An in-process check is a false green:
+    deleting sys.modules entries leaves the cached attributes on the edmrn.ext package."""
+    script = """
+import sys
+class _Block:
+    def find_spec(self, name, path=None, target=None):
+        if name == 'cryptography' or name.startswith('cryptography.'):
+            raise ModuleNotFoundError('blocked: ' + name)
+sys.meta_path.insert(0, _Block())
+from types import SimpleNamespace
+from edmrn.ext import crew
+from edmrn.fuel_tracker import FuelTracker
+from edmrn.journal import JournalMonitor
+app = SimpleNamespace(root=None, edmrn_store=object(), edmrn_store_error=None,
+                      config=SimpleNamespace(journal_path=None), location_tracker=None)
+assert crew.install(app) is None
+assert app.crew is None and not JournalMonitor.event_listeners and not FuelTracker.status_listeners
+assert 'edmrn.ext.crew_group' not in sys.modules and 'edmrn.ext.crew_identity' not in sys.modules
+print('OK')
+"""
+    home = str(tmp_path)
+    env = dict(os.environ, HOME=home, USERPROFILE=home, APPDATA=home, LOCALAPPDATA=home)
+    result = subprocess.run([sys.executable, "-c", script], cwd=Path(__file__).parent.parent, env=env,
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("OK")
 
 
 # --- writer -----------------------------------------------------------------------------

@@ -1,9 +1,10 @@
 """The crew settings card and dialog (crew sync core spec S20). Tk thread only.
 
-The dialog renders from the group controller (crew_group.CrewGroup). It re-renders when what it
-shows has changed: on the controller's state notification (which arrives through root.after and
-re-reads `group.state`) and on a one-second check for roster changes, which have no notification.
-Friend statuses update their label in place. Every action goes through the controller; a GroupError's
+The dialog renders from the group controller (crew_group.CrewGroup). It re-renders in full
+only when its structure changes (group, problem, roster, commander); a sync state change updates the
+connection label and the Reconnect button in place, and typed input survives a full render. The state
+notification arrives through root.after and re-reads `group.state`; roster changes have no
+notification, so a one-second check looks for them. Friend statuses update their label in place. Every action goes through the controller; a GroupError's
 sentence appears under the dialog.
 
 Everything a friend sends (names, systems, ships) is shown as plain widget text only.
@@ -14,27 +15,48 @@ from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
-from edmrn.ext.crew_group import CreatedInvite, GroupError
-from edmrn.ext.crew_roster import DEFAULT_RELAY, INVITE_HOURS
+from edmrn.ext.crew_roster import DEFAULT_RELAY, INVITE_HOURS, CreatedInvite, GroupError
+from edmrn.logger import get_logger
 
-EXPIRY = {'1 hour': 1, '24 hours': 24, '7 days': 168}
-assert tuple(EXPIRY.values()) == INVITE_HOURS
+logger = get_logger('CrewDialog')
+
+EXPIRY = dict(zip(('1 hour', '24 hours', '7 days'), INVITE_HOURS))
 STATE_TEXT = {'connecting': 'Connecting...', 'syncing': 'Catching up...', 'live': 'Connected',
               'waiting': 'Offline, retrying', 'refused': 'Refused by the relay',
               'stopped': 'Not connected', 'no group': 'Not in a group'}
 WEBHOOK_WARNING = ('A webhook posts into a channel, not a DM: whoever reads the channel first can '
                    'use the invite. Use a private channel and a short expiry.')
 STATUS_MAX = 80
+_UNSET = object()
+_card_failure_logged = False
 
 
 def add_settings_card(app: Any, parent: Any, colors: dict) -> Any:
-    frame = ctk.CTkFrame(parent, corner_radius=10, fg_color=colors['frame'],
-                         border_color=colors['border'], border_width=1)
-    frame.grid(row=1, column=2, padx=5, pady=5, sticky='nsew')
-    ctk.CTkLabel(frame, text='Crew', font=ctk.CTkFont(size=13, weight='bold')).pack(pady=(8, 6))
-    ctk.CTkButton(frame, text='Crew...', command=lambda: open_dialog(app)).pack(
-        pady=(0, 8), padx=10, fill='x')
-    return frame
+    """The Settings card. Called from upstream's tab builder: it never raises into it, because a
+    raise there leaves the Settings tab half built and unmarked, and it is built again on each visit."""
+    global _card_failure_logged
+    frame = None
+    try:
+        frame = ctk.CTkFrame(parent, corner_radius=10, fg_color=colors['frame'],
+                             border_color=colors['border'], border_width=1)
+        frame.grid(row=1, column=2, padx=5, pady=5, sticky='nsew')
+        ctk.CTkLabel(frame, text='Crew', font=ctk.CTkFont(size=13, weight='bold')).pack(pady=(8, 6))
+        ctk.CTkButton(frame, text='Crew...', command=lambda: open_dialog(app)).pack(
+            pady=(0, 8), padx=10, fill='x')
+        return frame
+    except Exception as e:
+        if not _card_failure_logged:
+            _card_failure_logged = True
+            logger.error(f'The crew settings card could not be built: {e}')
+    try:
+        if frame is not None:
+            frame.destroy()
+        frame = ctk.CTkFrame(parent, corner_radius=10)
+        frame.grid(row=1, column=2, padx=5, pady=5, sticky='nsew')
+        ctk.CTkLabel(frame, text='Crew is unavailable.').pack(padx=10, pady=10)
+        return frame
+    except Exception:
+        return None
 
 
 def open_dialog(app: Any) -> Optional['CrewDialog']:
@@ -48,11 +70,15 @@ def open_dialog(app: Any) -> Optional['CrewDialog']:
             existing.lift()
             existing.focus()
             return existing
+
+    def who() -> tuple:  # read on each render: the commander can change while the dialog is open
+        crew = getattr(app, 'crew', None)
+        identity = crew.identity() if crew is not None else None
+        return (getattr(crew, 'commander_name', None),
+                identity.author if identity is not None else None)
+
     crew = getattr(app, 'crew', None)
-    identity = crew.identity() if crew is not None else None
-    dialog = CrewDialog(app.root, getattr(crew, 'group', None),
-                        commander=getattr(crew, 'commander_name', None),
-                        author=identity.author if identity is not None else None)
+    dialog = CrewDialog(app.root, getattr(crew, 'group', None), commander=None, author=None, who=who)
     app._edmrn_crew_dialog = dialog
     return dialog
 
@@ -72,54 +98,46 @@ def _status_text(status: Any) -> str:
     return ' - '.join(part for part in (_plain(status.get('system')), ship) if part)
 
 
-def _hook(group: Any, dialog: 'CrewDialog') -> None:
-    """Subscribe to the controller once per controller, however many dialogs are opened."""
-    holder = getattr(group, '_crew_dialog_holder', None)
-    if holder is None:
-        subscribe_state = getattr(group, 'subscribe_state', None)
-        subscribe_board = getattr(group, 'subscribe_board', None)
-        if subscribe_state is None or subscribe_board is None:
-            return
-        holder = {'dialog': None}
-        group._crew_dialog_holder = holder
-
-        def state_changed() -> None:
-            current = holder['dialog']
-            if current is not None:
-                current.on_state()
-
-        def board_changed(entry: Any) -> None:
-            current = holder['dialog']
-            if current is not None:
-                current.on_board(entry)
-        subscribe_state(state_changed)
-        subscribe_board(board_changed)
-    holder['dialog'] = dialog
-
-
 class CrewDialog(ctk.CTkToplevel):
     REFRESH_MS = 1000
+    CONFIRM_MS = 4000
 
     def __init__(self, master: Any, group: Any, *, commander: Optional[str], author: Optional[str],
-                 copy: Optional[Callable[[str], None]] = None) -> None:
+                 copy: Optional[Callable[[str], None]] = None,
+                 who: Optional[Callable[[], tuple]] = None) -> None:
         super().__init__(master)
         self.title('Crew')
         self.geometry('560x640')
         self.group = group
-        self.commander = commander
-        self.author = author
+        self._who = who or (lambda: (commander, author))
         self._copy = copy or self._clipboard
         self.message = ctk.StringVar(value='')
         self.invite: Optional[CreatedInvite] = None
+        self._invite_group: Optional[str] = None
+        self._armed: dict = {}
+        self._unsubscribers: list = []
+        self._rendered_group: Any = _UNSET
         self.body = ctk.CTkScrollableFrame(self)
         self.body.pack(fill='both', expand=True, padx=10, pady=(10, 4))
         ctk.CTkLabel(self, textvariable=self.message, wraplength=520, justify='left').pack(
             fill='x', padx=10, pady=(0, 10))
         self._shown: Any = None
         self.render()
-        if group is not None:
-            _hook(group, self)
+        for name, observer in (('subscribe_state', self.on_state), ('subscribe_board', self.on_board)):
+            subscribe = getattr(group, name, None)
+            if subscribe is not None:
+                unsubscribe = subscribe(observer)
+                if callable(unsubscribe):
+                    self._unsubscribers.append(unsubscribe)
         self.after(self.REFRESH_MS, self._tick)
+
+    def destroy(self) -> None:
+        unsubscribers, self._unsubscribers = self._unsubscribers, []
+        for unsubscribe in unsubscribers:
+            unsubscribe()
+        for key in list(self._armed):
+            self._disarm(key)
+        super().destroy()
 
     # --- plumbing ----------------------------------------------------------------------
 
@@ -133,7 +151,8 @@ class CrewDialog(ctk.CTkToplevel):
         except Exception:
             return False
 
-    def _view_key(self) -> tuple:
+    def _structure(self) -> tuple:
+        """What decides the widget tree. State and error text are not part of it: they update in place."""
         g = self.group
         if g is None:
             return ('none',)
@@ -142,19 +161,24 @@ class CrewDialog(ctk.CTkToplevel):
             (m.author, m.commander or '', m.leader, m.last_seq is not None)
             for m in roster.members.values()))
         name = roster.name if roster is not None else None
-        return (g.config, g.problem, g.state, name, members, getattr(g.sync, 'last_error', None))
+        return (g.config, g.problem, name, members, self._who())
 
     def _tick(self) -> None:
         if not self._alive():
             return
-        if self._view_key() != self._shown:
-            self.render()
+        self._refresh()
         self.after(self.REFRESH_MS, self._tick)
+
+    def _refresh(self) -> None:
+        if self._structure() != self._shown:
+            self.render()
+        else:
+            self._update_connection()
 
     def on_state(self) -> None:
         """The sync state changed (arrives on the Tk loop; the state is re-read, not trusted)."""
-        if self._alive() and self._view_key() != self._shown:
-            self.render()
+        if self._alive():
+            self._refresh()
 
     def on_board(self, entry: Any) -> None:
         """A friend's status was accepted; only a member shown here has a label."""
@@ -164,23 +188,52 @@ class CrewDialog(ctk.CTkToplevel):
         if label is not None:
             label.configure(text=_status_text(getattr(entry, 'status', None)))
 
-    def _do(self, action: Callable[[], Any], done: Optional[str] = None) -> Any:
+    def _do(self, action: Callable[[], Any], done: Optional[str] = None,
+            on_error: Optional[Callable[[], None]] = None) -> Any:
         """Run a controller action. `done=None` leaves the message alone (the action set it)."""
         try:
             result = action()
         except GroupError as e:
             self.message.set(str(e))
+            if on_error is not None:
+                on_error()
             return None
         if done is not None:
             self.message.set(done)
         self.render()
         return result
 
+    def _confirm_button(self, parent: Any, key: Any, text: str, confirm_text: str,
+                        action: Callable[[], None], **options: Any) -> Any:
+        """Two clicks within CONFIRM_MS run `action`; the first only asks (no modal dialog)."""
+        button = ctk.CTkButton(parent, text=text, **options)
+
+        def click() -> None:
+            if key in self._armed:
+                self._disarm(key)
+                action()
+                return
+            button.configure(text=confirm_text)
+            self._armed[key] = (self.after(self.CONFIRM_MS, lambda: self._disarm(key)), button, text)
+        button.configure(command=click)
+        return button
+
+    def _disarm(self, key: Any) -> None:
+        armed = self._armed.pop(key, None)
+        if armed is None:
+            return
+        timer, button, text = armed
+        try:
+            self.after_cancel(timer)
+            button.configure(text=text)
+        except Exception:  # the button was destroyed by a render
+            pass
+
     def _section(self, title: str) -> Any:
         frame = ctk.CTkFrame(self.body)
         frame.pack(fill='x', pady=6)
-        ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=13, weight='bold')).pack(
-            anchor='w', padx=8, pady=(6, 2))
+        frame.title_label = ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=13, weight='bold'))
+        frame.title_label.pack(anchor='w', padx=8, pady=(6, 2))
         return frame
 
     def _copy_row(self, parent: Any, value: str, label: str) -> tuple:
@@ -194,46 +247,84 @@ class CrewDialog(ctk.CTkToplevel):
         button.pack(side='left', padx=(6, 0))
         return entry, button
 
+    # --- typed input survives a full render ----------------------------------------------
+
+    def _typed(self) -> dict:
+        typed: dict = {}
+        for name in ('name_entry', 'relay_entry', 'label_entry', 'webhook_entry', 'expiry'):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                typed[name] = widget.get()
+        if getattr(self, 'invite_box', None) is not None:
+            typed['invite_box'] = self.invite_box.get('1.0', 'end-1c')
+        return typed
+
+    def _restore(self, typed: dict) -> None:
+        for name, value in typed.items():
+            widget = getattr(self, name, None)
+            if widget is None:
+                continue
+            if name == 'expiry':
+                widget.set(value)
+            elif name == 'invite_box':
+                widget.insert('1.0', value)
+            else:
+                widget.delete(0, 'end')
+                widget.insert(0, value)
+
     # --- views -------------------------------------------------------------------------
 
     def render(self) -> None:
+        g = self.group
+        group_id = g.config.group_id if g is not None and g.config is not None else None
+        typed = self._typed() if group_id == self._rendered_group else {}
+        if self.invite is not None and group_id != self._invite_group:
+            self.invite = None  # an old invite never shows under another group
+        for key in list(self._armed):
+            self._disarm(key)
         for child in self.body.winfo_children():
             child.destroy()
         self.name_entry = self.relay_entry = self.create_button = None
         self.invite_box = self.join_button = None
         self.pause_switch = self.leave_button = self.reconnect_button = None
         self.label_entry = self.expiry = self.invite_button = None
-        self.code_entry = self.link_entry = self.copy_code_button = self.post_button = None
-        self.webhook_entry = self.webhook_button = None
+        self.code_entry = self.link_entry = self.copy_code_button = self.copy_link_button = None
+        self.post_button = self.webhook_entry = self.webhook_button = None
+        self.key_entry = self.copy_key_button = None
+        self.group_section = self.connection_label = None
+        self._conn_frame: Any = None
         self.remove_buttons: dict = {}
         self.status_labels: dict = {}
-        self._shown = self._view_key()
-        if self.group is None:
+        self._shown = self._structure()
+        self._rendered_group = group_id
+        if g is None:
             ctk.CTkLabel(self.body, text='Crew features are unavailable; the log file says why.',
                          wraplength=500).pack(anchor='w', padx=8, pady=8)
             return
         self._render_identity()
-        if self.group.problem:
-            ctk.CTkLabel(self.body, text=self.group.problem, wraplength=500,
+        if g.problem:
+            ctk.CTkLabel(self.body, text=g.problem, wraplength=500,
                          text_color='orange').pack(anchor='w', padx=8, pady=4)
-        if self.group.config is None:
+        if g.config is None:
             self._render_outside()
         else:
             self._render_inside()
+        self._restore(typed)
 
     def _render_identity(self) -> None:
+        commander, author = self._who()
         frame = self._section('You')
-        ctk.CTkLabel(frame, text=f'Commander: {self.commander or "not known yet"}').pack(
+        ctk.CTkLabel(frame, text=f'Commander: {_plain(commander) or "not known yet"}').pack(
             anchor='w', padx=8)
-        if self.author:
+        if author:
             ctk.CTkLabel(frame, text='Your crew key (public; the relay lists leaders by it):').pack(
                 anchor='w', padx=8, pady=(4, 0))
-            self._copy_row(frame, self.author, 'Copy')
+            self.key_entry, self.copy_key_button = self._copy_row(frame, author, 'Copy')
 
     def _leave_button(self, parent: Any) -> None:
-        self.leave_button = ctk.CTkButton(parent, text='Leave group', fg_color='gray30',
-                                          command=lambda: self._do(self.group.leave,
-                                                                   'Left the group.'))
+        self.leave_button = self._confirm_button(
+            parent, 'leave', 'Leave group', 'Click again to leave',
+            lambda: self._do(self.group.leave, 'Left the group.'), fg_color='gray30')
         self.leave_button.pack(anchor='e', padx=8, pady=8)
 
     def _render_outside(self) -> None:
@@ -258,22 +349,37 @@ class CrewDialog(ctk.CTkToplevel):
             lambda: self.group.join(self.invite_box.get('1.0', 'end').strip()), 'Joined.'))
         self.join_button.pack(anchor='e', padx=8, pady=(2, 8))
 
+    def _connection_text(self) -> str:
+        g = self.group
+        state = STATE_TEXT.get(g.state, g.state)
+        error = _plain(getattr(g.sync, 'last_error', None))
+        return f'Connection: {state}' + (f' ({error})' if error and g.state != 'live' else '')
+
+    def _update_connection(self) -> None:
+        """Label and Reconnect button follow the sync state in place; nothing typed is touched."""
+        if self.connection_label is None:
+            return
+        g = self.group
+        self.connection_label.configure(text=self._connection_text())
+        refused = g.state == 'refused'
+        if refused and self.reconnect_button is None:
+            self.reconnect_button = ctk.CTkButton(
+                self._conn_frame, text='Reconnect', width=100,
+                command=lambda: self._do(g.reconnect, 'Reconnecting...'))
+            self.reconnect_button.pack(anchor='w', padx=8, pady=4)
+        elif not refused and self.reconnect_button is not None:
+            self.reconnect_button.destroy()
+            self.reconnect_button = None
+
     def _render_inside(self) -> None:
         g = self.group
         cfg = g.config
         roster = g.roster
         name = _plain(roster.name) if roster is not None and roster.name else ''
-        frame = self._section(f'Group: {name or "crew"}')
-        state = STATE_TEXT.get(g.state, g.state)
-        error = _plain(getattr(g.sync, 'last_error', None))
-        ctk.CTkLabel(frame, text=f'Connection: {state}' + (f' ({error})' if error and
-                     g.state != 'live' else ''), wraplength=500, justify='left').pack(
-            anchor='w', padx=8)
-        if g.state == 'refused':
-            self.reconnect_button = ctk.CTkButton(frame, text='Reconnect', width=100,
-                                                  command=lambda: self._do(g.reconnect,
-                                                                           'Reconnecting...'))
-            self.reconnect_button.pack(anchor='w', padx=8, pady=4)
+        frame = self.group_section = self._conn_frame = self._section(f'Group: {name or "crew"}')
+        self.connection_label = ctk.CTkLabel(frame, text='', wraplength=500, justify='left')
+        self.connection_label.pack(anchor='w', padx=8)
+        self._update_connection()
         self.pause_switch = ctk.CTkSwitch(frame, text='Pause sharing', command=self._paused)
         if cfg.paused:
             self.pause_switch.select()
@@ -292,8 +398,10 @@ class CrewDialog(ctk.CTkToplevel):
             status.pack(side='left', padx=(10, 0))
             self.status_labels[member.author] = status
             if cfg.is_leader and not member.leader:
-                button = ctk.CTkButton(row, text='Remove', width=70, command=lambda a=member.author:
-                                       self._do(lambda: g.remove(a), 'Member removed.'))
+                button = self._confirm_button(
+                    row, ('remove', member.author), 'Remove', 'Click again to remove',
+                    lambda a=member.author: self._do(lambda: g.remove(a), 'Member removed.'),
+                    width=70)
                 button.pack(side='right')
                 self.remove_buttons[member.author] = button
 
@@ -303,8 +411,15 @@ class CrewDialog(ctk.CTkToplevel):
 
     def _paused(self) -> None:
         paused = bool(self.pause_switch.get())
+
+        def revert() -> None:  # the switch must show what the group file says
+            cfg = self.group.config
+            if cfg is not None and cfg.paused:
+                self.pause_switch.select()
+            else:
+                self.pause_switch.deselect()
         self._do(lambda: self.group.set_paused(paused),
-                 'Sharing paused.' if paused else 'Sharing resumed.')
+                 'Sharing paused.' if paused else 'Sharing resumed.', on_error=revert)
 
     def _render_invite(self, cfg: Any) -> None:
         g = self.group
@@ -315,18 +430,18 @@ class CrewDialog(ctk.CTkToplevel):
         self.expiry.set('24 hours')
         self.expiry.pack(anchor='w', padx=8, pady=2)
 
-        def create() -> None:
-            invite = self._do(lambda: g.create_invite(self.label_entry.get(),
-                                                      EXPIRY[self.expiry.get()]),
-                              'Invite created; it works once.')
-            if invite is not None:
-                self.invite = invite
-                self.render()
-        self.invite_button = ctk.CTkButton(frame, text='Create invite', command=create)
+        def create() -> CreatedInvite:
+            invite = g.create_invite(self.label_entry.get(), EXPIRY[self.expiry.get()])
+            self.invite, self._invite_group = invite, cfg.group_id
+            return invite
+        self.invite_button = ctk.CTkButton(
+            frame, text='Create invite',
+            command=lambda: self._do(create, 'Invite created; it works once.'))
         self.invite_button.pack(anchor='e', padx=8, pady=2)
         if self.invite is not None:
             self.code_entry, self.copy_code_button = self._copy_row(frame, self.invite.code, 'Copy')
-            self.link_entry, _ = self._copy_row(frame, self.invite.link, 'Copy link')
+            self.link_entry, self.copy_link_button = self._copy_row(frame, self.invite.link,
+                                                                    'Copy link')
             ctk.CTkLabel(frame, text=f'Expires {self.invite.expires_at.replace("T", " ")}').pack(
                 anchor='w', padx=8)
             if cfg.webhook:
