@@ -39,7 +39,7 @@ describe('routes', () => {
 
   it('forwards a valid socket upgrade to the group object and refuses malformed ids', async () => {
     const id = '01920000-0000-7000-8000-0000000000a2';
-    expect((await SELF.fetch(`https://relay.test/v1/groups/${id}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(501);
+    expect((await SELF.fetch(`https://relay.test/v1/groups/${id}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(101);
     const upper = id.toUpperCase();
     expect((await SELF.fetch(`https://relay.test/v1/groups/${upper}/ws`, { headers: { Upgrade: 'websocket' } })).status).toBe(404);
     const v4 = '01920000-0000-4000-8000-0000000000a2';
