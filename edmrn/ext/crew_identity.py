@@ -176,6 +176,32 @@ class KeyRing:
         self._cache[commander] = identity
         return identity
 
+    def _scan(self):
+        if not self.directory.is_dir():
+            return
+        for path in sorted(self.directory.glob('cmdr-*.json')):
+            try:
+                key, high_water = _parse_record(path.read_text(encoding='utf-8'))
+            except (OSError, UnicodeDecodeError, KeyFileError):
+                continue
+            yield path, key, high_water
+
+    def own_authors(self) -> frozenset:
+        """Every author with a usable key file here (spec B1 S3: own authors always project)."""
+        authors = {identity.author for identity in self._cache.values()}
+        authors.update(_author_of(key) for _, key, _ in self._scan())
+        return frozenset(authors)
+
+    def identity_for_author(self, author: str):
+        """The identity whose public key is `author`, or None."""
+        for identity in self._cache.values():
+            if identity.author == author:
+                return identity
+        for path, key, high_water in self._scan():
+            if _author_of(key) == author:
+                return Identity(path, key, high_water)
+        return None
+
     def export_text(self, commander: str) -> str:
         return self.for_commander(commander).export_text()
 

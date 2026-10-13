@@ -5,13 +5,17 @@ Store.read() and may come from any thread. Values reach SQL only as parameters.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Optional
 
 from edmrn.ext import crew_events as ev
 from edmrn.ext.crew_identity import Identity, KeyFileError, verify
+from edmrn.ext.crew_roster import Roster, compute_roster, parse_roster_envelope
 from edmrn.ext.store import Store
 from edmrn.logger import get_logger
 
@@ -26,9 +30,37 @@ PROJECTION_TABLES = (
     'crew_finds', 'crew_manual_finds', 'crew_notes',
 )
 
-Projector = Callable[[sqlite3.Connection, dict, bool], None]
+Projector = Callable[[sqlite3.Connection, dict, bool, bool], None]
+
+
+@dataclass(frozen=True)
+class Gate:
+    own: frozenset = frozenset()
+    group_id: Optional[str] = None
+    leader: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _Context:
+    own: frozenset
+    admits: Callable[[str, int], bool]
+    now: datetime
+
+
+@dataclass(frozen=True)
+class ReceivedBatch:
+    inserted: int
+    rejected: list
+    rebuilt: bool
+
+
 def _order(env: dict) -> str:
     return f"{env['created_at']}|{env['author']}|{env['seq']:016d}"
+
+
+def _system_order(env: dict, own: bool) -> str:
+    """Own reports sort first; then (created_at, author, seq) as before (S11)."""
+    return ('0|' if own else '1|') + _order(env)
 
 
 def _name_system(conn, address: str, name: Optional[str], order: str) -> None:
@@ -81,10 +113,10 @@ def _refresh_explored(conn, author: str, address: str) -> None:
         conn.execute('DELETE FROM crew_explored WHERE author = ? AND address = ?', (author, address))
 
 
-def _project_visit(conn, env: dict, first: bool) -> None:
-    p, order = env['payload'], _order(env)
-    _name_system(conn, p['address'], p['system'], order)
-    _place_system(conn, p['address'], p['coords'], order)
+def _project_visit(conn, env: dict, first: bool, own: bool) -> None:
+    p, key = env['payload'], _system_order(env, own)
+    _name_system(conn, p['address'], p['system'], key)
+    _place_system(conn, p['address'], p['coords'], key)
     conn.execute(
         'INSERT INTO crew_visits (author, address, first_at, last_at, visit_count) '
         'VALUES (?, ?, ?, ?, ?) ON CONFLICT (author, address) DO UPDATE SET '
@@ -93,9 +125,9 @@ def _project_visit(conn, env: dict, first: bool) -> None:
         (env['author'], p['address'], env['created_at'], env['created_at'], int(first), int(first)))
 
 
-def _project_honk(conn, env: dict, first: bool) -> None:
+def _project_honk(conn, env: dict, first: bool, own: bool) -> None:
     p, order = env['payload'], _order(env)
-    _name_system(conn, p['address'], p['system'], order)
+    _name_system(conn, p['address'], p['system'], _system_order(env, own))
     _count_system(conn, p['address'], p['body_count'], order)
     conn.execute(
         'INSERT INTO crew_honks (author, address, body_count, honk_key) VALUES (?, ?, ?, ?) '
@@ -105,9 +137,9 @@ def _project_honk(conn, env: dict, first: bool) -> None:
     _refresh_explored(conn, env['author'], p['address'])
 
 
-def _project_all_bodies(conn, env: dict, first: bool) -> None:
+def _project_all_bodies(conn, env: dict, first: bool, own: bool) -> None:
     p, order = env['payload'], _order(env)
-    _name_system(conn, p['address'], p['system'], order)
+    _name_system(conn, p['address'], p['system'], _system_order(env, own))
     _count_system(conn, p['address'], p['count'], order)
     conn.execute('INSERT OR IGNORE INTO crew_all_bodies (author, address) VALUES (?, ?)',
                  (env['author'], p['address']))
@@ -118,9 +150,9 @@ def _flag(value: Optional[bool]) -> Optional[int]:
     return None if value is None else int(value)
 
 
-def _project_body(conn, env: dict, first: bool) -> None:
+def _project_body(conn, env: dict, first: bool, own: bool) -> None:
     p = env['payload']
-    _name_system(conn, p['address'], p['system'], _order(env))
+    _name_system(conn, p['address'], p['system'], _system_order(env, own))
     conn.execute(
         'INSERT INTO crew_body_reports (event_id, author, created_at, address, body_id, tier, name, '
         'star_type, planet_class, moon, landable, terraform, was_discovered, was_mapped, scan_type, '
@@ -138,9 +170,9 @@ def _project_body(conn, env: dict, first: bool) -> None:
     _refresh_explored(conn, env['author'], p['address'])
 
 
-def _project_signals(conn, env: dict, first: bool) -> None:
+def _project_signals(conn, env: dict, first: bool, own: bool) -> None:
     p = env['payload']
-    _name_system(conn, p['address'], p['system'], _order(env))
+    _name_system(conn, p['address'], p['system'], _system_order(env, own))
     conn.executemany(
         'INSERT INTO crew_signals (address, body_id, type, signal_count) VALUES (?, ?, ?, ?) '
         'ON CONFLICT (address, body_id, type) DO UPDATE SET '
@@ -155,7 +187,7 @@ def _project_signals(conn, env: dict, first: bool) -> None:
         (p['address'], p['body_id'], p['source'], p['body_name']))
 
 
-def _project_find(conn, env: dict, first: bool) -> None:
+def _project_find(conn, env: dict, first: bool, own: bool) -> None:
     p = env['payload']
     if p['mode'] == 'auto':
         conn.execute(
@@ -183,7 +215,7 @@ def _project_find(conn, env: dict, first: bool) -> None:
          int(p['deleted'])))
 
 
-def _project_note(conn, env: dict, first: bool) -> None:
+def _project_note(conn, env: dict, first: bool, own: bool) -> None:
     p = env['payload']
     conn.execute(
         'INSERT INTO crew_notes (author, note_id, seq, event_id, created_at, system, address, text, '
@@ -196,10 +228,15 @@ def _project_note(conn, env: dict, first: bool) -> None:
          p['address'], p['text'], int(p['deleted'])))
 
 
+def _project_roster(conn, env: dict, first: bool, own: bool) -> None:
+    """Roster envelopes change membership (crew_roster), not projection tables."""
+
+
 _PROJECTORS: dict[str, Projector] = {
     'visit': _project_visit, 'honk': _project_honk, 'all_bodies': _project_all_bodies,
     'body': _project_body, 'signals': _project_signals, 'find': _project_find,
-    'note': _project_note,
+    'note': _project_note, 'group': _project_roster, 'invite': _project_roster,
+    'join': _project_roster, 'remove': _project_roster,
 }
 
 
@@ -212,28 +249,38 @@ def _insert(conn: sqlite3.Connection, env: dict, data: bytes, signature: bytes) 
     return cursor.rowcount == 1
 
 
-def _project(conn: sqlite3.Connection, env: dict) -> None:
-    """Project every valid, author-bound envelope; first sight per (author, event_id) gates counting."""
+def _project(conn: sqlite3.Connection, env: dict, ctx: _Context) -> Optional[str]:
+    """Project one envelope if it passes every gate (Spec A C4, B1 S3, S11); else the reason."""
     kind, v = env['kind'], env['v']
     if not ev.is_known(kind, v):
-        return
+        return 'unknown kind or version'
     try:
         ev.validate_payload(kind, v, env['payload'])
     except ev.PayloadError as e:
-        logger.warning(f"Crew event {env['event_id']} kept unprojected: {e}")
-        return
+        return f'invalid payload: {e}'
+    own = env['author'] in ctx.own
+    if not own:
+        if not ev.plausible_received(env['created_at'], ctx.now):
+            return 'implausible created_at'
+        if kind not in ev.ROSTER_KINDS and not ctx.admits(env['author'], env['seq']):
+            return 'author is not a member'
     key = ev.natural_key(kind, env['created_at'], env['payload'])
-    if key is not None:
-        bound = env['event_id'] == ev.deterministic_id(env['author'], kind, *key)
-    else:
-        bound = ev.is_uuid7(env['event_id'])
+    bound = (env['event_id'] == ev.deterministic_id(env['author'], kind, *key) if key is not None
+             else ev.is_uuid7(env['event_id']))
     if not bound:
-        logger.warning(f"Crew event {env['event_id']} kept unprojected: "
-                       'event_id does not match its author and key')
-        return
+        return 'event_id does not match its author and key'
     first = conn.execute('INSERT OR IGNORE INTO crew_projected (author, event_id) VALUES (?, ?)',
                          (env['author'], env['event_id'])).rowcount == 1
-    _PROJECTORS[kind](conn, env, first)
+    _PROJECTORS[kind](conn, env, first, own)
+    return None
+
+
+_QUIET_REASONS = ('unknown kind or version', 'author is not a member')
+
+
+def _warn_unprojected(env: dict, reason: Optional[str]) -> None:
+    if reason is not None and reason not in _QUIET_REASONS:
+        logger.warning(f"Crew event {env['event_id']} kept unprojected: {reason}")
 
 
 @dataclass(frozen=True)
@@ -337,14 +384,109 @@ def _note_row(row: tuple) -> NoteRow:
 
 
 class CrewStore:
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, *, clock: Optional[Callable[[], datetime]] = None,
+                 admit: Optional[Callable[[str, int], bool]] = None) -> None:
         self.store = store
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._admit_override = admit
+        self._gate = Gate()
+        self._baselined = False
+        self._roster: Optional[Roster] = None
+        self._equivocators: set[str] = set()
+
+    @property
+    def roster(self) -> Optional[Roster]:
+        return self._roster
+
+    def _context(self, roster: Optional[Roster]) -> _Context:
+        if self._admit_override is not None:
+            admits = self._admit_override
+        elif roster is not None:
+            admits = roster.admits
+        else:
+            admits = lambda author, seq: False
+        return _Context(self._gate.own, admits, self._clock())
+
+    def _compute_roster(self, conn) -> Optional[Roster]:
+        gate = self._gate
+        if gate.group_id is None or gate.leader is None:
+            return None
+        now = self._clock()
+        rows = conn.execute("SELECT envelope FROM crew_log WHERE kind IN "
+                            "('group', 'invite', 'join', 'remove')").fetchall()
+        envelopes = [e for e in (parse_roster_envelope(bytes(r[0]), gate.own, now) for r in rows)
+                     if e is not None]
+        return compute_roster(envelopes, gate.group_id, gate.leader)
+
+    @staticmethod
+    def _membership_change(old: Optional[Roster], new: Optional[Roster]) -> tuple[set, bool]:
+        """(newly admitted authors, whether any member lost rows: removed or capped lower)."""
+        before = {} if old is None else old.members
+        after = {} if new is None else new.members
+        admitted = {a for a in after if a not in before}
+        narrowed = False
+        for author, member in before.items():
+            now = after.get(author)
+            if now is None or (now.last_seq is not None
+                               and (member.last_seq is None or now.last_seq < member.last_seq)):
+                narrowed = True
+        return admitted, narrowed
+
+    def _project_authors(self, conn, authors: set, ctx: _Context) -> None:
+        for author in sorted(authors - ctx.own):
+            rows = conn.execute('SELECT envelope FROM crew_log WHERE author = ? ORDER BY seq',
+                                (author,)).fetchall()
+            for (data,) in rows:
+                try:
+                    env = ev.parse_envelope(bytes(data))
+                except ev.EnvelopeError:
+                    continue
+                _project(conn, env, ctx)
+
+    def _apply_roster_change(self, conn) -> tuple[Optional[Roster], bool]:
+        """Inside a transaction: recompute membership and project newly admitted authors.
+
+        A narrowing writes the rebuild marker in the same transaction (spec B1 S2), so a crash
+        before the rebuild is repaired by rebuild_if_marked at the next start. Returns the new
+        roster and whether a rebuild must follow the commit."""
+        new = self._compute_roster(conn)
+        admitted, narrowed = self._membership_change(self._roster, new)
+        if narrowed:
+            conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('rebuild', 'roster')")
+        elif admitted:
+            self._project_authors(conn, admitted, self._context(new))
+        return new, narrowed
+
+    def set_gate(self, own: frozenset, group_id: Optional[str] = None,
+                 leader: Optional[str] = None) -> None:
+        """Tk thread. Own authors and the group of this installation (spec B1 S3, S4).
+
+        The first call per process only records the roster as baseline: projections persist, so
+        nothing is projected or rebuilt (S2)."""
+        self._gate = Gate(frozenset(own), group_id, leader)
+        if not self._baselined:
+            self._baselined = True
+            with self.store.read() as conn:
+                self._roster = self._compute_roster(conn)
+            return
+        with self.store.transaction() as conn:
+            new, narrowed = self._apply_roster_change(conn)
+        self._roster = new
+        if narrowed:
+            self.rebuild_projections(clear_marker=True)
 
     def append_own(self, items: list[tuple[Identity, ev.Draft]]) -> int:
         """Sign and log own drafts in one transaction (C4); the key files follow after the commit."""
         written = 0
         allocated: dict[str, tuple[Identity, int]] = {}
+        new_own = frozenset(identity.author for identity, _ in items)
+        if not new_own <= self._gate.own:
+            self._gate = dataclasses.replace(self._gate, own=self._gate.own | new_own)
+        roster_touched = False
+        narrowed = False
+        new_roster = self._roster
         with self.store.transaction(busy_timeout_ms=BUSY_TIMEOUT_MS) as conn:
+            ctx = self._context(self._roster)
             for identity, draft in items:
                 ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
                 event_id = draft.resolve_id(identity.author)
@@ -361,14 +503,20 @@ class CrewStore:
                                         draft.created_at, draft.payload)
                 data, signature = ev.seal(env, identity.sign)
                 _insert(conn, env, data, signature)
-                _project(conn, env)
+                _warn_unprojected(env, _project(conn, env, ctx))
+                roster_touched = roster_touched or draft.kind in ev.ROSTER_KINDS
                 allocated[identity.author] = (identity, last + 1)
                 written += 1
+            if roster_touched:
+                new_roster, narrowed = self._apply_roster_change(conn)
+        self._roster = new_roster
         for identity, seq in allocated.values():
             try:
                 identity.raise_high_water(seq)
             except (OSError, KeyFileError) as e:
                 logger.error(f"Crew key file not updated ({identity.path.name}): {e}")
+        if narrowed:
+            self.rebuild_projections(clear_marker=True)
         return written
 
     def max_seq(self, author: str) -> int:
@@ -377,31 +525,117 @@ class CrewStore:
             row = conn.execute('SELECT MAX(seq) FROM crew_log WHERE author = ?', (author,)).fetchone()
         return row[0] or 0
 
-    def insert_received(self, envelope: bytes, signature: bytes) -> bool:
-        """A received envelope: structure, signature, then INSERT OR IGNORE on (author, seq)."""
-        env = ev.parse_envelope(envelope)
-        if not verify(env['author'], signature, envelope):
-            raise ev.EnvelopeError('signature does not verify')
+    def insert_received_batch(self, items: list) -> ReceivedBatch:
+        """Received envelopes in one transaction (B1 S19): structure and signature first, then
+        INSERT OR IGNORE on (author, seq), the gated projection, and the roster refresh."""
+        parsed, rejected = [], []
+        for index, (data, signature) in enumerate(items):
+            try:
+                env = ev.parse_envelope(data)
+            except ev.EnvelopeError as e:
+                rejected.append((index, str(e)))
+                continue
+            if not verify(env['author'], signature, data):
+                rejected.append((index, 'signature does not verify'))
+                continue
+            parsed.append((env, bytes(data), bytes(signature)))
+        inserted = 0
+        roster_touched = False
+        narrowed = False
+        new_roster = self._roster
         with self.store.transaction(busy_timeout_ms=BUSY_TIMEOUT_MS) as conn:
-            inserted = _insert(conn, env, bytes(envelope), bytes(signature))
-            if inserted:
-                _project(conn, env)
-        return inserted
+            ctx = self._context(self._roster)
+            for env, data, signature in parsed:
+                if _insert(conn, env, data, signature):
+                    inserted += 1
+                    roster_touched = roster_touched or env['kind'] in ev.ROSTER_KINDS
+                    _warn_unprojected(env, _project(conn, env, ctx))
+                else:
+                    self._check_equivocation(conn, env, data)
+            if roster_touched:
+                new_roster, narrowed = self._apply_roster_change(conn)
+        self._roster = new_roster
+        if narrowed:
+            self.rebuild_projections(clear_marker=True)
+        return ReceivedBatch(inserted, rejected, narrowed)
 
-    def rebuild_projections(self) -> None:
+    def insert_received(self, envelope: bytes, signature: bytes) -> bool:
+        """One received envelope; raises EnvelopeError like Spec A's version did."""
+        result = self.insert_received_batch([(envelope, signature)])
+        if result.rejected:
+            raise ev.EnvelopeError(result.rejected[0][1])
+        return result.inserted == 1
+
+    def _check_equivocation(self, conn, env: dict, data: bytes) -> None:
+        if env['author'] in self._equivocators:
+            return
+        row = conn.execute('SELECT envelope FROM crew_log WHERE author = ? AND seq = ?',
+                           (env['author'], env['seq'])).fetchone()
+        if row is not None and bytes(row[0]) != data:
+            self._equivocators.add(env['author'])
+            logger.warning(f"Crew author {env['author'][:12]}... sent two different envelopes "
+                           f"for seq {env['seq']}; the first one is kept")
+
+    def rebuild_projections(self, clear_marker: bool = False) -> None:
         """Re-derive every projection from the log in (created_at, author, seq) order (C8)."""
+        reasons: Counter = Counter()
         with self.store.transaction() as conn:
             for table in PROJECTION_TABLES:
                 conn.execute(f'DELETE FROM {table}')
+            roster = self._compute_roster(conn)
+            ctx = self._context(roster)
             rows = conn.execute(
                 'SELECT envelope FROM crew_log ORDER BY created_at, author, seq').fetchall()
             for (data,) in rows:
                 try:
-                    env = ev.parse_envelope(data)
-                except ev.EnvelopeError as e:
-                    logger.warning(f'Crew log row skipped in rebuild: {e}')
+                    env = ev.parse_envelope(bytes(data))
+                except ev.EnvelopeError:
+                    reasons['unreadable'] += 1
                     continue
-                _project(conn, env)
+                reason = _project(conn, env, ctx)
+                if reason is not None:
+                    reasons[reason.split(':')[0]] += 1
+            if clear_marker:
+                conn.execute("DELETE FROM crew_meta WHERE key = 'rebuild'")
+        self._roster = roster
+        if reasons:
+            summary = ', '.join(f'{count} {reason}' for reason, count in sorted(reasons.items()))
+            logger.warning(f'Crew rebuild left envelopes unprojected: {summary}')
+
+    def rebuild_if_marked(self) -> bool:
+        with self.store.read() as conn:
+            marked = conn.execute("SELECT 1 FROM crew_meta WHERE key = 'rebuild'").fetchone()
+        if marked is None:
+            return False
+        self.rebuild_projections(clear_marker=True)
+        return True
+
+    def heads(self) -> dict[str, int]:
+        """Highest stored seq per author (B1 S7 heads)."""
+        with self.store.read() as conn:
+            rows = conn.execute('SELECT author, MAX(seq) FROM crew_log GROUP BY author').fetchall()
+        return {author: seq for author, seq in rows}
+
+    def envelopes_after(self, author: str, after_seq: int, limit: int = 100) -> list:
+        with self.store.read() as conn:
+            rows = conn.execute('SELECT seq, envelope, signature FROM crew_log WHERE author = ? '
+                                'AND seq > ? ORDER BY seq LIMIT ?',
+                                (author, after_seq, limit)).fetchall()
+        return [(seq, bytes(data), bytes(sig)) for seq, data, sig in rows]
+
+    def roster_envelope(self, author: str, kind: str, group_id: str) -> Optional[tuple]:
+        """The latest envelope of `kind` by `author` for `group_id` (own genesis or any join)."""
+        with self.store.read() as conn:
+            rows = conn.execute('SELECT envelope, signature FROM crew_log WHERE author = ? '
+                                'AND kind = ? ORDER BY seq DESC', (author, kind)).fetchall()
+        for data, signature in rows:
+            try:
+                env = ev.parse_envelope(bytes(data))
+            except ev.EnvelopeError:
+                continue
+            if env['payload'].get('group_id') == group_id:
+                return bytes(data), bytes(signature)
+        return None
 
     def system(self, address: str) -> Optional[SystemRow]:
         with self.store.read() as conn:

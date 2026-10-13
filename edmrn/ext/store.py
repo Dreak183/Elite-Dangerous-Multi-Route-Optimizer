@@ -160,6 +160,12 @@ MIGRATIONS: list[list[str]] = [
             PRIMARY KEY (author, note_id)
         )""",
     ],
+    [
+        "CREATE INDEX crew_log_kind ON crew_log (kind)",
+        "CREATE TABLE crew_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        # B1 S10/S11 change what projects; re-derive once (spec B1 S11).
+        "INSERT INTO crew_meta (key, value) VALUES ('rebuild', 'B1')",
+    ],
 ]
 SCHEMA_VERSION = len(MIGRATIONS)
 BOOSTS = ('x4', 'x6')

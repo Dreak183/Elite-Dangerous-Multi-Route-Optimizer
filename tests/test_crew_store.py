@@ -20,7 +20,8 @@ def store(tmp_path):
 
 @pytest.fixture
 def crew(store):
-    return CrewStore(store)
+    # These tests predate the roster (Spec B1 S3); they admit every author explicitly.
+    return CrewStore(store, admit=lambda author, seq: True)
 
 
 @pytest.fixture
@@ -45,8 +46,8 @@ def projected_count(store):
 
 # --- store access and migration ---------------------------------------------------------
 
-def test_schema_version_is_2():
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_3():
+    assert SCHEMA_VERSION == 3
 
 
 def test_version_1_database_migrates_and_keeps_neutron_routes(tmp_path):
@@ -63,7 +64,7 @@ def test_version_1_database_migrates_and_keeps_neutron_routes(tmp_path):
     try:
         assert [r.from_system for r in s.list_neutron_routes()] == ["Sol"]
         with s.read() as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             assert conn.execute("SELECT COUNT(*) FROM crew_log").fetchone()[0] == 0
     finally:
         s.close()
@@ -240,14 +241,15 @@ def test_two_authors_in_one_system_give_one_system_row(crew, ring):
         assert conn.execute("SELECT COUNT(*) FROM crew_systems").fetchone()[0] == 1
 
 
-def test_system_name_and_coords_are_the_earliest_and_body_count_the_latest(crew, friend, ring):
+def test_own_reports_name_the_system_and_place_it_and_body_count_is_the_latest(crew, friend, ring):
+    # Spec B1 S11: own reports sort before friends' for name and coordinates.
     me = ring.for_commander("F1")
     crew.append_own([(me, visit(at=ts(5), system="Sol", coords=(1.0, 2.0, 3.0))),
                      (me, honk(at=ts(6), bodies=10))])
     crew.insert_received(*sealed(friend, visit("F9", at=ts(1), system="SOL", coords=(9.0, 9.0, 9.0)), 1))
     crew.insert_received(*sealed(friend, all_bodies("F9", at=ts(7), count=12), 2))
     row = crew.system(ADDR)
-    assert row.name == "SOL" and row.coords == (9.0, 9.0, 9.0) and row.body_count == 12
+    assert row.name == "Sol" and row.coords == (1.0, 2.0, 3.0) and row.body_count == 12
     assert crew.system("1") is None
 
 
@@ -394,7 +396,7 @@ def test_the_merge_is_independent_of_arrival_order(tmp_path):
         random.Random(attempt).shuffle(shuffled)
         s = Store(tmp_path / f"order{attempt}.db")
         try:
-            crew_store = CrewStore(s)
+            crew_store = CrewStore(s, admit=lambda author, seq: True)
             for data, signature in shuffled:
                 crew_store.insert_received(data, signature)
             dumps.append(dump(s))
@@ -436,7 +438,7 @@ def test_a_repeated_event_id_projects_the_same_in_every_order(tmp_path, friend, 
     for attempt, order in enumerate(([first, second], [second, first])):
         s = Store(tmp_path / f"dup{attempt}.db")
         try:
-            crew_store = CrewStore(s)
+            crew_store = CrewStore(s, admit=lambda author, seq: True)
             for data, signature in order:
                 assert crew_store.insert_received(data, signature)
             incremental = dump(s)
@@ -454,7 +456,7 @@ def _winner(tmp_path, friend, pair, label):
     for attempt, order in enumerate((pair, pair[::-1])):
         s = Store(tmp_path / f"{label}{attempt}.db")
         try:
-            crew_store = CrewStore(s)
+            crew_store = CrewStore(s, admit=lambda author, seq: True)
             for data, signature in order:
                 assert crew_store.insert_received(data, signature)
             with s.read() as conn:
