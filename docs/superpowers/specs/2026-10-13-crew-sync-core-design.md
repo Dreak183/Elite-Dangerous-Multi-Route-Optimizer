@@ -366,7 +366,8 @@ the next day.
 - `crew_sync.py`: the connection thread, the Tk-loop applier, the status sender, pause, backoff,
   `CrewBoard`, and the connection state for the dialog.
 - `crew_dialog.py`: S20.
-- `crew.py`: `install` also starts sync when a `group.json` exists. `app.crew` gains `sync`.
+- `crew.py`: `install` also starts the group controller, which starts sync when a `group.json` exists.
+  `app.crew` gains `group`; the connection is `app.crew.group.sync`.
 
 ### Relay modules (`crew-relay/`)
 

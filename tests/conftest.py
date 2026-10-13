@@ -36,3 +36,11 @@ def isolated_home(tmp_path, monkeypatch):
     for var in _HOME_VARS:
         monkeypatch.setenv(var, str(home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def no_leftover_sync_threads():
+    yield
+    import threading
+    alive = [t.name for t in threading.enumerate() if t.name == "edmrn-crew-sync" and t.is_alive()]
+    assert not alive, "a test left the crew sync thread running; call group.stop()"

@@ -604,6 +604,11 @@ class CrewStore:
             row = conn.execute('SELECT MAX(seq) FROM crew_log WHERE author = ?', (author,)).fetchone()
         return row[0] or 0
 
+    def has_event(self, author: str, event_id: str) -> bool:
+        with self.store.read() as conn:
+            return conn.execute('SELECT 1 FROM crew_log WHERE author = ? AND event_id = ? LIMIT 1',
+                                (author, event_id)).fetchone() is not None
+
     def insert_received_batch(self, items: list) -> ReceivedBatch:
         """Received envelopes in one transaction (B1 S19): structure and signature first, then
         INSERT OR IGNORE on (author, seq), the gated projection, and the roster refresh."""

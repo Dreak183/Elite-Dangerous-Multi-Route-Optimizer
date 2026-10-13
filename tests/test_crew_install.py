@@ -16,6 +16,7 @@ from edmrn.ext.crew import Writer, install
 from edmrn.ext.crew_capture import replay
 from edmrn.ext.crew_identity import KeyRing
 from edmrn.ext.crew_status import IN_MAIN_SHIP
+from edmrn.ext.crew_sync import Inbox
 from edmrn.ext.crew_store import CrewStore
 from edmrn.ext.location import journal_dir_for
 from edmrn.ext.store import Store
@@ -37,8 +38,11 @@ class ManualRoot:
     def after(self, ms, fn, *args):
         self.calls.append((ms, fn, args))
 
-    def fire(self):
-        ms, fn, args = self.calls.pop(0)
+    def fire(self, ms=Writer.INTERVAL_MS):
+        """One turn of the Tk loop for the oldest timer with this delay (the writer's by default;
+        the inbox has its own timer since Spec B1)."""
+        index = next(i for i, call in enumerate(self.calls) if call[0] == ms)
+        _, fn, args = self.calls.pop(index)
         fn(*args)
 
 
@@ -99,7 +103,7 @@ def test_install_registers_listeners_and_schedules_the_writer(store, tmp_path, l
     assert app.crew is service
     assert listeners.journal == [service.live.feed]
     assert listeners.status == [service.ship.feed_status]
-    assert app.root.calls[0][0] == Writer.INTERVAL_MS and service.writer.running
+    assert [c[0] for c in app.root.calls].count(Writer.INTERVAL_MS) == 1 and service.writer.running
 
 
 def test_listeners_only_enqueue_and_the_writer_drains_on_the_tk_loop(store, tmp_path, listeners):
@@ -108,7 +112,7 @@ def test_listeners_only_enqueue_and_the_writer_drains_on_the_tk_loop(store, tmp_
     assert log_kinds(store) == [] and service.writer.pending == 1
     app.root.fire()
     assert log_kinds(store) == ["visit"] and service.writer.pending == 0
-    assert len(app.root.calls) == 1
+    assert [c[0] for c in app.root.calls].count(Writer.INTERVAL_MS) == 1
     assert len(list((tmp_path / "data" / "crew_keys").glob("cmdr-*.json"))) == 1
 
 
@@ -179,6 +183,7 @@ def test_a_missing_cryptography_disables_crew_without_raising(store, tmp_path, m
     fresh = importlib.import_module("edmrn.ext.crew")
     app = make_app(store, tmp_path / "journals")
     assert fresh.install(app) is None
+    assert "edmrn.ext.crew_group" not in sys.modules  # sync is imported only behind the crypto check
     assert app.crew is None and listeners.journal == [] and listeners.status == []
 
 
@@ -548,3 +553,81 @@ def test_a_restart_adds_nothing_and_live_events_continue(store, tmp_path, listen
     app2.root.fire()
     assert log_kinds(store) == before + ["visit"]
     assert service2.store.visits(service2.identity().author)[0].address == "42"
+
+
+# --- group sync at install (Spec B1, Review Focus 3) ---------------------------------------
+
+def save_member_group(store, commander="Jameson"):
+    from edmrn.ext.crew_roster import GroupConfig, save_group
+    keys = Path(store.path).parent / "crew_keys"
+    me = KeyRing(keys).for_commander(commander)
+    save_group(keys, GroupConfig("wss://galroute.the-hub.cloud", "01920000-0000-7000-8000-0000000000a1",
+                                 me.author, me.author))
+
+
+def test_install_with_a_group_and_no_network_starts_and_keeps_running(store, tmp_path, listeners, monkeypatch):
+    from edmrn.ext import crew_group
+    calls = []
+
+    def offline(url):
+        calls.append(url)
+        raise OSError("no route to host")
+    monkeypatch.setattr(crew_group, "websockets_connect", offline)
+    save_member_group(store)
+    service = install(make_app(store, tmp_path / "journals"))
+    try:
+        assert service is not None and service.group is not None
+        assert wait_for(lambda: calls)
+        assert service.group.sync.state in ("connecting", "waiting")
+        assert wait_for(lambda: service.group.sync.state == "waiting")
+        assert "cannot reach the relay" in service.group.sync.last_error
+        assert service.writer.running
+    finally:
+        service.group.stop()
+
+
+def test_install_with_a_group_and_the_real_connect_survives_a_blocked_network(store, tmp_path, listeners):
+    """tests/conftest.py makes every socket call raise: the real connect fails like a missing network."""
+    save_member_group(store)
+    service = install(make_app(store, tmp_path / "journals"))
+    try:
+        assert service is not None and service.group is not None
+        assert wait_for(lambda: service.group.sync.state == "waiting")
+        assert "cannot reach the relay" in service.group.sync.last_error
+    finally:
+        service.group.stop()
+
+
+def test_install_without_a_group_starts_the_inbox_and_no_sync(store, tmp_path, listeners):
+    app, service = start(store, tmp_path)
+    assert service.group is not None and service.group.sync is None and service.group.state == "no group"
+    assert [c[0] for c in app.root.calls].count(Inbox.INTERVAL_MS) == 1
+    service.group.stop()
+
+
+def test_a_failing_group_start_disables_sync_without_aborting_install(store, tmp_path, listeners, monkeypatch):
+    from edmrn.ext import crew_group
+
+    def broken(self):
+        raise RuntimeError("gate failed")
+    monkeypatch.setattr(crew_group.CrewGroup, "start", broken)
+    app, service = start(store, tmp_path)
+    assert app.crew is service and service.group is None and service.writer.running
+
+
+def test_the_marked_rebuild_runs_after_the_gate(store, tmp_path, listeners, monkeypatch):
+    order = []
+    set_gate, rebuild = CrewStore.set_gate, CrewStore.rebuild_if_marked
+    monkeypatch.setattr(CrewStore, "set_gate", lambda self, *a: (order.append("gate"), set_gate(self, *a))[1])
+    monkeypatch.setattr(CrewStore, "rebuild_if_marked", lambda self: (order.append("rebuild"), rebuild(self))[1])
+    start(store, tmp_path)[1].group.stop()
+    assert order == ["gate", "rebuild"]
+
+
+def test_a_rebuild_marker_left_by_a_crash_is_repaired_at_install(store, tmp_path, listeners):
+    with store.transaction() as conn:
+        conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('rebuild', 'roster')")
+    app, service = start(store, tmp_path)
+    with store.read() as conn:
+        assert conn.execute("SELECT 1 FROM crew_meta WHERE key = 'rebuild'").fetchone() is None
+    service.group.stop()

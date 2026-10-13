@@ -127,6 +127,13 @@ Invariants:
 - Key files live in `crew_keys/` next to `edmrn.db`. An unusable key file disables capture for
   that commander and is never replaced.
 - `app.crew` is `None` when the store is unusable (ADR-0004) or `cryptography` is not installed.
+- `app.crew.group` (`CrewGroup`) is created by `install` after the writer starts: it loads
+  `group.json`, sets the roster gate on the store, starts the inbox and, with a group, the relay
+  connection; only then does `install` run the marked rebuild (a rebuild needs the gate). It is
+  `None` if its start failed, and EDMRN runs on without sync. A missing network or a missing
+  `websockets` package never raises into Tk: the connection retries in the background, the
+  controller's `problem` says why sync is off. Sync and board observers reach Tk through
+  `root.after`; stop order is sync, then inbox.
 - The first time a run writes for a commander, the writer raises the key file's high-water mark to
   that author's highest seq in the log. A crash between the log commit and the key-file write
   followed by a lost database therefore cannot reuse a seq.

@@ -196,6 +196,7 @@ class CrewService:
         self.live = live
         self.ship = ship
         self._app = app
+        self.group: Any = None  # CrewGroup (B1), None when sync is unavailable
 
     @property
     def commander(self) -> Optional[str]:
@@ -293,6 +294,31 @@ def _startup_replay(journal_dir: Optional[str], live: LiveCapture, writer: Write
         live.seed(state)
 
 
+def _install_group(service: CrewService, app: Any) -> None:
+    """Spec B1: the roster gate, the inbox and, with a group.json, the relay connection.
+
+    Without internet the connection fails in the background with backoff; nothing raises here."""
+    group = None
+    try:
+        from edmrn.ext.crew_group import CrewGroup
+        group = CrewGroup(service, app)
+        group.start()
+        service.group = group
+    except Exception as e:  # the hook must never abort EDMRN_App.__init__
+        logger.error(f"Crew sync disabled: {e}")
+        service.group = None
+        if group is not None:
+            try:
+                group.stop()
+            except Exception as stop_error:
+                logger.debug(f"Crew group stop failed: {stop_error}")
+        return
+    try:
+        service.store.rebuild_if_marked()  # only after set_gate succeeded
+    except Exception as e:
+        logger.error(f"Crew projection rebuild failed: {e}")
+
+
 def install(app: Any) -> Optional[CrewService]:
     """Wire crew capture into a running EDMRN_App. Called once from EDMRN_App.__init__."""
     if _UNAVAILABLE is not None:
@@ -324,6 +350,7 @@ def install(app: Any) -> Optional[CrewService]:
     FuelTracker.status_listeners.append(status.feed_status)
     app.crew = service
     writer.start()
+    _install_group(service, app)
     threading.Thread(target=_startup_replay, args=(journal_dir, live, writer, status),
                      name='edmrn-crew-replay', daemon=True).start()
     return service
