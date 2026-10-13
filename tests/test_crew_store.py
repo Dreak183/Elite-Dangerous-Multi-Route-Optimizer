@@ -227,3 +227,187 @@ def test_own_events_are_projected(crew, ring, store):
     ident = ring.for_commander("F1")
     crew.append_own([(ident, visit()), (ident, honk(at=ts(1))), (ident, all_bodies(at=ts(2)))])
     assert projected_count(store) == 3
+
+
+# --- projections (C7, C8) ----------------------------------------------------------------
+
+def test_two_authors_in_one_system_give_one_system_row(crew, ring):
+    a, b = ring.for_commander("F1"), ring.for_commander("F2")
+    crew.append_own([(a, visit()), (b, visit("F2", at=ts(5)))])
+    row = crew.system(ADDR)
+    assert row.name == "Sol" and row.coords == (0.0, 0.0, 0.0)
+    with crew.store.read() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM crew_systems").fetchone()[0] == 1
+
+
+def test_system_name_and_coords_are_the_earliest_and_body_count_the_latest(crew, friend, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, visit(at=ts(5), system="Sol", coords=(1.0, 2.0, 3.0))),
+                     (me, honk(at=ts(6), bodies=10))])
+    crew.insert_received(*sealed(friend, visit("F9", at=ts(1), system="SOL", coords=(9.0, 9.0, 9.0)), 1))
+    crew.insert_received(*sealed(friend, all_bodies("F9", at=ts(7), count=12), 2))
+    row = crew.system(ADDR)
+    assert row.name == "SOL" and row.coords == (9.0, 9.0, 9.0) and row.body_count == 12
+    assert crew.system("1") is None
+
+
+def test_visits_track_first_last_and_count(crew, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, visit(at=ts(3))), (me, visit(at=ts(1))), (me, visit(at=ts(2)))])
+    [v] = crew.visits(me.author)
+    assert (v.address, v.first_at, v.last_at, v.count) == (ADDR, ts(1), ts(3), 3)
+
+
+def test_a_full_scan_after_a_basic_one_wins_and_basic_after_full_does_not(crew, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, body(at=ts(1), body_id=1, tier="basic")),
+                     (me, body(at=ts(2), body_id=1, tier="full", landable=True)),
+                     (me, body(at=ts(1), body_id=2, tier="full", landable=False)),
+                     (me, body(at=ts(2), body_id=2, tier="basic"))])
+    merged = {b.body_id: b for b in crew.bodies(ADDR)}
+    assert merged[1].tier == "full" and merged[1].landable is True
+    assert merged[2].tier == "full" and merged[2].landable is False
+
+
+def test_merged_body_is_the_earliest_full_report_and_flags_stay_per_author(crew, ring, friend):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, body(at=ts(5), body_id=3, discovered=True))])
+    crew.insert_received(*sealed(friend, body("F9", at=ts(2), body_id=3, discovered=False,
+                                              name="Sol 3 friend"), 1))
+    [merged] = crew.bodies(ADDR)
+    assert merged.name == "Sol 3 friend" and merged.author == friend.author
+    reports = {r.author: r for r in crew.body_reports(ADDR)}
+    assert reports[friend.author].was_discovered is False
+    assert reports[me.author].was_discovered is True
+
+
+def test_explored_from_all_bodies(crew, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, all_bodies())])
+    assert crew.explored(me.author) == {ADDR}
+
+
+def test_explored_when_scanned_bodies_reach_the_latest_honk_count(crew, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, honk(at=ts(1), bodies=3)),
+                     (me, body(at=ts(2), body_id=0, star_type="G", name="Sol")),
+                     (me, body(at=ts(3), body_id=1, tier="basic"))])
+    assert crew.explored(me.author) == set()
+    crew.append_own([(me, body(at=ts(4), body_id=2))])
+    assert crew.explored(me.author) == {ADDR}
+    crew.append_own([(me, honk(at=ts(9), bodies=5))])
+    assert crew.explored(me.author) == set()
+
+
+def test_a_visit_or_a_honk_alone_never_counts(crew, ring):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, visit()), (me, honk(at=ts(1), bodies=0))])
+    assert crew.explored() == set()
+
+
+def test_explored_is_per_author_and_the_group_is_the_union(crew, ring, friend):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, all_bodies())])
+    crew.insert_received(*sealed(friend, all_bodies("F9", address="42", system="Other"), 1))
+    assert crew.explored(me.author) == {ADDR}
+    assert crew.explored(friend.author) == {"42"}
+    assert crew.explored() == {ADDR, "42"}
+
+
+def test_signals_take_the_highest_count_and_the_union_of_genera(crew, ring, friend):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, signals(source="fss", counts={"biological": 2, "geological": 1}))])
+    crew.insert_received(*sealed(friend, signals("F9", source="saa", counts={"biological": 1, "human": 1},
+                                                 genera=["$Codex_Ent_Bacterial_Genus_Name;"]), 1))
+    crew.insert_received(*sealed(friend, signals("F9", at=ts(3), source="fss",
+                                                 counts={"biological": 3}), 2))
+    s = crew.signals(ADDR)[1]
+    assert s.counts == {"biological": 3, "geological": 1, "human": 1}
+    assert s.genera == ("$Codex_Ent_Bacterial_Genus_Name;",)
+    assert s.sources == frozenset({"fss", "saa"}) and s.body_name == "Sol 1"
+
+
+def test_auto_finds_are_one_row_per_event(crew, ring, friend):
+    me = ring.for_commander("F1")
+    crew.append_own([(me, bio_find(at=ts(1)))])
+    crew.insert_received(*sealed(friend, bio_find("F9", at=ts(2)), 1))
+    finds = crew.finds()
+    assert [f.author for f in finds] == [friend.author, me.author]
+    assert finds[0].detail == {"count": 2} and finds[0].mode == "auto" and finds[0].find_id is None
+
+
+def test_note_revisions_highest_seq_wins_and_delete_hides(crew, ring):
+    me = ring.for_commander("F1")
+    note_id = ev.uuid7()
+    crew.append_own([(me, note(note_id=note_id, text="first"))])
+    crew.append_own([(me, note(note_id=note_id, text="second", at=ts(1)))])
+    assert [n.text for n in crew.notes(ADDR)] == ["second"]
+    crew.append_own([(me, note(note_id=note_id, text="second", deleted=True, at=ts(2)))])
+    assert crew.notes() == []
+    assert crew.note(me.author, note_id).deleted is True
+
+
+def test_a_note_revision_by_another_author_is_ignored(crew, ring, friend):
+    me = ring.for_commander("F1")
+    note_id = ev.uuid7()
+    crew.append_own([(me, note(note_id=note_id, text="mine"))])
+    crew.insert_received(*sealed(friend, note("F9", note_id=note_id, text="overwritten", deleted=True), 99))
+    assert crew.note(me.author, note_id).text == "mine"
+    assert crew.note(me.author, note_id).deleted is False
+
+
+def test_manual_find_revisions(crew, ring):
+    me = ring.for_commander("F1")
+    find_id = ev.uuid7()
+    crew.append_own([(me, manual_find(find_id=find_id, note_text="wreck"))])
+    crew.append_own([(me, manual_find(find_id=find_id, note_text="wreck, two pods", at=ts(1)))])
+    [f] = crew.finds()
+    assert (f.mode, f.find_id, f.note) == ("manual", find_id, "wreck, two pods")
+    crew.append_own([(me, manual_find(find_id=find_id, deleted=True, at=ts(2)))])
+    assert crew.finds() == []
+    assert crew.manual_find(me.author, find_id).deleted is True
+
+
+def _mixed_envelopes(tmp_path):
+    a = KeyRing(tmp_path / "a").for_commander("FA")
+    b = KeyRing(tmp_path / "b").for_commander("FB")
+    note_id = ev.uuid7()
+    drafts_a = [visit("FA", at=ts(1)), honk("FA", at=ts(2), bodies=2),
+                body("FA", at=ts(3), body_id=0, star_type="G"), body("FA", at=ts(4), body_id=1, tier="basic"),
+                signals("FA", at=ts(5), counts={"biological": 1}), bio_find("FA", at=ts(5)),
+                note("FA", at=ts(6), note_id=note_id, text="one"),
+                note("FA", at=ts(7), note_id=note_id, text="two")]
+    drafts_b = [visit("FB", at=ts(2), system="SOL", coords=(5.0, 5.0, 5.0)), body("FB", at=ts(3), body_id=1),
+                signals("FB", at=ts(4), source="saa", counts={"biological": 2}, genera=["$G;"]),
+                all_bodies("FB", at=ts(8), count=2), bio_find("FB", at=ts(4))]
+    envelopes = [sealed(a, d, i + 1) for i, d in enumerate(drafts_a)]
+    envelopes += [sealed(b, d, i + 1) for i, d in enumerate(drafts_b)]
+    envelopes.append(sealed(b, drafts_b[0], 99))
+    return envelopes
+
+
+def test_the_merge_is_independent_of_arrival_order(tmp_path):
+    envelopes = _mixed_envelopes(tmp_path)
+    dumps = []
+    for attempt in range(5):
+        shuffled = envelopes[:]
+        random.Random(attempt).shuffle(shuffled)
+        s = Store(tmp_path / f"order{attempt}.db")
+        try:
+            crew_store = CrewStore(s)
+            for data, signature in shuffled:
+                crew_store.insert_received(data, signature)
+            dumps.append(dump(s))
+        finally:
+            s.close()
+    assert all(d == dumps[0] for d in dumps)
+    assert dumps[0]["crew_explored"]
+
+
+def test_rebuild_equals_the_incremental_result(tmp_path, crew, store, ring):
+    for data, signature in _mixed_envelopes(tmp_path):
+        crew.insert_received(data, signature)
+    crew.append_own([(ring.for_commander("F1"), visit(at=ts(30)))])
+    before = dump(store)
+    crew.rebuild_projections()
+    assert dump(store) == before
