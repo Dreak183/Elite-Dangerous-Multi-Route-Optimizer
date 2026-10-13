@@ -118,3 +118,133 @@ def test_import_refuses_to_replace_an_existing_key_unless_asked(ring):
 
 def test_b64url_has_no_padding():
     assert b64url(b"\x00" * 32).endswith("A") and "=" not in b64url(b"\x00" * 32)
+
+
+# ---- fix round 1 ----
+
+def test_stale_identity_does_not_revert_a_replaced_key(ring):
+    held = ring.for_commander("F1")
+    other_text = KeyRing(ring.directory / "x").export_text("F2")
+    ring.import_text("F1", other_text, replace=True)
+    with pytest.raises(KeyFileError):
+        held.raise_high_water(3)
+    assert json.loads(held.path.read_text(encoding="utf-8"))["author"] == json.loads(other_text)["author"]
+
+
+def test_stale_identity_from_a_second_keyring_does_not_revert(ring):
+    held = ring.for_commander("F1")
+    other_text = KeyRing(ring.directory / "x").export_text("F2")
+    KeyRing(ring.directory).import_text("F1", other_text, replace=True)
+    with pytest.raises(KeyFileError):
+        held.raise_high_water(3)
+    assert json.loads(held.path.read_text(encoding="utf-8"))["author"] == json.loads(other_text)["author"]
+
+
+def test_raise_high_water_never_overwrites_an_unusable_file(ring):
+    held = ring.for_commander("F1")
+    held.path.write_text("garbage", encoding="utf-8")
+    with pytest.raises(KeyFileError):
+        held.raise_high_water(3)
+    assert held.path.read_text(encoding="utf-8") == "garbage"
+
+
+@pytest.mark.parametrize("bad", [2**53, 1.5, True, -1, "3"])
+def test_raise_high_water_validates_seq(ring, bad):
+    ident = ring.for_commander("F1")
+    with pytest.raises(ValueError):
+        ident.raise_high_water(bad)
+    assert ident.high_water == 0
+
+
+def test_high_water_unchanged_when_write_fails_and_retry_writes(ring, monkeypatch, tmp_path):
+    import os
+    ident = ring.for_commander("F1")
+    real = os.replace
+
+    def boom(*a, **k):
+        raise PermissionError("locked")
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(PermissionError):
+        ident.raise_high_water(9)
+    assert ident.high_water == 0
+    monkeypatch.setattr(os, "replace", real)
+    ident.raise_high_water(9)
+    assert KeyRing(tmp_path / "crew_keys").for_commander("F1").high_water == 9
+
+
+def test_verify_rejects_non_bytes_data(ring):
+    ident = ring.for_commander("F1")
+    sig = ident.sign(b"x")
+    assert verify(ident.author, sig, 5) is False
+    assert verify(ident.author, sig, "x") is False
+    assert verify(ident.author, sig, bytearray(b"x")) is True
+
+
+# Pure-Python Ed25519 (RFC 8032 5.1.3 / 5.1.4) to prove the blocklist points have small order.
+_P = 2**255 - 19
+_D = -121665 * pow(121666, -1, _P) % _P
+
+_SMALL_ORDER = {
+    "order4_zero": bytes(32),
+    "identity": b"\x01" + bytes(31),
+    "order8_a": bytes.fromhex("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+    "order8_b": bytes.fromhex("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+    "p_minus_1": b"\xec" + b"\xff" * 30 + b"\x7f",
+    "p_noncanon0": b"\xed" + b"\xff" * 30 + b"\x7f",
+    "p_plus_1_noncanon1": b"\xee" + b"\xff" * 30 + b"\x7f",
+}
+
+
+def _decode(raw):
+    y = int.from_bytes(raw, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    if y >= _P:
+        return None  # non-canonical y: RFC 8032 decoding fails
+    x2 = (y * y - 1) * pow(_D * y * y + 1, -1, _P) % _P
+    x = pow(x2, (_P + 3) // 8, _P)
+    if (x * x - x2) % _P:
+        x = x * pow(2, (_P - 1) // 4, _P) % _P
+    if (x * x - x2) % _P:
+        return None
+    if x == 0 and sign:
+        return None
+    if x & 1 != sign:
+        x = _P - x
+    return (x, y, 1, x * y % _P)
+
+
+def _add(p, q):
+    a = (p[1] - p[0]) * (q[1] - q[0]) % _P
+    b = (p[1] + p[0]) * (q[1] + q[0]) % _P
+    c = 2 * p[3] * q[3] * _D % _P
+    d = 2 * p[2] * q[2] % _P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
+
+
+@pytest.mark.parametrize("name", sorted(_SMALL_ORDER))
+def test_blocklist_points_really_have_small_order(name):
+    pt = _decode(_SMALL_ORDER[name])
+    if pt is None:
+        pytest.skip("non-canonical y; does not decode under RFC 8032")
+    for _ in range(3):
+        pt = _add(pt, pt)
+    assert pt[0] % _P == 0 and (pt[1] - pt[2]) % _P == 0
+
+
+@pytest.mark.parametrize("name", sorted(_SMALL_ORDER))
+def test_verify_rejects_small_order_authors(name):
+    raw = _SMALL_ORDER[name]
+    for variant in (raw, raw[:31] + bytes([raw[31] | 0x80])):
+        assert verify(b64url(variant), variant + bytes(32), b"any message") is False
+
+
+def test_identity_point_forgery_is_rejected():
+    ident = b"\x01" + bytes(31)
+    assert verify(b64url(ident), ident + bytes(32), b"anything") is False
+
+
+def test_normal_key_still_verifies(ring):
+    ident = ring.for_commander("F1")
+    assert verify(ident.author, ident.sign(b"m"), b"m") is True

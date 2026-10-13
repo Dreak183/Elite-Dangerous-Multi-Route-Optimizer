@@ -23,6 +23,16 @@ from edmrn.ext.crew_events import MAX_SAFE_INT
 KEY_FILE_VERSION = 1
 _KEY_FIELDS = {'v', 'author', 'private_key', 'high_water'}
 _B64URL_43 = re.compile(r'[A-Za-z0-9_-]{43}')
+# libsodium's small-order blocklist, compared with the top bit of the last byte cleared.
+_SMALL_ORDER = frozenset(bytes.fromhex(h) for h in (
+    '00' * 32,
+    '01' + '00' * 31,
+    '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+    'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+    'ec' + 'ff' * 30 + '7f',
+    'ed' + 'ff' * 30 + '7f',
+    'ee' + 'ff' * 30 + '7f',
+))
 
 
 class KeyFileError(Exception):
@@ -56,7 +66,12 @@ def verify(author: Any, signature: Any, data: Any) -> bool:
     try:
         if not isinstance(signature, (bytes, bytearray)) or len(signature) != 64:
             return False
-        Ed25519PublicKey.from_public_bytes(_raw32(author)).verify(bytes(signature), bytes(data))
+        if not isinstance(data, (bytes, bytearray)):
+            return False
+        raw = _raw32(author)
+        if raw[:31] + bytes([raw[31] & 0x7f]) in _SMALL_ORDER:
+            return False
+        Ed25519PublicKey.from_public_bytes(raw).verify(bytes(signature), bytes(data))
         return True
     except (InvalidSignature, ValueError, TypeError):
         return False
@@ -109,10 +124,20 @@ class Identity:
 
     def raise_high_water(self, seq: int) -> None:
         """Persist the highest allocated seq; called after the log commit (C4)."""
+        if not isinstance(seq, int) or isinstance(seq, bool) or not 0 <= seq <= MAX_SAFE_INT:
+            raise ValueError('seq must be an integer from 0 to 2^53-1')
         if seq <= self.high_water:
             return
-        self.high_water = seq
+        if self.path.exists():
+            try:
+                disk_key, _hw = _parse_record(self.path.read_text(encoding='utf-8'))
+                on_disk_author = _author_of(disk_key)
+            except (OSError, UnicodeDecodeError, KeyFileError) as e:
+                raise KeyFileError(f'{self.path.name}: {e}') from e
+            if on_disk_author != self.author:
+                raise KeyFileError(f'{self.path.name}: author changed on disk; key file not overwritten')
         _write(self.path, self._key, seq)
+        self.high_water = seq
 
     def export_text(self) -> str:
         return json.dumps(_record(self._key, self.high_water))
