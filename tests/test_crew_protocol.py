@@ -42,10 +42,11 @@ def test_auth_message_and_frame(me):
             proto.parse_hello(bad)
 
 
-def test_have_round_trip_and_refusals(me):
-    heads = {me.author: 7, "B" * 43: 0}
+def test_have_round_trip_and_refusals(me, tmp_path):
+    other = KeyRing(tmp_path / "o").for_commander("C9").author
+    heads = {me.author: 7, other: 0}
     assert proto.parse_have(json.loads(proto.encode(proto.have_frame(heads)))) == heads
-    for bad in ({"short": 1}, {me.author: -1}, {me.author: True}, {me.author: 2**53}):
+    for bad in ({"B" * 43: 1}, {"short": 1}, {me.author: -1}, {me.author: True}, {me.author: 2**53}):
         with pytest.raises(proto.FrameError):
             proto.parse_have({"t": "have", "heads": bad})
 
@@ -98,3 +99,41 @@ def test_parse_err(me):
     assert proto.parse_err({"t": "err", "code": "quota", "author": me.author, "seq": 4}) == ("quota", me.author, 4)
     assert proto.parse_err({"t": "err", "code": "weird"}) == ("unknown", None, None)
     assert proto.parse_err({"t": "err", "code": "rate", "author": "x", "seq": "y"}) == ("rate", None, None)
+
+
+def test_parse_err_unhashable_code_and_seq_bounds(me):
+    for code in ([], {}, 5, None):
+        assert proto.parse_err({"t": "err", "code": code}) == ("unknown", None, None)
+    for seq in (-1, 2**53, True):
+        assert proto.parse_err({"t": "err", "code": "rate", "author": me.author, "seq": seq}) == ("rate", None, None)
+    assert proto.parse_err({"t": "err", "code": "rate", "author": "B" * 43, "seq": 1}) == ("rate", None, None)
+
+
+def test_parse_evs_aggregate_cap():
+    item = {"e": proto.b64(b"e" * 16000), "s": proto.b64(b"s" * 64)}
+    with pytest.raises(proto.FrameError):
+        proto.parse_evs({"t": "evs", "items": [item] * 45})
+    assert len(proto.parse_evs({"t": "evs", "items": [item] * 20})) == 20
+
+
+def test_parse_hello_refuses_float_version():
+    nonce = proto.b64(bytes(32))
+    with pytest.raises(proto.FrameError):
+        proto.parse_hello({"t": "hello", "v": 1.0, "nonce": nonce})
+
+
+def test_status_must_be_canonical(me):
+    data = json.dumps(status_doc(me.author), indent=2).encode()
+    with pytest.raises(proto.FrameError):
+        proto.parse_status(proto.status_frame(data, me.sign(data)))
+
+
+def test_decode_refuses_non_printable_type():
+    for text in ('{"t":"\ud800"}', '{"t":""}', '{"t":"a\nb"}', '{"t":"' + "x" * 33 + '"}'):
+        with pytest.raises(proto.FrameError):
+            proto.decode(text)
+
+
+def test_decode_refuses_overflowing_float():
+    with pytest.raises(proto.FrameError):
+        proto.decode('{"t":"have","x":1e400}')

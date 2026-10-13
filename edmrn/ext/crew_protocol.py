@@ -12,7 +12,7 @@ import re
 from typing import Any, Iterable, Iterator, Optional
 
 from edmrn.ext import crew_events as ev
-from edmrn.ext.crew_identity import b64url, verify
+from edmrn.ext.crew_identity import _raw32, b64url, verify
 
 PROTOCOL_VERSION = 1
 MAX_FRAME_BYTES = 1 << 20
@@ -26,11 +26,21 @@ ERROR_CODES = frozenset({'quota', 'group_quota', 'not_member', 'removed', 'bad_s
                          'bad_frame', 'rate'})
 CLOSE_REPLACED, CLOSE_BAD_AUTH, CLOSE_FORBIDDEN, CLOSE_POLICY = 4000, 4001, 4003, 4008
 _B64URL = re.compile(r'[A-Za-z0-9_-]*')
+_T = re.compile(r'[ -~]{1,32}')
 _ITEM_OVERHEAD = 16  # {"e":"","s":""}, per item
 
 
 class FrameError(ValueError):
     """A frame that breaks the protocol."""
+
+
+def _author(value: Any) -> bool:
+    """True for the canonical spelling of an author key."""
+    try:
+        _raw32(value)
+    except ValueError:
+        return False
+    return True
 
 
 def b64(data: bytes) -> str:
@@ -64,6 +74,8 @@ def decode(text: Any) -> dict:
         raise FrameError(str(e)) from None
     if not isinstance(frame, dict) or not isinstance(frame.get('t'), str):
         raise FrameError('a frame is an object with a string t')
+    if not _T.fullmatch(frame['t']):
+        raise FrameError('a frame type is short printable ASCII')
     return frame
 
 
@@ -72,7 +84,7 @@ def auth_message(group_id: str, nonce: str) -> bytes:
 
 
 def parse_hello(frame: dict) -> str:
-    if frame.get('v') != PROTOCOL_VERSION or isinstance(frame.get('v'), bool):
+    if type(frame.get('v')) is not int or frame['v'] != PROTOCOL_VERSION:
         raise FrameError('unsupported relay protocol version')
     nonce = frame.get('nonce')
     if len(unb64(nonce, NONCE_BYTES)) != NONCE_BYTES:
@@ -103,7 +115,7 @@ def parse_have(frame: dict) -> dict:
     if not isinstance(heads, dict) or len(heads) > MAX_HEADS:
         raise FrameError('heads must be an object of at most 1000 authors')
     for author, seq in heads.items():
-        if (not ev.is_author(author) or isinstance(seq, bool) or not isinstance(seq, int)
+        if (not _author(author) or isinstance(seq, bool) or not isinstance(seq, int)
                 or not 0 <= seq <= ev.MAX_SAFE_INT):
             raise FrameError('heads maps authors to sequence numbers')
     return dict(heads)
@@ -130,6 +142,7 @@ def parse_evs(frame: dict) -> list:
     if not isinstance(items, list) or len(items) > MAX_EVS_ITEMS:
         raise FrameError('items must be a list of at most 100')
     out = []
+    total = 0
     for item in items:
         if not isinstance(item, dict) or set(item) != {'e', 's'}:
             raise FrameError('an item is {e, s}')
@@ -137,6 +150,9 @@ def parse_evs(frame: dict) -> list:
         signature = unb64(item['s'], SIGNATURE_BYTES)
         if len(signature) != SIGNATURE_BYTES:
             raise FrameError('a signature is 64 bytes')
+        total += len(item['e']) + len(item['s']) + _ITEM_OVERHEAD
+        if total > MAX_EVS_BYTES:
+            raise FrameError('items larger than 512 KiB')
         out.append((data, signature))
     return out
 
@@ -160,6 +176,8 @@ def parse_status(frame: dict) -> tuple:
         ev.validate_status(doc)
     except (ev.EnvelopeError, ev.PayloadError) as e:
         raise FrameError(str(e)) from None
+    if ev.canonical_bytes(doc) != data:
+        raise FrameError('status is not in canonical form')
     if not verify(doc['author'], signature, data):
         raise FrameError('status signature does not verify')
     return doc['author'], doc['at'], doc['status']
@@ -167,9 +185,10 @@ def parse_status(frame: dict) -> tuple:
 
 def parse_err(frame: dict) -> tuple:
     code = frame.get('code')
-    if code not in ERROR_CODES:
+    if not isinstance(code, str) or code not in ERROR_CODES:
         return 'unknown', None, None
     author, seq = frame.get('author'), frame.get('seq')
-    if not ev.is_author(author) or isinstance(seq, bool) or not isinstance(seq, int):
+    if (not _author(author) or isinstance(seq, bool) or not isinstance(seq, int)
+            or not 0 <= seq <= ev.MAX_SAFE_INT):
         return code, None, None
     return code, author, seq

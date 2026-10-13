@@ -157,6 +157,13 @@ def _reject_constant(name: str) -> Any:
     raise EnvelopeError(f'non-finite number {name}')
 
 
+def _finite_float(text: str) -> float:
+    value = float(text)
+    if value in (float('inf'), float('-inf')) or value != value:
+        raise EnvelopeError('non-finite number')
+    return value
+
+
 def load_json(data: Any, limit: int, what: str) -> Any:
     """JSON from received bytes: at most `limit` bytes, UTF-8 without BOM, no duplicate keys, no NaN."""
     if not isinstance(data, (bytes, bytearray)):
@@ -165,7 +172,7 @@ def load_json(data: Any, limit: int, what: str) -> Any:
         raise EnvelopeError(f'{what} larger than {limit // 1024} KB')
     try:
         return json.loads(bytes(data).decode('utf-8'), object_pairs_hook=_no_duplicate_keys,
-                          parse_constant=_reject_constant)
+                          parse_constant=_reject_constant, parse_float=_finite_float)
     except EnvelopeError:
         raise
     except (ValueError, RecursionError) as e:

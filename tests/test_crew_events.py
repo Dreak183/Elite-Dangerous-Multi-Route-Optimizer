@@ -478,7 +478,7 @@ def test_status_refuses_unknown_keys():
 
 
 def test_load_json_refuses_duplicates_bom_nan_and_size():
-    for data in (b'{"a":1,"a":2}', b'\xef\xbb\xbf{}', b'{"a":NaN}', b"x" * 20):
+    for data in (b'{"a":1,"a":2}', b'\xef\xbb\xbf{}', b'{"a":NaN}', b'{"a":1e400}', b'{"a":-1e999}', b"x" * 20):
         with pytest.raises(ev.EnvelopeError):
             ev.load_json(data, 10 if data == b"x" * 20 else 1000, "thing")
     assert ev.load_json(b'{"a":1}', 100, "thing") == {"a": 1}
