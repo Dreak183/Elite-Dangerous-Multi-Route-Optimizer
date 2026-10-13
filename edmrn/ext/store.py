@@ -1,4 +1,4 @@
-"""SQLite store for EDMRN fork data (ADR-0004: one connection, rollback journal, bound values)."""
+"""SQLite store for EDMRN fork data (ADR-0004, ADR-0006: one connection, rollback journal, bound values)."""
 from __future__ import annotations
 
 import math
@@ -37,6 +37,125 @@ MIGRATIONS: list[list[str]] = [
             jumps    INTEGER NOT NULL,
             status   TEXT NOT NULL CHECK (status IN ('visited', 'unvisited')),
             PRIMARY KEY (route_id, seq)
+        )""",
+    ],
+    [
+        """CREATE TABLE crew_log (
+            author     TEXT NOT NULL,
+            seq        INTEGER NOT NULL CHECK (seq >= 1),
+            event_id   TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            v          INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            envelope   BLOB NOT NULL,
+            signature  BLOB NOT NULL,
+            PRIMARY KEY (author, seq)
+        )""",
+        "CREATE INDEX crew_log_event_id ON crew_log (event_id)",
+        "CREATE TABLE crew_projected (event_id TEXT PRIMARY KEY)",
+        """CREATE TABLE crew_systems (
+            address        TEXT PRIMARY KEY,
+            name           TEXT,
+            name_key       TEXT,
+            x              REAL,
+            y              REAL,
+            z              REAL,
+            coords_key     TEXT,
+            body_count     INTEGER,
+            body_count_key TEXT
+        )""",
+        """CREATE TABLE crew_visits (
+            author      TEXT NOT NULL,
+            address     TEXT NOT NULL,
+            first_at    TEXT NOT NULL,
+            last_at     TEXT NOT NULL,
+            visit_count INTEGER NOT NULL,
+            PRIMARY KEY (author, address)
+        )""",
+        """CREATE TABLE crew_honks (
+            author     TEXT NOT NULL,
+            address    TEXT NOT NULL,
+            body_count INTEGER NOT NULL,
+            honk_key   TEXT NOT NULL,
+            PRIMARY KEY (author, address)
+        )""",
+        "CREATE TABLE crew_all_bodies (author TEXT NOT NULL, address TEXT NOT NULL, PRIMARY KEY (author, address))",
+        "CREATE TABLE crew_explored (author TEXT NOT NULL, address TEXT NOT NULL, PRIMARY KEY (author, address))",
+        """CREATE TABLE crew_body_reports (
+            event_id       TEXT PRIMARY KEY,
+            author         TEXT NOT NULL,
+            created_at     TEXT NOT NULL,
+            address        TEXT NOT NULL,
+            body_id        INTEGER NOT NULL,
+            tier           TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            star_type      TEXT,
+            planet_class   TEXT,
+            moon           INTEGER NOT NULL,
+            landable       INTEGER,
+            terraform      TEXT,
+            was_discovered INTEGER NOT NULL,
+            was_mapped     INTEGER NOT NULL,
+            scan_type      TEXT NOT NULL
+        )""",
+        "CREATE INDEX crew_body_reports_body ON crew_body_reports (address, body_id)",
+        """CREATE TABLE crew_signals (
+            address      TEXT NOT NULL,
+            body_id      INTEGER NOT NULL,
+            type         TEXT NOT NULL,
+            signal_count INTEGER NOT NULL,
+            PRIMARY KEY (address, body_id, type)
+        )""",
+        """CREATE TABLE crew_genera (
+            address TEXT NOT NULL,
+            body_id INTEGER NOT NULL,
+            genus   TEXT NOT NULL,
+            PRIMARY KEY (address, body_id, genus)
+        )""",
+        """CREATE TABLE crew_signal_sources (
+            address   TEXT NOT NULL,
+            body_id   INTEGER NOT NULL,
+            source    TEXT NOT NULL,
+            body_name TEXT NOT NULL,
+            PRIMARY KEY (address, body_id, source)
+        )""",
+        """CREATE TABLE crew_finds (
+            event_id   TEXT PRIMARY KEY,
+            author     TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            find_kind  TEXT NOT NULL,
+            system     TEXT,
+            address    TEXT NOT NULL,
+            body_name  TEXT,
+            body_id    INTEGER,
+            detail     TEXT NOT NULL
+        )""",
+        """CREATE TABLE crew_manual_finds (
+            author     TEXT NOT NULL,
+            find_id    TEXT NOT NULL,
+            seq        INTEGER NOT NULL,
+            event_id   TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            find_kind  TEXT NOT NULL,
+            system     TEXT,
+            address    TEXT NOT NULL,
+            body_name  TEXT,
+            body_id    INTEGER,
+            note       TEXT NOT NULL,
+            deleted    INTEGER NOT NULL,
+            PRIMARY KEY (author, find_id)
+        )""",
+        """CREATE TABLE crew_notes (
+            author     TEXT NOT NULL,
+            note_id    TEXT NOT NULL,
+            seq        INTEGER NOT NULL,
+            event_id   TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            system     TEXT,
+            address    TEXT NOT NULL,
+            text       TEXT NOT NULL,
+            deleted    INTEGER NOT NULL,
+            PRIMARY KEY (author, note_id)
         )""",
     ],
 ]
@@ -173,6 +292,16 @@ class Store:
                 if self._conn.in_transaction:
                     self._conn.execute('ROLLBACK')
                 raise
+
+    def transaction(self):
+        """BEGIN IMMEDIATE ... COMMIT under the store lock, for feature modules (ADR-0006)."""
+        return self._transaction()
+
+    @contextmanager
+    def read(self):
+        """The connection under the store lock, for feature modules' queries (ADR-0006)."""
+        with self._lock:
+            yield self._conn
 
     def _probe(self) -> None:
         if self._conn.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
