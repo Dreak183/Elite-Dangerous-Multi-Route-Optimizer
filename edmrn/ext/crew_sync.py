@@ -390,10 +390,77 @@ class _Session:
                 self.send({'t': 'evs', 'items': [{'e': proto.b64(pair[0]), 's': proto.b64(pair[1])}]})
 
     def receive_status(self, frame: dict) -> None:
-        """Statuses are handled by the status layer."""
+        try:
+            author, at, status = proto.parse_status(frame)
+        except proto.FrameError as e:
+            self.log_once('st', f'a status was dropped: {e}')
+            return
+        if author != self.sync._identity.author:
+            self.sync._board.update(author, at, status)
 
     def maybe_status(self, now: float) -> None:
-        """Statuses are handled by the status layer."""
+        """S8: on change, at most every 30 s; paused sends PAUSED_STATUS once.
+
+        Called on every tick (about 4 per second): the interval gate and the dirty flag come
+        first, so the status source is consulted at most once per interval.
+        """
+        sync = self.sync
+        if now - self.last_status_at < sync.STATUS_INTERVAL:
+            return
+        if not sync._status_dirty and self.last_status is not None:
+            return
+        sync._status_dirty = False
+        self.last_status_at = now  # any evaluation spends the interval, a refusal to send included
+        if sync._paused:
+            status = PAUSED_STATUS
+        else:
+            built = sync._status_source()
+            if built is None:  # no commander, or an alt that is not the member (Review Focus 2)
+                return
+            status = {**built, 'paused': False}
+        if status == self.last_status:
+            return
+        doc = {'author': sync._identity.author, 'at': sync._wall(), 'status': status}
+        try:
+            ev.validate_status(doc)
+            data = proto.status_bytes(doc)
+        except (ev.PayloadError, proto.FrameError) as e:
+            self.log_once('own-status', f'own status not sent: {e}')
+            return
+        self.send(proto.status_frame(data, sync._identity.sign(data)))
+        self.last_status = status
+
+
+_SHIP_FIELDS = ('ship', 'ship_name', 'ship_ident', 'hull', 'fuel_main', 'fuel_reserve',
+                'fuel_capacity_main', 'fuel_capacity_reserve')
+
+
+def status_from(location: Any, ship: Any) -> dict:
+    """The S8 status fields, without `paused`, from a LocationState and a ShipStatus (either None)."""
+    address = getattr(location, 'system_address', None)
+    coords = getattr(location, 'coords', None)
+    edsy = getattr(ship, 'edsy_url', None)
+    status = {
+        'commander': getattr(ship, 'commander', None) or getattr(location, 'commander', None),
+        'system': getattr(location, 'system', None),
+        'address': None if address is None else str(address),
+        'coords': None if coords is None else [float(c) for c in coords],
+        'edsy_url': edsy if isinstance(edsy, str) and len(edsy) <= ev.EDSY_MAX else None,
+    }
+    for name in _SHIP_FIELDS:
+        status[name] = getattr(ship, name, None)
+    return status
+
+
+def make_status_source(service: Any, member_path: Any) -> Callable[[], Optional[dict]]:
+    """Status of the active commander, but only if it is the group member (Review Focus 2)."""
+    def source() -> Optional[dict]:
+        commander = service.commander
+        if commander is None or service.keyring.path_for(commander) != member_path:
+            return None
+        location, ship = service.status()
+        return status_from(location, ship)
+    return source
 
 
 class CrewSync:
