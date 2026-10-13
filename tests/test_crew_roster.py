@@ -137,6 +137,9 @@ def test_invite_refuses_garbage_with_one_sentence(bad):
 @pytest.mark.parametrize("url", [
     "https://galroute.the-hub.cloud", "ws://galroute.the-hub.cloud", "wss://user@host",
     "wss://host/path", "wss://host?x=1", "wss://host#f", "wss://", "ftp://host",
+    "wss://<script>", "wss://a b", "wss://host\x00", "wss://host'\"", "wss://host;x", "wss://host%2F",
+    "wss://.", "wss://-", "wss://host\u200b", "wss://[::1]", "wss://host:0", "wss://-a.example",
+    "wss://a..b", "wss://" + "a" * 64 + ".example", "wss://h\xf6st.example",
 ])
 def test_relay_url_refuses(url):
     with pytest.raises(cr.InviteError):
@@ -148,6 +151,31 @@ def test_relay_url_accepts_and_normalises():
     assert cr.check_relay_url("ws://localhost:8799") == "ws://localhost:8799"
     assert cr.check_relay_url("ws://127.0.0.1:8799") == "ws://127.0.0.1:8799"
     assert cr.connection_url("wss://h", G) == f"wss://h/v1/groups/{G}/ws"
+
+
+def test_relay_url_keeps_a_real_port_and_invite_link_checks_its_relay():
+    assert cr.check_relay_url("wss://host:8443") == "wss://host:8443"
+    with pytest.raises(cr.InviteError):
+        cr.invite_link(cr.encode_invite(CODE), "garbage")
+
+
+def _invite_with(**changes):
+    import base64
+    obj = {"g": G, "i": INV, "k": TOKEN, "l": LEADER, "u": "wss://galroute.the-hub.cloud"}
+    obj.update(changes)
+    obj = {k: v for k, v in obj.items() if v is not ...}
+    body = base64.urlsafe_b64encode(ev.canonical_bytes(obj)).rstrip(b"=").decode()
+    return "edmrn-crew:1:" + body
+
+
+def test_invite_fields_must_be_exact():
+    assert cr.decode_invite(_invite_with()) == CODE
+    for bad in (_invite_with(u="wss://<script>"), _invite_with(x="extra"), _invite_with(g=...),
+                _invite_with(g=5), _invite_with(i="nope"), _invite_with(k="zz" * 32),
+                _invite_with(l="short"), _invite_with(g=None)):
+        with pytest.raises(cr.InviteError) as info:
+            cr.decode_invite(bad)
+        assert str(info.value).endswith(".")
 
 
 @pytest.mark.parametrize("url", [
@@ -180,3 +208,77 @@ def test_group_json_round_trip_and_refusals(tmp_path):
         cr.load_group(tmp_path)
     cr.delete_group(tmp_path)
     assert cr.load_group(tmp_path) is None
+
+
+def test_a_friend_cannot_remove_another_member():
+    roster = cr.compute_roster(base() + [
+        rv(ALICE, 1, "join", "2026-10-13T10:02:00Z", invite_id=INV, token=TOKEN, commander="Alice"),
+        rv(BOB, 2, "remove", "2026-10-13T11:00:00Z", member=ALICE, last_seq=0),
+    ], G, LEADER)
+    assert roster.members[ALICE].last_seq is None
+    assert [m.author for m in roster.active()] == [LEADER, ALICE]
+
+
+def test_malformed_joins_are_dropped_by_the_parser_and_cannot_break_the_roster(tmp_path):
+    me = KeyRing(tmp_path / "k").for_commander("C1")
+    bad_token = seal_roster(me, 1, "join", "2026-10-13T10:02:00Z",
+                            {"group_id": G, "invite_id": INV, "token": "zz", "commander": "C"})
+    long_name = seal_roster(me, 2, "join", "2026-10-13T10:02:00Z",
+                            {"group_id": G, "invite_id": INV, "token": TOKEN, "commander": "C" * 65})
+    assert cr.parse_roster_envelope(bad_token, frozenset(), NOW) is None
+    assert cr.parse_roster_envelope(long_name, frozenset(), NOW) is None
+    # a stray unvalidated join must not raise either
+    stray = rv(BOB, 1, "join", "2026-10-13T10:02:00Z", invite_id=INV, token="zz", commander="B")
+    try:
+        roster = cr.compute_roster(base() + [stray], G, LEADER)
+    except ValueError:
+        pytest.fail("compute_roster raised on a malformed join")
+    assert set(roster.members) == {LEADER}
+
+
+def test_envelope_version_must_be_one(tmp_path):
+    me = KeyRing(tmp_path / "k").for_commander("C1")
+    env = ev.build_envelope(ev.uuid7(), me.author, 1, "group", "2026-10-13T10:00:00Z",
+                            {"group_id": G, "name": "Crew", "commander": "C"})
+    env["v"] = 2
+    data = ev.seal(env, me.sign)[0]
+    assert cr.parse_roster_envelope(data, frozenset(), NOW) is None
+
+
+def test_expiry_boundary_is_inclusive_first_group_and_first_invite_win():
+    on_the_second = "2026-10-14T10:00:00Z"
+    roster = cr.compute_roster(base() + [
+        rv(ALICE, 1, "join", on_the_second, invite_id=INV, token=TOKEN, commander="Alice"),
+        rv(LEADER, 3, "group", "2026-10-13T10:05:00Z", name="Renamed", commander="Other"),
+        rv(LEADER, 4, "invite", "2026-10-13T10:06:00Z", invite_id=INV, token_hash=cr.token_hash("22" * 32),
+           expires_at="2027-01-01T00:00:00Z", label="Later"),
+    ], G, LEADER)
+    assert ALICE in roster.members
+    assert roster.name == "Crew" and roster.members[LEADER].commander == "Leader"
+    assert roster.invites[INV].label == "Alice"
+
+
+def test_active_lists_the_leader_first_then_by_name():
+    roster = cr.compute_roster(base() + [
+        rv(ALICE, 1, "join", "2026-10-13T10:02:00Z", invite_id=INV, token=TOKEN, commander="zed"),
+        rv(LEADER, 3, "invite", "2026-10-13T10:03:00Z", invite_id=INV2, token_hash=cr.token_hash(TOKEN),
+           expires_at="2026-10-14T10:00:00Z", label=None),
+        rv(BOB, 1, "join", "2026-10-13T10:04:00Z", invite_id=INV2, token=TOKEN, commander="Amy"),
+    ], G, LEADER)
+    assert [m.commander for m in roster.active()] == ["Leader", "Amy", "zed"]
+
+
+@pytest.mark.parametrize("change", [
+    {"extra": 1}, {"v": 1.0}, {"v": True}, {"paused": 1}, {"url": "wss://<script>"},
+    {"webhook": "https://evil.com/api/webhooks/1/SECRETTOKEN"}, {"member": "short"}, {"leader": "short"},
+    {"group_id": "nope"},
+])
+def test_load_group_refuses_each_malformed_field(tmp_path, change):
+    import json
+    record = {"v": 1, "url": "wss://galroute.the-hub.cloud", "group_id": G, "leader": LEADER,
+              "member": LEADER, "webhook": None, "paused": False}
+    record.update(change)
+    (tmp_path / "group.json").write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(cr.GroupConfigError) as info:
+        cr.load_group(tmp_path)
+    assert "SECRETTOKEN" not in str(info.value)

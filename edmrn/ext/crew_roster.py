@@ -29,6 +29,9 @@ _LOCAL_HOSTS = ('localhost', '127.0.0.1')
 _B64URL = re.compile(r'[A-Za-z0-9_-]+')
 _WEBHOOK = re.compile(
     r'https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/webhooks/([0-9]{1,20})/[A-Za-z0-9_-]{1,100}')
+_HOST = re.compile(
+    r'(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*',
+    re.ASCII)
 _DECORATION = ' \t\r\n<>`'
 
 
@@ -141,7 +144,8 @@ def compute_roster(envelopes: Iterable[RosterEnvelope], group_id: str, leader: s
         invite = invites.get(invite_id)
         if invite is None or invite_id in redeemed:
             continue
-        if token_hash(e.payload['token']) != invite.payload['token_hash']:
+        token = e.payload['token']
+        if not ev.is_hex64(token) or token_hash(token) != invite.payload['token_hash']:
             continue
         if e.created_at > invite.payload['expires_at']:
             continue
@@ -180,13 +184,15 @@ def check_relay_url(url: Any) -> str:
         host, port = parts.hostname, parts.port
     except ValueError:
         raise InviteError(message) from None
-    if not host or parts.username or parts.password or parts.query or parts.fragment:
+    if not host or not _HOST.fullmatch(host) or port == 0:
+        raise InviteError(message)
+    if parts.username or parts.password or parts.query or parts.fragment:
         raise InviteError(message)
     if parts.path not in ('', '/'):
         raise InviteError(message)
     if parts.scheme != 'wss' and not (parts.scheme == 'ws' and host in _LOCAL_HOSTS):
         raise InviteError(message)
-    return f'{parts.scheme}://{host}' + (f':{port}' if port else '')
+    return f'{parts.scheme}://{host}' + (f':{port}' if port is not None else '')
 
 
 def connection_url(base: str, group_id: str) -> str:
@@ -230,7 +236,7 @@ def decode_invite(text: Any) -> InviteCode:
 
 
 def invite_link(code_text: str, relay_url: str) -> str:
-    parts = urlsplit(relay_url)
+    parts = urlsplit(check_relay_url(relay_url))
     scheme = 'https' if parts.scheme == 'wss' else 'http'
     return f'{scheme}://{parts.netloc}/join#{code_text}'
 
