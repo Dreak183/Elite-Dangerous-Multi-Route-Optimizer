@@ -42,10 +42,11 @@ class MapperState:
     system: Optional[str] = None
     address: Optional[str] = None
     body_names: dict = field(default_factory=dict)
+    last_timestamp: Optional[str] = None
 
     def copy(self) -> 'MapperState':
         return MapperState(self.commander, self.commander_name, self.system, self.address,
-                           dict(self.body_names))
+                           dict(self.body_names), self.last_timestamp)
 
 
 def _str(value: Any) -> Optional[str]:
@@ -95,10 +96,14 @@ class JournalMapper:
         if not isinstance(event, dict):
             return []
         try:
-            return self._map(event)
+            drafts = self._map(event)
         except Exception as e:  # a malformed event must never stop capture
             logger.error(f"Crew mapping skipped {event.get('event')!r}: {e}")
-            return []
+            drafts = []
+        stamped = ev.stamp(event.get('timestamp'))
+        if stamped is not None:
+            self.state.last_timestamp = stamped
+        return drafts
 
     def _map(self, event: dict) -> list[ev.Draft]:
         name = event.get('event')
@@ -363,19 +368,27 @@ class LiveCapture:
                 return
             if state is not None:
                 self.mapper = JournalMapper(state)
+            floor = state.last_timestamp if state is not None else None
             drafts = []
             for event in self._buffer:
+                stamped = ev.stamp(event.get('timestamp'))
+                if floor is not None and stamped is not None and stamped < floor:
+                    continue  # the replay already read it; re-mapping could misattribute it
                 drafts.extend(self.mapper.map(event))
             self._buffer = []
             self._seeded = True
         self._hand_on(drafts)
 
     def _hand_on(self, drafts: list[ev.Draft]) -> None:
-        for draft in drafts:
-            try:
-                self._enqueue(draft)
-            except Exception as e:
-                logger.error(f"Crew draft not queued: {e}")
+        _deliver(self._enqueue, drafts)
+
+
+def _deliver(enqueue: Enqueue, drafts: list[ev.Draft]) -> None:
+    for draft in drafts:
+        try:
+            enqueue(draft)
+        except Exception as e:
+            logger.error(f"Crew draft not queued: {e}")
 
 
 def _newest_journals(journal_dir: Optional[str], max_files: int) -> list[str]:
@@ -389,7 +402,7 @@ def _newest_journals(journal_dir: Optional[str], max_files: int) -> list[str]:
             return 0.0
 
     try:
-        files = glob.glob(os.path.join(journal_dir, 'Journal.*.log'))
+        files = glob.glob(os.path.join(glob.escape(journal_dir), 'Journal.*.log'))
     except OSError as e:
         logger.error(f"Crew replay could not list journals: {e}")
         return []
@@ -417,8 +430,7 @@ def replay(journal_dir: Optional[str], enqueue: Enqueue, status: Optional[CrewSt
                     if not isinstance(event, dict):
                         continue
                     replayed.feed(event)
-                    for draft in mapper.map(event):
-                        enqueue(draft)
+                    _deliver(enqueue, mapper.map(event))
         except OSError as e:
             logger.warning(f"Crew replay skipped {os.path.basename(path)}: {e}")
     if status is not None:

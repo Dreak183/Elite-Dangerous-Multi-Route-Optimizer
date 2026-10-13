@@ -503,3 +503,52 @@ def test_two_commanders_in_one_journal_sequence_give_two_authors(tmp_path):
         assert len(list((tmp_path / "crew_keys").glob("cmdr-*.json"))) == 2
     finally:
         store.close()
+
+
+def test_seed_skips_buffered_events_the_replay_already_read(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD,
+                  jump(ts="2026-10-12T10:00:00Z"),
+                  event("LoadGame", "2026-10-12T11:00:00Z", Commander="Other", FID="F200"))
+    queued = []
+    state = replay(str(journals), queued.append)
+    assert [d.commander for d in queued] == ["F100"]
+    live = LiveCapture(queued.append)
+    live.feed(jump(ts="2026-10-12T10:00:00Z"))
+    live.feed(event("LoadGame", "2026-10-12T11:00:00Z", Commander="Other", FID="F200"))
+    live.seed(state)
+    assert [d.commander for d in queued] == ["F100"]
+
+
+def test_seed_still_maps_buffered_events_newer_than_the_replay(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD, jump(ts="2026-10-12T10:00:00Z"))
+    state = replay(str(journals), lambda d: None)
+    queued = []
+    live = LiveCapture(queued.append)
+    live.feed(jump(system="Alpha", address=42, ts="2026-10-12T10:05:00Z"))
+    live.seed(state)
+    assert [(d.commander, d.payload["system"]) for d in queued] == [("F100", "Alpha")]
+
+
+def test_a_raising_enqueue_does_not_abort_the_replay(tmp_path):
+    journals = tmp_path / "journals"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD, jump(),
+                  event("Loadout", "2026-10-12T10:00:01Z", Ship="krait_light", HullHealth=0.9,
+                        FuelCapacity={"Main": 32.0, "Reserve": 0.63}))
+
+    def refuse(draft):
+        raise RuntimeError("queue gone")
+
+    status = CrewStatus()
+    state = replay(str(journals), refuse, status)
+    assert state is not None and state.system == "Sol"
+    assert status.state.ship == "krait_light"
+
+
+def test_replay_finds_journals_in_a_folder_with_glob_characters(tmp_path):
+    journals = tmp_path / "Saved [Games]"
+    write_journal(journals, "2026-10-12T100000", 1_000_000, LOAD, jump())
+    queued = []
+    assert replay(str(journals), queued.append) is not None
+    assert [d.kind for d in queued] == ["visit"]
