@@ -104,7 +104,7 @@ def json_body(response, service: str) -> Any:
 
 
 def _exc_text(exc, log_url) -> str:
-    return type(exc).__name__ if log_url else repr(exc)
+    return type(exc).__name__ if log_url is not None else repr(exc)
 
 
 def call(method, url, *, service, params=None, json=None, timeout, retries=2, delays=(2.0, 5.0),
@@ -117,7 +117,7 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
     then carry only the exception class, because `requests` errors embed the full URL.
     """
     headers = {"User-Agent": USER_AGENT}
-    shown = log_url or url
+    shown = url if log_url is None else log_url
     attempt = 0
     while True:
         try:
@@ -129,11 +129,12 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
             logger.debug(f"{service} {method} {shown}: {_exc_text(exc, log_url)}")
             failure = ApiFailure(service, "offline")
         except Exception as exc:
-            if log_url:
-                logger.error(f"{service} {method} {shown} failed unexpectedly: {type(exc).__name__}")
-            else:
+            if log_url is None:
                 logger.exception(f"{service} {method} {url} failed unexpectedly")
-            raise ApiError(ApiFailure(service, "unexpected"))
+                raise ApiError(ApiFailure(service, "unexpected"))
+            logger.error(f"{service} {method} {shown} failed unexpectedly: {type(exc).__name__}")
+            # `from None`: the original exception carries the secret URL and must not chain.
+            raise ApiError(ApiFailure(service, "unexpected")) from None
         else:
             if response.status_code in TRANSIENT_STATUSES:
                 failure = failure_from_response(response, service)

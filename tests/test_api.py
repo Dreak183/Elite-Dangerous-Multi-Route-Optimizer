@@ -1,5 +1,6 @@
 """edmrn.ext.api: one HTTP path, retries, readable failures. No network."""
 import logging
+import traceback
 
 import pytest
 import requests
@@ -188,3 +189,4 @@ def test_call_logs_the_redacted_url_only(caplog, error):
     assert caplog.records and "SECRET-TOKEN" not in text and "webhooks/1/***" in text
     assert "SECRET-TOKEN" not in str(info.value)
     assert not any(r.exc_info for r in caplog.records)
+    assert "SECRET-TOKEN" not in "".join(traceback.format_exception(info.value))

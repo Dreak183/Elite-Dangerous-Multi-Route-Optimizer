@@ -24,7 +24,10 @@ Rule (API hardening spec A1–A3):
   `lookup_system` returns not found only when every service answered.
 - A URL that is itself a secret (a Discord webhook) is passed with `log_url=<redacted form>`. Log
   lines then show `log_url` and only the exception class name, never `repr(exc)`: `requests` errors
-  embed the full URL. No other code logs such a URL or an exception raised by that call.
+  embed the full URL, and the raised `ApiError` does not chain the original exception. The token
+  stays out of the log only while the `urllib3` logger is above DEBUG (it logs the full request
+  path there); the shipped logging config keeps the root at INFO.
+  Nothing else logs such a URL or an exception raised by that call.
 - Code that shows a result in Tk receives it through `root.after`.
 - Tests inject `call`/`transport`, `sleep` and `clock`; patch the name the calling module
   imported, or pass `call=`; `call=`/`transport=` defaults are bound at import. An autouse fixture

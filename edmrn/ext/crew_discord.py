@@ -14,15 +14,22 @@ from edmrn.ext.crew_roster import check_webhook, redact_webhook
 SERVICE = 'Discord'
 MAX_RETRY_AFTER = 10.0
 CONTENT_MAX = 2000
+NAME_MAX = 100  # names are 1-64 chars in a roster; this bounds anything else so the link survives
+
+
+def _clip(text: str) -> str:
+    text = ' '.join(str(text).split())
+    return text if len(text) <= NAME_MAX else text[:NAME_MAX - 3] + '...'
 
 
 def invite_message(group_name: str, label: Optional[str], expires_at: str, link: str) -> dict:
-    whom = f' for {label}' if label else ''
+    group_name = _clip(group_name)
+    whom = f' for {_clip(label)}' if label else ''
     expiry = expires_at.replace('T', ' ').replace('Z', ' UTC')
     content = (f'EDMRN crew invite{whom} to the group "{group_name}". It works once and expires '
                f'{expiry}.\nOpen the link, copy the code, then in EDMRN: Settings > Crew... > '
                f'Join with invite.\n{link}')
-    return {'content': content[:CONTENT_MAX], 'allowed_mentions': {'parse': []}}
+    return {'content': content, 'allowed_mentions': {'parse': []}}
 
 
 def _retry_after(response: Any) -> Optional[float]:

@@ -50,3 +50,23 @@ def test_a_bad_webhook_url_is_refused_before_any_request():
     with pytest.raises(InviteError):
         post_invite("https://evil.example/api/webhooks/1/x", {"content": "x"}, call=call)
     assert call.calls == []
+
+
+def test_an_over_long_name_is_cut_so_the_link_survives():
+    message = invite_message("G" * 5000, "L" * 5000, "2026-10-14T10:00:00Z", LINK)
+    assert message["content"].endswith(LINK) and len(message["content"]) <= 2000
+
+
+def test_post_invite_through_the_real_api_call_redacts_and_sends_the_body(caplog):
+    import logging
+    transport = Script(FakeResponse(200, {"id": "1"}))
+    body = {"content": "x", "allowed_mentions": {"parse": []}}
+
+    def real_call(*args, **kwargs):
+        return api.call(*args, transport=transport, **kwargs)
+    with caplog.at_level(logging.DEBUG, logger=""):
+        post_invite(HOOK, body, call=real_call)
+    (args, kwargs), = transport.calls
+    assert args == ("POST", HOOK) and kwargs["params"] == {"wait": "true"}
+    assert kwargs["json"] == body
+    assert "SECRET-TOKEN" not in " ".join(r.getMessage() for r in caplog.records)
