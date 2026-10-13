@@ -140,3 +140,14 @@ def test_adopt_does_not_fill_across_commanders():
     replayed = fed(event("LoadGame", "2026-10-12T09:00:00Z", Commander="Jameson"), LOADOUT).state
     assert live.adopt(replayed) is False
     assert live.state.ship is None and live.state.commander == "Other"
+
+
+def test_adopt_never_mixes_two_ships():
+    live = fed(event("LoadGame", "2026-10-12T10:59:00Z", Commander="Jameson"),
+               event("Loadout", "2026-10-12T11:00:00Z", Ship="anaconda", ShipName="", ShipIdent="",
+                     HullHealth=1.0, FuelCapacity={"Main": 64.0, "Reserve": 1.0}))
+    replayed = fed(event("LoadGame", "2026-10-12T09:59:00Z", Commander="Jameson"), LOADOUT).state
+    assert live.adopt(replayed) is False
+    s = live.state
+    assert (s.ship, s.ship_name, s.ship_ident) == ("anaconda", None, None)
+    assert (s.fuel_capacity_main, s.fuel_capacity_reserve) == (64.0, 1.0)

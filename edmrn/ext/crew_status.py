@@ -22,8 +22,8 @@ logger = get_logger('CrewStatus')
 EDSY_IMPORT_URL = 'https://edsy.org/#/I='
 IN_MAIN_SHIP = 1 << 24
 MAX_TONS = 1e5
-_FILLABLE = ('commander', 'ship', 'ship_name', 'ship_ident', 'edsy_url', 'hull',
-              'fuel_capacity_main', 'fuel_capacity_reserve')
+_SHIP_FIELDS = ('ship', 'ship_name', 'ship_ident', 'edsy_url', 'fuel_capacity_main',
+                'fuel_capacity_reserve')
 
 
 @dataclass(frozen=True)
@@ -159,8 +159,8 @@ class CrewStatus:
         """Merge a replayed state into the live one (plan ruling 5); live Status.json fuel always wins.
 
         A newer (or first) replay replaces the journal fields. A replay that is not newer, because a
-        live event landed during the replay, only fills fields still empty, and only for the same
-        commander.
+        live event landed during the replay, only fills commander and hull when empty, and the ship
+        fields as one group when no ship is known, and only for the same commander.
         """
         with self._lock:
             current = self._state
@@ -174,8 +174,10 @@ class CrewStatus:
                                             else current.fuel_reserve),
                               timestamp=max(stamps) if stamps else None)
             elif current.commander is None or current.commander == replayed.commander:
-                new = replace(current, **{name: getattr(replayed, name) for name in _FILLABLE
-                                          if getattr(current, name) is None})
+                fill = [name for name in ('commander', 'hull') if getattr(current, name) is None]
+                if current.ship is None:
+                    fill.extend(_SHIP_FIELDS)  # one ship as a whole, never mixed with the live one
+                new = replace(current, **{name: getattr(replayed, name) for name in fill})
             else:
                 return False
             if new == current:
