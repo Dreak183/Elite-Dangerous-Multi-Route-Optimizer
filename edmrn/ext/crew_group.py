@@ -7,7 +7,9 @@ and the observers of the sync (state) and the board (statuses).
 from __future__ import annotations
 
 import dataclasses
+import contextlib
 import importlib.util
+import sqlite3
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -58,6 +60,7 @@ class CrewGroup:
         self._subscribed = False
         self._inbox_started = False
         self._websockets_logged = False
+        self._key_logged = False
         self._state_observers: list = []
         self._board_observers: list = []
         self.board.subscribe(self._board_changed)
@@ -67,7 +70,9 @@ class CrewGroup:
     def start(self) -> None:
         """Load group.json, set the roster gate, start the inbox and, with a group, the sync.
 
-        Safe to call again: the inbox keeps one tick chain and a running sync is kept."""
+        Safe to call again: while a sync runs it does nothing, and the inbox keeps one tick chain."""
+        if self.sync is not None and self._inbox_started:
+            return
         self.problem = None
         self.config = None
         try:
@@ -151,13 +156,21 @@ class CrewGroup:
         identity = self.service.keyring.identity_for_author(self.config.member)
         if identity is None:
             self.problem = 'The key of this group membership is missing from crew_keys.'
-            logger.error(self.problem)
+            if not self._key_logged:
+                self._key_logged = True
+                logger.error(self.problem)
             return
         self.problem = None
         connect = self._connect or websockets_connect
-        sync = self._sync_factory(self.service.store, self.config, identity, self.inbox, self.board,
-                                  make_status_source(self.service, identity.path), connect=connect)
-        sync.subscribe(self._state_changed)
+        try:
+            sync = self._sync_factory(self.service.store, self.config, identity, self.inbox,
+                                      self.board, make_status_source(self.service, identity.path),
+                                      connect=connect)
+            sync.subscribe(self._state_changed)
+        except Exception:
+            logger.exception('Crew sync could not be created')
+            self.problem = 'Crew sync could not start; the log file says why.'
+            return
         self.sync = sync
         if not self._subscribed:
             self._subscribed = True
@@ -174,12 +187,30 @@ class CrewGroup:
 
     # --- helpers -----------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _storage(self, what: str):
+        """Disk and database errors become one logged sentence for the dialog."""
+        try:
+            yield
+        except (OSError, sqlite3.Error) as e:
+            logger.error(f'Crew {what} failed: {e}')
+            raise GroupError(f'EDMRN could not {what}; the log file says why.') from None
+
     def _me(self) -> tuple:
+        """(commander key, identity). The key finds the key file; it is never published."""
         commander, identity = self.service.commander, self.service.identity()
         if commander is None or identity is None:
             raise GroupError('No commander is known yet; start Elite Dangerous or wait until '
                              'EDMRN has read the journal.')
         return commander, identity
+
+    def _roster_name(self) -> str:
+        """The in-game name for roster payloads; the key is the Frontier ID and stays private."""
+        name = getattr(self.service, 'commander_name', None)
+        if not isinstance(name, str) or not name.strip():
+            raise GroupError('No commander is known yet; start Elite Dangerous or wait until '
+                             'EDMRN has read the journal.')
+        return ev.ascii_name(name)
 
     def _leader(self) -> tuple:
         if self.config is None:
@@ -192,22 +223,29 @@ class CrewGroup:
 
     def _record(self, kind: str, commander: str, author: str, payload: dict) -> None:
         draft = ev.Draft(kind, commander, ev.utc_now_stamp(), payload, event_id=ev.uuid7())
-        self.service.writer.enqueue(draft)
-        self.service.writer.drain()
-        if not self.service.store.has_event(author, draft.event_id):
+        with self._storage('record this'):
+            self.service.writer.enqueue(draft)
+            self.service.writer.drain()
+            recorded = self.service.store.has_event(author, draft.event_id)
+        if not recorded:
             raise GroupError('EDMRN could not record this; the log file says why.')
         if kind in ('invite', 'remove') and self.sync is not None:
             self.sync.flush_soon()  # the relay must know before the friend connects (B4)
 
     def _enter(self, config: GroupConfig) -> None:
-        try:
+        with self._storage('save the group file'):
             save_group(self.directory, config)
-        except OSError as e:
-            logger.error(f'group.json not saved: {e}')
-            raise GroupError('The group file could not be saved; the log file says why.') from None
         self.config = config
-        self.problem = None
-        self._apply_gate()
+        try:
+            with self._storage('open the group'):
+                self._apply_gate()
+        except GroupError:  # undo: no group on disk, none in memory
+            self.config = None
+            with contextlib.suppress(OSError):
+                delete_group(self.directory)
+            with contextlib.suppress(Exception):
+                self._apply_gate()
+            raise
         self._start_sync()
 
     @staticmethod
@@ -229,7 +267,7 @@ class CrewGroup:
         commander, identity = self._me()
         group_id = ev.uuid7()
         self._record('group', commander, identity.author,
-                     {'group_id': group_id, 'name': name, 'commander': ev.ascii_name(commander)})
+                     {'group_id': group_id, 'name': name, 'commander': self._roster_name()})
         self._enter(GroupConfig(url, group_id, identity.author, identity.author))
 
     def join(self, text: str) -> None:
@@ -244,12 +282,12 @@ class CrewGroup:
             raise GroupError('This is your own invite; send it to a friend.')
         self._record('join', commander, identity.author,
                      {'group_id': code.group_id, 'invite_id': code.invite_id, 'token': code.token,
-                      'commander': ev.ascii_name(commander)})
+                      'commander': self._roster_name()})
         self._enter(GroupConfig(code.url, code.group_id, code.leader, identity.author))
 
     def create_invite(self, label: Optional[str] = None, hours: int = 24) -> CreatedInvite:
         commander, identity = self._leader()
-        if hours not in INVITE_HOURS:
+        if type(hours) is not int or hours not in INVITE_HOURS:
             raise GroupError('An invite lasts 1 hour, 24 hours or 7 days.')
         label = label.strip() if isinstance(label, str) and label.strip() else None
         if label is not None and not ev.is_roster_name(label):
@@ -269,18 +307,21 @@ class CrewGroup:
         if (member == self.config.leader or roster is None or member not in roster.members
                 or roster.members[member].last_seq is not None):
             raise GroupError('Only a current member other than the leader can be removed.')
+        with self._storage('read the log'):
+            last_seq = self.service.store.max_seq(member)
         self._record('remove', commander, identity.author,
-                     {'group_id': self.config.group_id, 'member': member,
-                      'last_seq': self.service.store.max_seq(member)})
+                     {'group_id': self.config.group_id, 'member': member, 'last_seq': last_seq})
 
     def leave(self) -> None:
+        with self._storage('delete the group file'):  # first: a failure changes nothing
+            delete_group(self.directory)
         sync, self.sync = self.sync, None
         if sync is not None:
             sync.stop()
-        delete_group(self.directory)
         self.config = None
         self.problem = None
-        self._apply_gate()
+        with self._storage('close the group'):
+            self._apply_gate()
 
     def reconnect(self) -> None:
         """A new connection attempt, for the state 'refused' (the relay turned this member away)."""
@@ -294,8 +335,10 @@ class CrewGroup:
     def set_paused(self, paused: bool) -> None:
         if self.config is None:
             raise GroupError('This EDMRN is not in a group.')
-        self.config = dataclasses.replace(self.config, paused=bool(paused))
-        save_group(self.directory, self.config)
+        updated = dataclasses.replace(self.config, paused=bool(paused))
+        with self._storage('save the group file'):
+            save_group(self.directory, updated)
+        self.config = updated
         if self.sync is not None:
             self.sync.set_paused(bool(paused))
 
@@ -307,12 +350,15 @@ class CrewGroup:
                 webhook = check_webhook(url)
             except InviteError as e:
                 raise GroupError(str(e)) from None
-        self.config = dataclasses.replace(self.config, webhook=webhook)
-        save_group(self.directory, self.config)
+        updated = dataclasses.replace(self.config, webhook=webhook)
+        with self._storage('save the group file'):
+            save_group(self.directory, updated)
+        self.config = updated
 
     def post_invite(self, invite: CreatedInvite, done: Callable[[Optional[str]], None]) -> None:
         """Post through the webhook in a worker thread; `done(None or sentence)` on the Tk loop."""
-        if self.config is None or self.config.webhook is None:
+        self._leader()
+        if self.config.webhook is None:
             raise GroupError('Set a Discord webhook first.')
         webhook = self.config.webhook
         roster = self.roster

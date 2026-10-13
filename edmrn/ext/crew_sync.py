@@ -137,6 +137,7 @@ class Inbox:
         self._lock = threading.Lock()
         self._space = threading.Condition(self._lock)
         self._running = False
+        self._generation = 0
         self._locked = False
         self._rejected_logged = False
 
@@ -158,7 +159,10 @@ class Inbox:
             self._queue.extend(items)
 
     def start(self) -> None:
+        if self._running:
+            return
         self._running = True
+        self._generation += 1  # a tick still pending from before a stop() belongs to a dead chain
         self._schedule()
 
     def stop(self) -> None:
@@ -169,11 +173,16 @@ class Inbox:
     def _schedule(self) -> None:
         if not self._running:
             return
+        generation = self._generation
         try:
-            self._root.after(self.INTERVAL_MS, self._tick)
+            self._root.after(self.INTERVAL_MS, lambda: self._chain_tick(generation))
         except Exception as e:  # the Tk loop is gone: the app is closing
             self._running = False
             logger.debug(f'Crew inbox stopped: {e}')
+
+    def _chain_tick(self, generation: int) -> None:
+        if generation == self._generation and self._running:
+            self._tick()
 
     def _tick(self) -> None:
         try:

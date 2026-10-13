@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sqlite3
 import threading
 from types import SimpleNamespace
 
@@ -12,7 +13,7 @@ from edmrn.ext.api import ApiError, ApiFailure
 from edmrn.ext.crew import Writer
 from edmrn.ext.crew_group import CrewGroup, GroupError
 from edmrn.ext.crew_identity import KeyRing
-from edmrn.ext.crew_roster import decode_invite, load_group
+from edmrn.ext.crew_roster import GroupConfig, decode_invite, load_group, save_group
 from edmrn.ext.crew_store import CrewStore
 from edmrn.ext.crew_sync import Inbox
 from edmrn.ext.store import Store
@@ -29,7 +30,7 @@ class Root(QueueRoot):
 
     def after(self, ms, fn=None, *args):
         self.delays.append(ms)
-        super().after(ms, fn)
+        super().after(ms, lambda: fn(*args))
 
     def run_now(self):
         queued, self.queue = self.queue, []
@@ -81,20 +82,23 @@ class Ship:
         self.observers.append(fn)
 
 
-def peer(tmp_path, name, commander):
-    """One EDMRN installation: its own database, key folder and controller."""
+def peer(tmp_path, name, commander, commander_name=None):
+    """One EDMRN installation: its own database, key folder and controller. `commander` is the
+    mapper key (the Frontier ID in real life), `commander_name` the in-game name."""
     (tmp_path / name).mkdir()
     store = Store(tmp_path / name / "edmrn.db")
     crew = CrewStore(store)
     ring = KeyRing(tmp_path / name / "crew_keys")
     root = Root()
     service = SimpleNamespace(store=crew, keyring=ring, writer=Writer(crew, ring, root), ship=Ship(),
-                              commander=commander, status=lambda: (None, None))
+                              commander=commander, commander_name=commander_name or commander,
+                              status=lambda: (None, None))
     service.identity = lambda: ring.for_commander(service.commander) if service.commander else None
-    group = CrewGroup(service, SimpleNamespace(root=root, location_tracker=SimpleNamespace(subscribe=lambda fn: None)),
-                      sync_factory=FakeSync)
+    tracker = SimpleNamespace(subscriptions=[], subscribe=lambda fn: tracker.subscriptions.append(fn))
+    group = CrewGroup(service, SimpleNamespace(root=root, location_tracker=tracker), sync_factory=FakeSync)
     group.start()
     return SimpleNamespace(store=store, crew=crew, ring=ring, service=service, group=group, root=root,
+                           tracker=tracker,
                            dir=tmp_path / name / "crew_keys")
 
 
@@ -120,7 +124,7 @@ def author_of(p, commander):
 def deliver_join(friend, leader):
     """What the relay does: the friend's sealed join arrives in the leader's store."""
     gid = friend.group.config.group_id
-    pair = friend.crew.roster_envelope(author_of(friend, "Alice"), "join", gid)
+    pair = friend.crew.roster_envelope(author_of(friend, friend.service.commander), "join", gid)
     assert pair is not None
     assert leader.crew.insert_received_batch([pair]).inserted == 1
 
@@ -382,3 +386,215 @@ def test_the_group_file_round_trips_through_a_restart(world):
     world.group.start()
     assert world.group.config == load_group(world.dir) and FakeSync.instances[-1].started
     assert json.loads((world.dir / "group.json").read_text(encoding="utf-8"))["paused"] is False
+
+
+# --- fix round 1 -------------------------------------------------------------------------
+
+def test_the_roster_carries_the_in_game_name_never_the_frontier_id(tmp_path):
+    FakeSync.instances, FakeSync.events = [], []
+    leader = peer(tmp_path, "keyed", "F100", "Jameson")
+    friend = peer(tmp_path, "keyed_friend", "F200", "Alice")
+    try:
+        leader.group.create_group("Crew")
+        friend.group.join(leader.group.create_invite(None, 24).link)
+        deliver_join(friend, leader)
+        assert sorted(m.commander for m in leader.group.roster.members.values()) == ["Alice", "Jameson"]
+        for p in (leader, friend):
+            with p.store.read() as conn:
+                blobs = [bytes(r[0]) for r in conn.execute("SELECT envelope FROM crew_log")]
+            assert blobs and not any(b"F100" in b or b"F200" in b for b in blobs)
+    finally:
+        leader.store.close()
+        friend.store.close()
+
+
+def test_no_group_action_without_the_in_game_name(world):
+    world.service.commander_name = None
+    with pytest.raises(GroupError, match="No commander"):
+        world.group.create_group("Crew")
+
+
+def test_create_group_twice_is_refused(world):
+    world.group.create_group("Crew")
+    with pytest.raises(GroupError, match="already in a group"):
+        world.group.create_group("Other")
+    assert world.group.roster.name == "Crew"
+
+
+def test_create_group_refuses_a_bad_relay_address(world):
+    with pytest.raises(GroupError, match="relay address"):
+        world.group.create_group("Crew", relay="http://evil.example")
+    assert world.group.config is None and load_group(world.dir) is None
+
+
+def test_an_invite_label_is_checked(world):
+    world.group.create_group("Crew")
+    for label in ("Ünï", "x" * 65):
+        with pytest.raises(GroupError, match="label"):
+            world.group.create_invite(label, 24)
+
+
+@pytest.mark.parametrize("hours", [True, 24.0, "24", None])
+def test_invite_hours_must_be_one_of_the_integers(world, hours):
+    world.group.create_group("Crew")
+    with pytest.raises(GroupError, match="lasts"):
+        world.group.create_invite(None, hours)
+
+
+def test_a_missing_member_key_is_a_problem_logged_once_and_starts_no_sync(world, tmp_path, monkeypatch):
+    stranger = KeyRing(tmp_path / "stranger_keys").for_commander("X").author
+    world.dir.mkdir(exist_ok=True)
+    save_group(world.dir, GroupConfig("wss://galroute.the-hub.cloud", "01920000-0000-7000-8000-0000000000a1",
+                                      stranger, stranger))
+    errors = []
+    monkeypatch.setattr(crew_group_module.logger, "error", errors.append)
+    world.group.stop()
+    world.group.start()
+    world.group.reconnect()
+    world.group.reconnect()
+    assert "key" in world.group.problem and FakeSync.instances == [] and world.group.sync is None
+    assert len([e for e in errors if "missing from crew_keys" in e]) == 1
+
+
+def test_starting_clears_a_stale_problem(world):
+    world.group.stop()
+    world.dir.mkdir(exist_ok=True)
+    (world.dir / "group.json").write_text("{nope", encoding="utf-8")
+    world.group.start()
+    assert world.group.problem
+    (world.dir / "group.json").unlink()
+    world.group.stop()
+    world.group.start()
+    assert world.group.problem is None
+
+
+def test_creating_a_group_clears_a_stale_problem(world):
+    world.group.problem = "left over"
+    world.group.create_group("Crew")
+    assert world.group.problem is None
+
+
+def test_reconnecting_does_not_pile_up_status_subscriptions(world):
+    world.group.create_group("Crew")
+    for _ in range(3):
+        world.group.reconnect()
+    assert len(world.service.ship.observers) == 1 and len(world.tracker.subscriptions) == 1
+
+
+def test_start_while_a_sync_runs_keeps_the_config_and_the_sync(world):
+    world.group.create_group("Crew")
+    sync, config = world.group.sync, world.group.config
+    (world.dir / "group.json").unlink()  # disk and memory disagree; a running sync wins
+    world.group.start()
+    assert world.group.sync is sync and world.group.config is config and world.group.problem is None
+
+
+def test_stop_then_start_leaves_exactly_one_inbox_tick_chain(world):
+    world.group.stop()
+    world.group.start()
+    world.root.run_now()  # the dead chain's pending tick fires and ends; the live one reschedules
+    assert len(world.root.queue) == 1
+    world.root.run_now()
+    assert len(world.root.queue) == 1
+
+
+def test_only_the_leader_can_post_an_invite(world):
+    world.group.create_group("Crew")
+    world.group.set_webhook("https://discord.com/api/webhooks/1/x")
+    invite = world.group.create_invite(None, 24)
+    world.service.commander = "Alt"
+    with pytest.raises(GroupError, match="leader"):
+        world.group.post_invite(invite, lambda result: None)
+
+
+def deny(*args, **kwargs):
+    raise PermissionError("denied")
+
+
+def disk_and_memory(world):
+    cfg = load_group(world.dir)
+    return cfg, world.group.config
+
+
+def test_a_failing_pause_save_changes_nothing(world, monkeypatch):
+    world.group.create_group("Crew")
+    sync = world.group.sync
+    monkeypatch.setattr(crew_group_module, "save_group", deny)
+    with pytest.raises(GroupError, match="group file"):
+        world.group.set_paused(True)
+    assert not world.group.config.paused and not load_group(world.dir).paused and sync.paused is None
+
+
+def test_a_failing_webhook_save_changes_nothing(world, monkeypatch):
+    world.group.create_group("Crew")
+    monkeypatch.setattr(crew_group_module, "save_group", deny)
+    with pytest.raises(GroupError, match="group file"):
+        world.group.set_webhook("https://discord.com/api/webhooks/1/x")
+    assert world.group.config.webhook is None and load_group(world.dir).webhook is None
+
+
+def test_a_failing_leave_keeps_the_group_and_the_sync(world, monkeypatch):
+    world.group.create_group("Crew")
+    sync = world.group.sync
+    monkeypatch.setattr(crew_group_module, "delete_group", deny)
+    with pytest.raises(GroupError, match="group file"):
+        world.group.leave()
+    assert world.group.config is not None and world.group.sync is sync and not sync.stopped
+    assert load_group(world.dir) is not None
+
+
+def test_a_gate_failure_while_leaving_is_a_sentence_and_the_group_is_gone(world, monkeypatch):
+    world.group.create_group("Crew")
+    sync = world.group.sync
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(world.crew, "set_gate", locked)
+    with pytest.raises(GroupError, match="close the group"):
+        world.group.leave()
+    assert world.group.config is None and sync.stopped and load_group(world.dir) is None
+
+
+def test_a_gate_failure_while_creating_leaves_no_group_behind(world, monkeypatch):
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(world.crew, "set_gate", locked)
+    with pytest.raises(GroupError, match="open the group"):
+        world.group.create_group("Crew")
+    assert world.group.config is None and load_group(world.dir) is None and world.group.sync is None
+
+
+def test_a_failing_group_file_save_while_creating_starts_nothing(world, monkeypatch):
+    monkeypatch.setattr(crew_group_module, "save_group", deny)
+    with pytest.raises(GroupError, match="group file"):
+        world.group.create_group("Crew")
+    assert world.group.config is None and world.group.sync is None
+
+
+def test_a_log_failure_while_recording_is_a_sentence(world, monkeypatch):
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(world.crew, "has_event", locked)
+    with pytest.raises(GroupError, match="record this"):
+        world.group.create_group("Crew")
+    assert world.group.config is None
+
+
+def test_a_failing_sync_factory_is_a_problem_not_an_exception(world):
+    def broken(*args, **kwargs):
+        raise RuntimeError("boom")
+    world.group._sync_factory = broken
+    world.group.create_group("Crew")
+    assert world.group.config is not None and world.group.sync is None and world.group.problem
+
+
+def test_a_log_failure_while_removing_is_a_sentence(world, friend, monkeypatch):
+    world.group.create_group("Crew")
+    friend.group.join(world.group.create_invite(None, 24).link)
+    deliver_join(friend, world)
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(world.crew, "max_seq", locked)
+    with pytest.raises(GroupError, match="read the log"):
+        world.group.remove(author_of(friend, "Alice"))

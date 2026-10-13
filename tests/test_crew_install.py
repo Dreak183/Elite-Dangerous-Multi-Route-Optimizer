@@ -631,3 +631,21 @@ def test_a_rebuild_marker_left_by_a_crash_is_repaired_at_install(store, tmp_path
     with store.read() as conn:
         assert conn.execute("SELECT 1 FROM crew_meta WHERE key = 'rebuild'").fetchone() is None
     service.group.stop()
+
+
+def test_a_group_that_fails_after_starting_is_stopped(store, tmp_path, listeners, monkeypatch):
+    from edmrn.ext import crew_group
+    stopped = []
+    real_stop = crew_group.CrewGroup.stop
+
+    def half_started(self):
+        self.inbox.start()
+        raise RuntimeError("failed after the inbox started")
+
+    def recording_stop(self):
+        stopped.append(self)
+        real_stop(self)
+    monkeypatch.setattr(crew_group.CrewGroup, "start", half_started)
+    monkeypatch.setattr(crew_group.CrewGroup, "stop", recording_stop)
+    app, service = start(store, tmp_path)
+    assert service.group is None and len(stopped) == 1 and stopped[0].inbox._running is False
