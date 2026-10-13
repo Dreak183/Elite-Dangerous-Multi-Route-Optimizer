@@ -25,8 +25,10 @@
 1. Read `../../CLAUDE.md`, ADR-0001/0002/0004–0007 (`../architecture/decisions/`),
    `../architecture/overview.md` and `../knowledge/upstream-baseline.md`.
 2. Spec B1, crew sync core (`../superpowers/specs/2026-10-13-crew-sync-core-design.md`, with
-   ADR-0008), was accepted by the commander on 2026-10-13. Next: its plan in
-   `../superpowers/plans/`, then subagent-driven development. The spec's S10–S12 absorb the received-data
+   ADR-0008), was accepted by the commander on 2026-10-13. Its plan is
+   `../superpowers/plans/2026-10-13-crew-sync-core.md` (15 tasks: Python client 1-10, relay
+   11-14, end to end and docs 15). Next: the commander picks the execution method, then
+   subagent-driven development on a feature branch. The spec's S10–S12 absorb the received-data
    rulings found during Spec A (stamp plausibility, character whitelist, log volume).
    - The Cloudflare setup (`wrangler login`, `CREW_LEADERS`, `wrangler deploy` to
      `galroute.the-hub.cloud`) happens with the commander once the relay passes its tests; write

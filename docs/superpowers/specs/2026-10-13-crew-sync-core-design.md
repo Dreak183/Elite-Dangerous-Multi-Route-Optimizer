@@ -1,6 +1,6 @@
 # Crew sync core — design (Spec B1)
 
-Status: Accepted (2026-10-13)
+Status: Accepted (2026-10-13), amended the same day with the planning rulings
 Date: 2026-10-13
 Crew features: A capture → **B1 sync core (this spec)** → B2 chat, route, expeditions, Discord → C
 window. Rules: ADR-0005 (transport), ADR-0006 (store layer), ADR-0007 (stored versus projected),
@@ -42,10 +42,18 @@ the next day.
 
   | Kind | Signed by | Payload |
   |---|---|---|
-  | `group` | the leader | `group_id` (UUIDv7), `name` |
+  | `group` | the leader | `group_id` (UUIDv7), `name`, `commander` |
   | `invite` | the leader | `group_id`, `invite_id` (UUIDv7), `token_hash` (64 lowercase hex), `expires_at` (stamp), `label` (name or null: whom the leader meant it for) |
   | `join` | the new member | `group_id`, `invite_id`, `token` (64 lowercase hex), `commander` |
   | `remove` | the leader | `group_id`, `member` (author), `last_seq` (0 … 2^53−1) |
+
+  - **Roster names** (`name`, `commander`, `label`) are 1–64 characters of printable ASCII
+    (U+0020–U+007E). The relay and the client must agree exactly on which roster envelopes are
+    valid, and Python's and the Workers runtime's Unicode databases differ in version.
+  - A commander name outside that range is sent with each other character replaced by `?`.
+  - `expires_at` must be a real calendar time.
+  - Roster envelopes by other authors also pass S11's timestamp check, on the relay as on the
+    clients.
 
 - S2. **Membership** is a pure function of the roster envelopes for one `group_id` and the leader's
   author, computed identically by the relay and every client (ADR-0008):
@@ -57,7 +65,8 @@ the next day.
     - an `invite` with its `invite_id` exists;
     - SHA-256 of the 32 token bytes equals `token_hash`;
     - its `created_at` is not after `expires_at`;
-    - it is the earliest `join` for that `invite_id`, compared by (`created_at`, `author`, `seq`).
+    - it is the earliest `join` for that `invite_id` that passes the checks above, compared by
+      (`created_at`, `author`, `seq`). The leader's own `join` never counts.
   - A `remove` counts only if signed by the leader, and never for the leader. Its `last_seq` caps
     that member for good: their envelopes with a higher `seq` are refused by the relay and never
     projected. When several `remove` envelopes name one member, the lowest `last_seq` applies.
@@ -70,15 +79,24 @@ the next day.
     order-independent (Spec A C8), so the result equals projecting them on arrival.
   - When a member is removed, `rebuild_projections()` runs once, because projected rows must be
     withdrawn.
-- S4. **Group configuration.** `crew_keys/group.json` holds `v` 1, the relay URL, `group_id`, the
-  leader's author and the member author this installation uses. It lives next to the key files and
-  outside `edmrn.db`, so deleting an unusable database (ADR-0004) keeps the membership; the next
-  connection re-downloads the log, own events included. One installation belongs to at most one
+- S4. **Group configuration.** `crew_keys/group.json` holds:
+  - `v` 1;
+  - the relay URL;
+  - `group_id`;
+  - the leader's author;
+  - the member author this installation uses;
+  - the Discord webhook URL or null (S5a);
+  - the pause flag (S8), so a restart stays paused.
+
+  The file lives next to the key files and outside `edmrn.db`. Deleting an unusable database
+  (ADR-0004) therefore keeps the membership, and the next connection re-downloads the log, own
+  events included. One installation belongs to at most one
   group, with one member author.
 - S5. **Invite string.** `edmrn-crew:1:` followed by base64url (no padding) of the canonical JSON
   object `{"g": group_id, "i": invite_id, "k": token, "l": leader, "u": url}`. The token is 32
   random bytes from `secrets`. The URL must be `wss://` with a host name and no user info, query or
-  fragment. A string that fails any check is rejected whole, with one sentence saying why.
+  fragment. `ws://` is accepted only for `localhost` and `127.0.0.1`, for the end-to-end test. A
+  string that fails any check is rejected whole, with one sentence saying why.
   - **Expiry.** The leader chooses 1 hour, 24 hours (the default) or 7 days.
   - **Link form.** `https://<relay host>/join#<invite string>`. The relay serves a static page at
     `/join`: a script reads the fragment, shows it as text (never as markup) with a copy button and
@@ -120,11 +138,15 @@ the next day.
 
   Unknown frame types are ignored by both sides, so a later version can add frames.
 - S7. **Session.**
-  1. The relay sends `hello`. The client answers with `auth` within 10 s, or the relay closes.
+  1. The relay sends `hello`. The client answers with `auth`. The relay closes a socket that is
+     still unauthenticated after 10 s when it next handles any message; a timer would prevent
+     hibernation.
   2. Creating a group: the relay's group is empty, the `auth` carries a `genesis` envelope of kind
      `group` whose `group_id` equals the URL's, both signed by `author`, and `author` is listed in
      the Worker variable `CREW_LEADERS`. Otherwise an empty group refuses every `auth`.
-  3. Joining: the `auth` carries a `join` envelope by `author` that admits it under S2.
+  3. Joining: the `auth` carries a `join` envelope by `author` that admits it under S2. A client
+     that holds an own `join` for the group always sends its latest one; the relay ignores it once
+     the author is a member.
   4. The relay refuses an `auth` from a non-member or a removed member (close code 4003) and a bad
      signature (4001). A second connection of the same author replaces the first (4000).
   5. After `auth`, each side sends `have`. Each side then sends the other, per author in ascending
@@ -155,8 +177,17 @@ the next day.
     relay. A leader's `auth` always carries its `genesis`; the relay ignores it once the group
     exists.
   - The relay applies S2 to every roster envelope it stores, whether from `auth` or `evs`, and
-    re-evaluates membership from all roster envelopes it holds. A `join` stored before its `invite`
-    therefore admits once the `invite` arrives, as on the clients.
+    re-evaluates membership from all roster envelopes it holds.
+    - In `evs` it accepts a non-member's `join` that admits its author.
+    - After every admission it sends each connected member a fresh `have`.
+    - A client offers, once per connection, the `join` of every author in its log that the relay's
+      `have` does not list. An emptied relay therefore learns every member from any replica:
+      first the leader's own envelopes, then the offered joins, then, after the fresh `have`, the
+      admitted members' envelopes.
+    - A client merges a fresh `have` with what it already sent, keeping the higher head per author.
+  - The relay also refuses a `join` at `auth` when its own clock is past the invite's
+    `expires_at`. The relay may be stricter than the clients, because a `join` it refuses reaches
+    nobody.
 - S8. **Status.** `st` carries canonical bytes of `{"author", "at", "status"}`, signed by the
   author, at most 8 KiB.
   - `status` holds commander, system, address, coordinates, ship type, name and ident, EDSY link,
@@ -182,6 +213,9 @@ the next day.
   `too_big`, `bad_frame`, `rate`. The client logs each code once per connection.
   - It reconnects with backoff from 1 s doubling to 5 min, with ±20 % jitter.
   - It stops reconnecting after a close with 4001 or 4003 until the commander acts in the dialog.
+  - After a close with 4000 (another connection of the same author took over, for example a
+    second PC), it waits 60 s before reconnecting, so two installations do not take turns every
+    second.
 
 ### Received data
 
@@ -257,16 +291,25 @@ the next day.
   - **Tables:**
     - `meta` (group, leader);
     - `log`, `heads`, `quota`, `status`;
-    - `roster`, the parsed roster envelopes, a few rows per group;
-    - `members`, derived from `roster` after each roster change.
+    - `roster`, the parsed roster envelopes that passed the checks, a few rows per group.
+
+    Membership is computed from `roster` in memory and recomputed after each roster change and
+    after a wake from hibernation. A few rows read cost nothing that matters; a `members` table
+    would cost writes.
   - **WebSockets** use the Hibernation API. Per-socket state (author, status, the last status
     time) lives in the attachment.
   - **Checks:** the relay checks frame size, envelope structure (Spec A C2) and the Ed25519
-    signature with Web Crypto (`Ed25519`) on every envelope. It parses only roster payloads, with
-    the same rules as S1 and S10. It never validates or projects other payloads (ADR-0007), and
-    never evaluates content in B1.
-  - **Cleanup:** `quota` rows older than two days are deleted when the first frame of a new UTC
-    day is accepted.
+    signature with Web Crypto (`Ed25519`) on every envelope. It refuses small-order public keys,
+    as the client does.
+    - It parses only roster payloads, with the rules of S1 and S2.
+    - A roster envelope must also be in canonical form: re-encoding the parsed object must give the
+      received bytes. This refuses duplicate keys and number spellings that Python reads
+      differently.
+    - A member's signed envelope whose roster payload fails these checks is still stored and
+      served, as on the clients (ADR-0007), but never changes membership.
+    - It never validates or projects other payloads, and never evaluates content in B1.
+  - **Cleanup:** when the first frame of a new UTC day is accepted, the `quota` rows of past days
+    are logged as one daily-total line per day, then deleted. Each past day is logged once.
 
 ### Client
 
@@ -308,10 +351,17 @@ the next day.
 
 - `crew_events.py`: the roster kinds' validators (S1), the category whitelist (S10), the
   timestamp plausibility (S11) and the status validator (S8). Pure.
-- `crew_roster.py`: membership from roster envelopes (S2), the invite string (S5) and
-  `group.json` (S4). Pure except for the file.
-- `crew_store.py`: the projection gate (S3), the `crew_members` projection, the own-first system
-  merge (S11), the log-volume rules (S12) and `heads()`.
+- `crew_roster.py`: membership from roster envelopes (S2), the invite string and link (S5), the
+  webhook URL check (S5a) and `group.json` (S4). Pure except for the file.
+- `crew_store.py`:
+  - the projection gate (S3), with membership computed from the log's roster envelopes and cached
+    in memory;
+  - the own-first system merge (S11) and the log-volume rules (S12);
+  - `heads()`;
+  - a batch insert for received envelopes, one transaction per batch.
+- `crew_group.py`: the controller behind the dialog: create, join, invite, remove, leave, pause,
+  webhook. Testable without Tk.
+- `crew_discord.py`: the invite message and its post (S5a).
 - `crew_protocol.py`: frame build and parse, the auth message, status bytes. Pure, no I/O.
 - `crew_sync.py`: the connection thread, the Tk-loop applier, the status sender, pause, backoff,
   `CrewBoard`, and the connection state for the dialog.
