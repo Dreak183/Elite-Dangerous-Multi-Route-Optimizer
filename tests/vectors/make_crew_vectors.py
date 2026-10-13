@@ -166,29 +166,56 @@ def build() -> dict:
         return canonical(envelope(A, 1, 'visit', '2026-10-13T10:00:00Z', {'pad': 'x' * n}, 'ab' * 16))
 
     pad = 16384 - len(padded(0))
-    # Byte-level variants where Python's json and JavaScript's JSON.parse could disagree. The relay
-    # requires canonical bytes for every envelope (valid False); Python's parse_envelope checks the
-    # structure only, so it still accepts non-canonical spacing and key order (python_valid True).
-    spaced_env = json.dumps(group_obj, sort_keys=True, separators=(', ', ': ')).encode()
-    unsorted_env = json.dumps(group_obj, separators=(',', ':')).encode()
+    # Byte-level variants where Python's json and JavaScript's JSON.parse could disagree.
+    # `valid` is the relay's verdict, `python_valid` (when it differs) the client's parse_envelope.
+    # The relay requires canonical bytes for ROSTER kinds only (their payloads carry no floats; JS
+    # cannot reproduce Python's float spelling, so canonical bytes of other kinds are not checkable
+    # there). For every kind it refuses a BOM and invalid UTF-8. Float-spelled seq/v and duplicate keys
+    # in non-roster envelopes are a relay leniency that clients refuse (relay true, python false).
+    # `layer: roster` cases are judged by the client's parse_roster_envelope, the roster entry point.
+    plain = envelope(A, 3, 'visit', '2026-10-13T10:10:00Z',
+                     {'commander': 'Alice', 'system': 'Sol', 'address': '1', 'coords': None}, 'ab' * 16)
+    plain_data = canonical(plain)
+    floats = envelope(A, 3, 'visit', '2026-10-13T10:10:00Z',
+                      {'commander': 'Alice', 'system': 'Sol', 'address': '1',
+                       'coords': [100.0, -0.0, 1e-07], 'extra': [0.0, -0.0, 1e16, 1e-07, 100.0]},
+                      'ab' * 16)
+    join_obj = envelope(*SPECS['join_alice'])
+    join_data = canonical(join_obj)
     raw_cases = [
-        ('raw_canonical', group_data, True, None),
-        ('raw_16384_bytes', padded(pad), True, None),
-        ('raw_16385_bytes', padded(pad + 1), False, None),
-        ('raw_float_seq_3_0', group_data.replace(b'"seq":1,', b'"seq":3.0,'), False, None),
-        ('raw_float_seq_3e0', group_data.replace(b'"seq":1,', b'"seq":3e0,'), False, None),
-        ('raw_float_v', group_data.replace(b'"v":1}', b'"v":1.0}'), False, None),
-        ('raw_duplicate_seq_visit', visit_data.replace(b'"seq":3,', b'"seq":3,"seq":3,'), False, None),
-        ('raw_bom', b'\xef\xbb\xbf' + group_data, False, None),
-        ('raw_invalid_utf8', group_data.replace(b'Crew', b'Cr\xffw'), False, None),
-        ('raw_spaced', spaced_env, False, True),
-        ('raw_unsorted_keys', unsorted_env, False, True),
+        # (name, bytes, relay verdict, python verdict or None when equal, layer)
+        ('raw_canonical', group_data, True, None, None),
+        ('raw_16384_bytes', padded(pad), True, None, None),
+        ('raw_16385_bytes', padded(pad + 1), False, None, None),
+        ('raw_bom', b'\xef\xbb\xbf' + group_data, False, None, None),
+        ('raw_invalid_utf8', group_data.replace(b'Crew', b'Cr\xffw'), False, None, None),
+        ('raw_visit_with_floats', visit_data, True, None, None),
+        ('raw_float_spellings', canonical(floats), True, None, None),
+        ('raw_float_seq_3_0', plain_data.replace(b'"seq":3,', b'"seq":3.0,'), True, False, None),
+        ('raw_float_seq_3e0', plain_data.replace(b'"seq":3,', b'"seq":3e0,'), True, False, None),
+        ('raw_float_v', plain_data.replace(b'"v":1}', b'"v":1.0}'), True, False, None),
+        ('raw_duplicate_seq_visit', plain_data.replace(b'"seq":3,', b'"seq":3,"seq":3,'), True, False,
+         None),
+        ('raw_spaced', json.dumps(plain, sort_keys=True, separators=(', ', ': ')).encode(), True, None,
+         None),
+        ('raw_unsorted_keys', json.dumps(plain, separators=(',', ':')).encode(), True, None, None),
     ]
-    for name, data, relay_ok, python_ok in raw_cases:
-        assert (name == 'raw_canonical' or data != group_data), name
+    for label, obj, data in (('group', group_obj, group_data), ('join', join_obj, join_data)):
+        raw_cases += [
+            (f'raw_{label}_spaced', json.dumps(obj, sort_keys=True, separators=(', ', ': ')).encode(),
+             False, None, 'roster'),
+            (f'raw_{label}_unsorted_keys', json.dumps(obj, separators=(',', ':')).encode(),
+             False, None, 'roster'),
+            (f'raw_{label}_duplicate_seq', data.replace(b'"seq":1,', b'"seq":1,"seq":1,'),
+             False, None, 'roster'),
+        ]
+    for name, data, relay_ok, python_ok, layer in raw_cases:
+        assert name == 'raw_canonical' or data != group_data, name
         case_ = {'name': name, 'e': b64(data), 'valid': relay_ok}
         if python_ok is not None:
             case_['python_valid'] = python_ok
+        if layer:
+            case_['layer'] = layer
         structure.append(case_)
     tampered = bytearray(group_data)
     tampered[-3] ^= 1

@@ -41,11 +41,14 @@ def test_committed_vectors_match_a_fresh_generation():
 
 def test_structure_cases(v):
     for case in v["structure_cases"]:
-        try:
-            ev.parse_envelope(raw(case["e"]))
-            ok = True
-        except ev.EnvelopeError:
-            ok = False
+        if case.get("layer") == "roster":
+            ok = parse_roster_envelope(raw(case["e"]), frozenset(), now(v)) is not None
+        else:
+            try:
+                ev.parse_envelope(raw(case["e"]))
+                ok = True
+            except ev.EnvelopeError:
+                ok = False
         assert ok is case.get("python_valid", case["valid"]), case["name"]
 
 
