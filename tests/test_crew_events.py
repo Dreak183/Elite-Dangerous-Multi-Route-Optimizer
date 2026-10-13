@@ -138,3 +138,181 @@ def test_parse_rejects_missing_and_extra_keys():
 def test_parse_accepts_a_uuid7_event_id():
     env = envelope(event_id=ev.uuid7())
     assert ev.parse_envelope(raw(env))["event_id"] == env["event_id"]
+
+
+# --- validators (C12) ------------------------------------------------------------------
+
+ADDR = "10477373803"
+NOTE_ID = "01890a5d-ac96-774b-bcce-b302099a8057"
+
+
+def good(kind):
+    return {
+        "visit": {"commander": "Jameson", "system": "Sol", "address": ADDR, "coords": [0.0, 0, -1.5]},
+        "honk": {"system": "Sol", "address": ADDR, "body_count": 12, "non_body_count": 30},
+        "all_bodies": {"system": "Sol", "address": ADDR, "count": 12},
+        "body": {"system": "Sol", "address": ADDR, "body_id": 3, "name": "Earth", "tier": "full",
+                 "star_type": None, "planet_class": "Earthlike body", "moon": False, "landable": False,
+                 "terraform": "", "was_discovered": True, "was_mapped": True, "scan_type": "Detailed"},
+        "signals": {"system": "Sol", "address": ADDR, "body_id": 3, "body_name": "Earth", "source": "saa",
+                    "counts": {"biological": 2, "human": 1},
+                    "genera": ["$Codex_Ent_Bacterial_Genus_Name;"]},
+        "find": {"mode": "auto", "find_kind": "codex", "system": "Sol", "address": ADDR,
+                 "body_name": "Earth", "body_id": 3,
+                 "detail": {"entry_id": 2420101, "name": "$Codex_Ent_Gas_Clds_Yellow_Name;",
+                            "category": "$Codex_Category_Biology;",
+                            "subcategory": "$Codex_SubCategory_Organic_Structures;", "new_entry": False}},
+        "note": {"note_id": NOTE_ID, "system": "Sol", "address": ADDR, "text": "Nice rings", "deleted": False},
+    }[kind]
+
+
+MANUAL_FIND = {"mode": "manual", "find_id": NOTE_ID, "find_kind": "other", "system": None, "address": ADDR,
+               "body_name": None, "body_id": None, "note": "Wreck", "deleted": False}
+
+
+@pytest.mark.parametrize("kind", ["visit", "honk", "all_bodies", "body", "signals", "find", "note"])
+def test_good_payloads_pass(kind):
+    ev.validate_payload(kind, 1, good(kind))
+    assert ev.is_known(kind, 1)
+
+
+def test_manual_find_passes_and_other_auto_finds_pass():
+    ev.validate_payload("find", 1, MANUAL_FIND)
+    for find_kind, detail, body_id in [("biological", {"count": 3}, 4),
+                                       ("stellar_phenomenon", {"signal": "$Fixed_Event_Life_Cloud;"}, None),
+                                       ("valuable_body", {"planet_class": "Water world", "terraform": "Terraformable"}, 4)]:
+        payload = dict(good("find"), find_kind=find_kind, detail=detail, body_id=body_id)
+        ev.validate_payload("find", 1, payload)
+
+
+def test_unknown_kind_or_version():
+    assert not ev.is_known("visit", 2)
+    assert not ev.is_known("chat", 1)
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("visit", 2, good("visit"))
+
+
+HOSTILE_STRINGS = ["", "a\x00b", "a\nb", "a\x1bb", "a\x7fb", "a\x85b", "a\u202eb", "a\u2066b",
+                   "a\ud800b", "x" * 129]
+
+
+@pytest.mark.parametrize("value", HOSTILE_STRINGS)
+def test_hostile_names_are_rejected(value):
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("visit", 1, dict(good("visit"), system=value))
+
+
+def test_text_limit_is_2000_and_empty_text_is_allowed():
+    ev.validate_payload("note", 1, dict(good("note"), text=""))
+    ev.validate_payload("note", 1, dict(good("note"), text="x" * 2000))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("note", 1, dict(good("note"), text="x" * 2001))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("note", 1, dict(good("note"), text="x" * 10_000))
+
+
+@pytest.mark.parametrize("kind,key,value", [
+    ("honk", "body_count", True),
+    ("honk", "body_count", 1.0),
+    ("honk", "body_count", -1),
+    ("honk", "body_count", 10_001),
+    ("honk", "body_count", 2**53 + 1),
+    ("visit", "coords", [0, 0, float("nan")]),
+    ("visit", "coords", [0, 0, float("inf")]),
+    ("visit", "coords", [0, 0]),
+    ("visit", "coords", [0, 0, True]),
+    ("visit", "address", 10477373803),
+    ("visit", "address", "-1"),
+    ("visit", "address", "1" * 21),
+    ("visit", "address", str(2**64)),
+    ("visit", "address", "12a"),
+    ("body", "moon", 0),
+    ("body", "tier", "great"),
+    ("body", "scan_type", "NavBeacon"),
+    ("signals", "source", "eddn"),
+    ("signals", "counts", {"biological": True}),
+    ("signals", "counts", {"weird": 1}),
+    ("signals", "genera", "not a list"),
+    ("signals", "genera", ["ok"] * 65),
+    ("note", "note_id", "not-a-uuid"),
+    ("note", "deleted", "no"),
+])
+def test_bad_values_are_rejected(kind, key, value):
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload(kind, 1, dict(good(kind), **{key: value}))
+
+
+@pytest.mark.parametrize("kind", ["visit", "honk", "all_bodies", "body", "signals", "find", "note"])
+def test_unknown_and_missing_keys_are_rejected(kind):
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload(kind, 1, dict(good(kind), extra=1))
+    payload = good(kind)
+    payload.pop(next(iter(payload)))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload(kind, 1, payload)
+
+
+def test_payload_must_be_an_object():
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("visit", 1, ["Sol"])
+
+
+def test_body_cross_field_rules():
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("body", 1, dict(good("body"), star_type="G"))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("body", 1, dict(good("body"), planet_class=None))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("body", 1, dict(good("body"), scan_type="Basic"))
+    ev.validate_payload("body", 1, dict(good("body"), scan_type="Basic", tier="basic",
+                                        landable=None, terraform=None))
+
+
+def test_fss_signals_carry_no_genera():
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("signals", 1, dict(good("signals"), source="fss"))
+
+
+def test_find_rules():
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(good("find"), mode="maybe"))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(good("find"), detail={"count": 1}))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(good("find"), body_id=None))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(good("find"), find_kind="other"))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(MANUAL_FIND, detail={}))
+    with pytest.raises(ev.PayloadError):
+        ev.validate_payload("find", 1, dict(MANUAL_FIND, note="x" * 2001))
+
+
+# --- natural keys and drafts -----------------------------------------------------------
+
+def test_natural_keys():
+    t = "2026-10-12T10:00:00Z"
+    assert ev.natural_key("visit", t, good("visit")) == (ADDR, t)
+    assert ev.natural_key("honk", t, good("honk")) == (ADDR, t)
+    assert ev.natural_key("all_bodies", t, good("all_bodies")) == (ADDR,)
+    assert ev.natural_key("body", t, good("body")) == (ADDR, 3, "full")
+    assert ev.natural_key("signals", t, good("signals")) == (ADDR, 3, "saa")
+    assert ev.natural_key("find", t, good("find")) == (ADDR, "codex", 2420101, 3)
+    nsp = dict(good("find"), find_kind="stellar_phenomenon", body_id=None,
+               detail={"signal": "$Fixed_Event_Life_Cloud;"})
+    assert ev.natural_key("find", t, nsp) == (ADDR, "stellar_phenomenon")
+    bio = dict(good("find"), find_kind="biological", detail={"count": 2})
+    assert ev.natural_key("find", t, bio) == (ADDR, "biological", 3)
+    assert ev.natural_key("find", t, MANUAL_FIND) is None
+    assert ev.natural_key("note", t, good("note")) is None
+
+
+def test_draft_resolves_a_deterministic_or_preset_id():
+    t = "2026-10-12T10:00:00Z"
+    d = ev.Draft("all_bodies", "F1", t, good("all_bodies"))
+    assert d.resolve_id(AUTHOR) == ev.deterministic_id(AUTHOR, "all_bodies", ADDR)
+    assert d.resolve_id(AUTHOR) != d.resolve_id("B" * 43)
+    manual = ev.Draft("note", "F1", t, good("note"), event_id=NOTE_ID)
+    assert manual.resolve_id(AUTHOR) == NOTE_ID
+    with pytest.raises(ev.PayloadError):
+        ev.Draft("note", "F1", t, good("note")).resolve_id(AUTHOR)
