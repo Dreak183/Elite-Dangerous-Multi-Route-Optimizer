@@ -1,2 +1,4 @@
 # EDMRN fork dependencies (ADR-0002); upstream's stay in requirements.txt.
 pytest>=8.0
+# Ed25519 signatures for the crew event log (ADR-0005); Apache-2.0 OR BSD-3-Clause.
+cryptography>=42
