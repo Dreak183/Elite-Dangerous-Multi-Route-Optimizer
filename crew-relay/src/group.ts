@@ -32,6 +32,7 @@ export const CLOSE_POLICY = 4008;
 const ITEM_OVERHEAD = 16; // {"e":"","s":""}, per item, as the client counts it
 const MAX_E_CHARS = Math.ceil((MAX_ENVELOPE_BYTES * 4) / 3);
 const MAX_S_CHARS = 86; // 64 bytes
+const MAX_REFUSALS = 8; // the attachment is small (2 KiB)
 const DAY_MS = 86_400_000;
 
 export function utcDay(ms: number): number {
@@ -47,6 +48,8 @@ interface Attachment {
   openedAt: number;
   author?: string;
   statusAt?: number;
+  /** author -> [first refused seq, UTC day for a daily refusal or 0]: kept for the connection. */
+  refused?: Record<string, [number, number]>;
   status?: Item;
 }
 
@@ -155,7 +158,13 @@ export class GroupRelay extends DurableObject<Env> {
 
   private async handle(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     this.sweep();
-    if (typeof message !== 'string' || utf8Size(message) > MAX_FRAME_CHARS) {
+    const stale = ws.deserializeAttachment() as Attachment | null;
+    if (stale?.state === 'hello' && Date.now() - stale.openedAt > AUTH_GRACE_MS) return; // just closed by the sweep
+    if (typeof message !== 'string') {
+      ws.close(CLOSE_POLICY, 'binary');
+      return;
+    }
+    if (utf8Size(message) > MAX_FRAME_CHARS) {
       ws.close(CLOSE_POLICY, 'too_big');
       return;
     }
@@ -291,14 +300,16 @@ export class GroupRelay extends DurableObject<Env> {
   }
 
   /** Decode and structure-check one item. 'size' marks an item over the size caps, null a malformed one. */
-  private decode(item: any): Checked | 'size' | null {
-    if (typeof item !== 'object' || item === null || typeof item.e !== 'string' || typeof item.s !== 'string') return null;
+  private decode(item: any): Checked | 'size' | { bad: true; env?: Envelope } | null {
+    if (typeof item !== 'object' || item === null || typeof item.e !== 'string' || typeof item.s !== 'string') return { bad: true };
     if (item.e.length > MAX_E_CHARS || item.s.length > MAX_S_CHARS) return 'size';
     const e = b64urlDecode(item.e, MAX_ENVELOPE_BYTES);
+    const parsed = e ? parseEnvelope(e) : null;
+    if (!e || !parsed) return { bad: true };
     const s = b64urlDecode(item.s, 64);
-    if (!e || !s || s.length !== 64) return null;
-    const parsed = parseEnvelope(e);
-    return parsed ? { item: { e: item.e, s: item.s }, e, s, env: parsed.env, text: parsed.text } : null;
+    // The envelope parses, so its author and seq are known and the err can name them.
+    if (!s || s.length !== 64) return { bad: true, env: parsed.env };
+    return { item: { e: item.e, s: item.s }, e, s, env: parsed.env, text: parsed.text };
   }
 
   // --- auth ------------------------------------------------------------------------------
@@ -306,7 +317,7 @@ export class GroupRelay extends DurableObject<Env> {
   /** A genesis or join presented with auth, checked but not stored (S7). */
   private async checkAuthEnvelope(raw: any, author: string, kind: string, group: string): Promise<{ c: Checked; entry: RosterEntry } | null> {
     const c = this.decode(raw);
-    if (c === null || c === 'size' || c.env.author !== author || c.env.kind !== kind) return null;
+    if (c === null || c === 'size' || 'bad' in c || c.env.author !== author || c.env.kind !== kind) return null;
     const entry = rosterEntry(c.env, c.text, Date.now());
     if (!entry || entry.payload.group_id !== group) return null;
     if (!(await verifySignature(author, c.s, c.e))) return null;
@@ -371,18 +382,18 @@ export class GroupRelay extends DurableObject<Env> {
   private listedHeads(roster: Roster): Record<string, number> {
     const heads = this.heads();
     const listed: Record<string, number> = {};
-    for (const a of roster.members.keys()) listed[a] = heads.get(a) ?? 0;
+    for (const [a, m] of roster.members) {
+      const head = heads.get(a) ?? 0;
+      listed[a] = m.lastSeq === null ? head : Math.min(head, m.lastSeq); // as catch-up serves (S7)
+    }
     return listed;
   }
 
-  /** The roster with a non-member's `join` added, if that join admits its author and the invite is unexpired (S7). */
-  private async withJoin(c: Checked, now: number, roster: Roster): Promise<{ roster: Roster; entry: RosterEntry } | null> {
+  /** The roster with a non-member's `join` added, if that join admits its author under S2 (S7). */
+  private async withJoin(c: Checked, now: number, roster: Roster, pending: RosterEntry[]): Promise<{ roster: Roster; entry: RosterEntry } | null> {
     const entry = rosterEntry(c.env, c.text, now);
     if (!entry || entry.payload.group_id !== roster.group) return null;
-    const invite = this.rosterEntries().find((r) => r.kind === 'invite' && r.author === roster.leader && r.payload.invite_id === entry.payload.invite_id);
-    const expires = invite ? realStamp(invite.payload.expires_at) : null;
-    if (expires === null || now > expires) return null;
-    const candidate = await computeRoster([...this.rosterEntries(), entry], roster.group, roster.leader);
+    const candidate = await computeRoster([...this.rosterEntries(), ...pending, entry], roster.group, roster.leader);
     return candidate.members.has(c.env.author) ? { roster: candidate, entry } : null;
   }
 
@@ -430,82 +441,120 @@ export class GroupRelay extends DurableObject<Env> {
   private async receive(ws: WebSocket, frame: any): Promise<void> {
     const items = frame.items;
     if (!Array.isArray(items) || items.length > MAX_EVS_ITEMS) return this.error(ws, 'bad_frame');
-    // The whole frame is refused if any item is unusable or the items together are too big: an
-    // item skipped in the middle would let the head pass a hole (S7).
     let total = 0;
     for (const item of items) {
       if (typeof item?.e === 'string' && typeof item?.s === 'string') total += item.e.length + item.s.length + ITEM_OVERHEAD;
     }
-    if (total > MAX_EVS_CHARS) return this.error(ws, 'too_big');
-    const checked: Checked[] = [];
-    for (const item of items) {
-      const c = this.decode(item);
-      if (c === 'size') return this.error(ws, 'too_big');
-      if (c === null) return this.error(ws, 'bad_frame');
-      checked.push(c);
+    if (total > MAX_EVS_CHARS) {
+      // No author is known, so the client cannot roll its head back: end the session, the next `have` is authoritative.
+      this.error(ws, 'too_big');
+      return ws.close(CLOSE_POLICY, 'too_big');
     }
     let roster = await this.currentRoster();
     if (!roster) return;
+    const att = ws.deserializeAttachment() as Attachment;
     const membersBefore = new Set(roster.members.keys());
     const now = Date.now();
     const day = utcDay(now);
     this.cleanup(day);
     let groupLeft = GROUP_DAILY - (this.exec<{ n: number }>('SELECT COALESCE(SUM(n), 0) AS n FROM quota WHERE day = ?', day)[0]?.n ?? 0);
     const heads = this.heads();
+
+    // Refusals last for the connection (S7): a client sends all of an author's frames before it reads
+    // an err, so a refusal at seq 3 must also refuse a roster envelope at seq 5 in a later frame, or the
+    // head would pass the hole. Daily refusals (quota) end with the UTC day.
+    const refused: Record<string, [number, number]> = { ...(att.refused ?? {}) };
+    const isRefused = (author: string, seq: number): boolean => {
+      const r = refused[author];
+      return r !== undefined && (r[1] === 0 || r[1] === day) && seq >= r[0];
+    };
+    const refuse = (author: string, seq: number, code: string, daily = false): void => {
+      this.error(ws, code, author, seq);
+      const held = refused[author];
+      if (!held || (held[1] !== 0 && held[1] !== day) || seq < held[0]) refused[author] = [seq, daily ? day : 0];
+    };
+
+    // Phase 1: judge every item (asynchronous signature checks), writing nothing.
+    interface Op { c: Checked; entry: RosterEntry | null; headless: boolean }
+    const ops: Op[] = [];
     const advanced = new Map<string, number>();
     const counts = new Map<string, number>();
     const used = new Map<string, number>();
-    const stopped = new Set<string>();
-    const forward: Item[] = [];
-    let rosterChanged = false;
-    for (const c of checked) {
+    const pending: RosterEntry[] = [];
+    let closeAfter: string | null = null;
+    for (const item of items) {
+      const c = this.decode(item);
+      if (c === 'size' || (c !== null && 'bad' in c && !c.env)) {
+        this.error(ws, c === 'size' ? 'too_big' : 'bad_frame');
+        closeAfter = c === 'size' ? 'too_big' : 'bad item';
+        break; // what came before is kept; nothing after an unattributable item is
+      }
+      if (c === null) break;
+      if ('bad' in c) {
+        refuse(c.env!.author, c.env!.seq, 'bad_frame');
+        continue;
+      }
       const { env, text } = c;
       const author = env.author;
-      if (stopped.has(author)) continue;
-      let member = roster.members.get(author);
+      if (isRefused(author, env.seq)) continue;
+      const member = roster.members.get(author);
       if (!member && env.kind === 'join') {
         // Re-seed (S7): a non-member's join that admits its author is stored and changes the roster,
         // but, as at auth, it does not move the head and is not forwarded: the member's earlier
-        // envelopes, with lower seq, still have to arrive first.
-        if (!(await verifySignature(author, c.s, c.e))) { this.error(ws, 'bad_sig', author, env.seq); stopped.add(author); continue; }
-        const admitted = await this.withJoin(c, now, roster);
+        // envelopes, with lower seq, still have to arrive first. The invite's expiry on the relay
+        // clock is an auth-time rule only: an emptied relay must learn every member from any replica.
+        if (!(await verifySignature(author, c.s, c.e))) { refuse(author, env.seq, 'bad_sig'); continue; }
+        const admitted = await this.withJoin(c, now, roster, pending);
         if (admitted) {
           roster = admitted.roster;
-          this.storeLog(c);
-          this.insertRoster(admitted.entry);
-          rosterChanged = true;
+          pending.push(admitted.entry);
+          ops.push({ c, entry: admitted.entry, headless: true });
           continue;
         }
       }
-      if (!member) { this.error(ws, 'not_member', author, env.seq); stopped.add(author); continue; }
-      if (!admits(roster, author, env.seq)) { this.error(ws, 'removed', author, env.seq); stopped.add(author); continue; }
+      if (!member) { refuse(author, env.seq, 'not_member'); continue; }
+      if (!admits(roster, author, env.seq)) { refuse(author, env.seq, 'removed'); continue; }
       const head = advanced.get(author) ?? heads.get(author) ?? 0;
       if (env.seq <= head) continue;
-      if (!(await verifySignature(author, c.s, c.e))) { this.error(ws, 'bad_sig', author, env.seq); stopped.add(author); continue; }
-      const isRoster = ROSTER_KINDS.has(env.kind);
-      if (!isRoster) {
+      if (!(await verifySignature(author, c.s, c.e))) { refuse(author, env.seq, 'bad_sig'); continue; }
+      // Only roster envelopes that can change membership are exempt from the quotas (S14): the
+      // leader's group, invite and remove. Every other envelope counts, a member's own join included.
+      const entry = ROSTER_KINDS.has(env.kind) ? rosterEntry(env, text, now) : null;
+      const exempt = entry !== null && author === roster.leader;
+      if (!exempt) {
         if (!used.has(author)) {
           used.set(author, this.exec<{ n: number }>('SELECT n FROM quota WHERE day = ? AND author = ?', day, author)[0]?.n ?? 0);
         }
-        if (used.get(author)! + (counts.get(author) ?? 0) >= MEMBER_DAILY) { this.error(ws, 'quota', author, env.seq); stopped.add(author); continue; }
-        if (groupLeft <= 0) { this.error(ws, 'group_quota', author, env.seq); stopped.add(author); continue; }
-      }
-      this.storeLog(c);
-      advanced.set(author, env.seq);
-      if (isRoster) {
-        const entry = rosterEntry(env, text, now);
-        if (entry && this.insertRoster(entry)) rosterChanged = true;
-      } else {
+        if (used.get(author)! + (counts.get(author) ?? 0) >= MEMBER_DAILY) { refuse(author, env.seq, 'quota', true); continue; }
+        if (groupLeft <= 0) { refuse(author, env.seq, 'group_quota', true); continue; }
         counts.set(author, (counts.get(author) ?? 0) + 1);
         groupLeft -= 1;
       }
-      forward.push(c.item);
+      advanced.set(author, env.seq);
+      // The roster table only needs what computeRoster can use: the leader's envelopes and joins.
+      ops.push({ c, entry: entry !== null && (author === roster.leader || entry.kind === 'join') ? entry : null, headless: false });
     }
-    for (const [author, seq] of advanced) {
-      this.exec('INSERT INTO heads (author, seq) VALUES (?, ?) ON CONFLICT (author) DO UPDATE SET seq = excluded.seq', author, seq);
-    }
-    for (const [author, n] of counts) {
-      this.exec('INSERT INTO quota (day, author, n) VALUES (?, ?, ?) ON CONFLICT (day, author) DO UPDATE SET n = n + excluded.n', day, author, n);
+
+    // Phase 2: every write of the frame in one synchronous transaction, after all checks.
+    let rosterChanged = false;
+    const forward: Item[] = [];
+    this.ctx.storage.transactionSync(() => {
+      for (const op of ops) {
+        this.storeLog(op.c);
+        if (op.entry && this.insertRoster(op.entry)) rosterChanged = true;
+        if (!op.headless) forward.push(op.c.item);
+      }
+      for (const [author, seq] of advanced) {
+        this.exec('INSERT INTO heads (author, seq) VALUES (?, ?) ON CONFLICT (author) DO UPDATE SET seq = excluded.seq', author, seq);
+      }
+      for (const [author, n] of counts) {
+        this.exec('INSERT INTO quota (day, author, n) VALUES (?, ?, ?) ON CONFLICT (day, author) DO UPDATE SET n = n + excluded.n', day, author, n);
+      }
+    });
+    if (Object.keys(refused).length > MAX_REFUSALS) {
+      closeAfter = closeAfter ?? 'too many refusals';
+    } else {
+      ws.serializeAttachment({ ...att, refused } satisfies Attachment);
     }
     if (forward.length) this.sendItems((f) => this.broadcast(ws, f), forward);
     if (rosterChanged) {
@@ -520,6 +569,7 @@ export class GroupRelay extends DurableObject<Env> {
         this.broadcast(null, { t: 'have', heads: this.listedHeads(updated) });
       }
     }
+    if (closeAfter) ws.close(CLOSE_POLICY, closeAfter);
   }
 
   // --- status (Task 14) ---------------------------------------------------------------------

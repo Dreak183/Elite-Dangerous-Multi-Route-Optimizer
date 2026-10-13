@@ -164,8 +164,11 @@ the next day.
     - An envelope at or below the head is a duplicate and is ignored. One above it is accepted,
       even across a gap, because a lost database can leave a permanent gap in an author's `seq`
       (Spec A C4).
-    - If the relay refuses an envelope (quota, size), it refuses the rest of that author's
-      envelopes in the frame, so the head never passes a hole.
+    - If the relay refuses an envelope (quota, bad signature, removal), it refuses every later
+      envelope of that author on the connection, in later frames and roster kinds included, so
+      the head never passes a hole. A quota refusal ends with the UTC day. An item whose author
+      the relay cannot tell (oversize, undecodable) ends the session with 4008 after the items
+      before it are stored; the next `have` is authoritative.
   - A `genesis` or `join` presented with `auth` is stored in the log and recorded as a roster
     change, but does not move the head. The new member's earlier envelopes, with lower `seq`, still
     upload. When the upload reaches the stored envelope, the insert is a no-op and the head moves
@@ -252,7 +255,10 @@ the next day.
   - Each member may store at most 5,000 envelopes per UTC day (`err quota`).
   - The group may store at most 80,000 per UTC day (`err group_quota`). The rest of the account's
     100,000 stays as headroom for status rows and other Workers.
-  - Roster envelopes are exempt from both limits.
+  - Only roster envelopes that can affect membership are exempt from both limits: the leader's
+    `group`, `invite` and `remove` envelopes that pass the roster checks (S1, S2). Every other
+    envelope counts, including a member's own `join` and `invite`-kind envelopes of non-leaders.
+    A non-member's `join` that admits its author is not an upload and is not counted.
   - Refused envelopes are offered again at the next `have`, so nothing is lost; it arrives a day
     later.
 - S15. **Requests.** Envelopes travel in frames of up to 100. Cloudflare bills incoming WebSocket
