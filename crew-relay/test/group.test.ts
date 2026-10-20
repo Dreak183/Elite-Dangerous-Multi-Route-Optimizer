@@ -461,14 +461,14 @@ describe('frames', () => {
     });
   });
 
-  it('an item with a good envelope and a bad signature field names author and seq and refuses the author onward', async () => {
+  it('an item with a good envelope and a broken signature field answers bad_sig, naming author and seq and refuses the author onward', async () => {
     const group = newGroup();
     const leader = await keyFor('leader');
     const { client } = await createGroupAndUpload(group, leader);
     await client.drain();
     const broken = { ...(await visit(leader, 3)), s: 'A' };
     client.send({ t: 'evs', items: [await visit(leader, 2), broken] });
-    expect(await client.nextOf('err')).toMatchObject({ code: 'bad_frame', author: leader.author, seq: 3 });
+    expect(await client.nextOf('err')).toMatchObject({ code: 'bad_sig', author: leader.author, seq: 3 });
     client.send({ t: 'evs', items: [await visit(leader, 4)] });
     await client.drain();
     await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
@@ -642,7 +642,7 @@ describe('connection handling', () => {
     }
   });
 
-  it('the relay\'s have caps a removed member\'s head at last_seq', async () => {
+  it('the relay\'s have lists a removed member\'s stored head uncapped; catch-up serves only up to last_seq', async () => {
     const group = newGroup();
     const { leader, alice, leaderClient, inviteId } = await groupWithInvite(group);
     const join = await joinEnvelope(group, alice, inviteId, 1);
@@ -653,6 +653,146 @@ describe('connection handling', () => {
     leaderClient.send({ t: 'evs', items: [await envelope(leader, 3, 'remove', { group_id: group, member: alice.author, last_seq: 2 })] });
     await aliceClient.closed;
     const again = await authed(group, leader);
-    expect((await again.nextOf('have')).heads[alice.author]).toBe(2);
+    expect((await again.nextOf('have')).heads[alice.author]).toBe(3);
+    again.send({ t: 'have', heads: {} });
+    const served = items(await again.drain(300)).map(decode).filter((e: any) => e.author === alice.author).map((e: any) => e.seq);
+    expect(served).toEqual([1, 2]);
+  });
+});
+
+async function strangers(count: number): Promise<Key[]> {
+  const out: Key[] = [];
+  for (let i = 0; i < count; i++) {
+    const pair = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign'])) as CryptoKeyPair;
+    const raw = new Uint8Array((await crypto.subtle.exportKey('raw', pair.publicKey)) as ArrayBuffer);
+    out.push({
+      author: b64urlEncode(raw),
+      sign: async (data) => new Uint8Array(await crypto.subtle.sign({ name: 'Ed25519' }, pair.privateKey, data)),
+    });
+  }
+  return out;
+}
+
+describe('closing sockets and the refusal map', () => {
+  const logSeqs = (instance: GroupRelay, author: string) =>
+    instance.exec<{ seq: number }>('SELECT seq FROM log WHERE author = ? ORDER BY seq', author).map((r) => r.seq);
+
+  it('C1: a frame queued behind a 4008 close is not processed', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    client.send({ t: 'evs', items: [await visit(leader, 2), { e: 'A'.repeat(21_847), s: 'A'.repeat(86) }] });
+    client.send({ t: 'evs', items: [await visit(leader, 4)] });
+    expect((await client.closed).code).toBe(4008);
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, leader.author)).toEqual([1, 2]);
+      expect(headOf(instance, leader.author)).toBe(2);
+    });
+  });
+
+  it('C1: the same for the aggregate-size close', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    client.send({ t: 'evs', items: new Array(25).fill({ e: 'A'.repeat(21_846), s: 'A'.repeat(86) }) });
+    client.send({ t: 'evs', items: [await visit(leader, 2)] });
+    expect((await client.closed).code).toBe(4008);
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, leader.author)).toEqual([1]);
+    });
+  });
+
+  it('C2: beyond the refusal cap the map is still saved and a queued frame is judged with it', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      instance.exec('INSERT INTO quota (day, author, n) VALUES (?, ?, ?)', utcDay(Date.now()), leader.author, MEMBER_DAILY);
+    });
+    const others = await strangers(65);
+    const crowd = [];
+    for (const key of others) crowd.push(await visit(key, 1));
+    client.send({ t: 'evs', items: [await visit(leader, 2), ...crowd] });
+    client.send({ t: 'evs', items: [await envelope(leader, 3, 'invite', {
+      group_id: group, invite_id: '01920000-0000-7000-8000-00000000ee01', token_hash: await sha256hex(TOKEN),
+      expires_at: stamp(3_600_000), label: null,
+    })] });
+    expect((await client.closed).code).toBe(4008);
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, leader.author)).toEqual([1]);
+    });
+  });
+
+  it('more than eight refused authors do not end the session', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    const crowd = [];
+    for (const key of await strangers(12)) crowd.push(await visit(key, 1));
+    client.send({ t: 'evs', items: crowd });
+    await client.drain(300);
+    client.send({ t: 'evs', items: [await visit(leader, 2)] });
+    const outcome = await Promise.race([client.closed.then(() => 'closed'), new Promise((r) => setTimeout(() => r('open'), 300))]);
+    expect(outcome).toBe('open');
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, leader.author)).toEqual([1, 2]);
+    });
+  });
+
+  it('expired daily refusals are pruned and do not count toward the cap', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    await runInDurableObject(relayFor(group), async (_i: GroupRelay, state) => {
+      for (const ws of state.getWebSockets()) {
+        const att = ws.deserializeAttachment();
+        const refused: Record<string, [number, number]> = {};
+        for (let i = 0; i < 70; i++) refused[`${String(i).padStart(2, '0')}${'Z'.repeat(41)}`] = [5, utcDay(Date.now()) - 1];
+        ws.serializeAttachment({ ...att, refused });
+      }
+    });
+    const [stranger] = await strangers(1);
+    client.send({ t: 'evs', items: [await visit(stranger, 1)] });
+    expect((await client.nextOf('err')).code).toBe('not_member');
+    const outcome = await Promise.race([client.closed.then(() => 'closed'), new Promise((r) => setTimeout(() => r('open'), 300))]);
+    expect(outcome).toBe('open');
+    await runInDurableObject(relayFor(group), async (_i: GroupRelay, state) => {
+      for (const ws of state.getWebSockets()) expect(Object.keys(ws.deserializeAttachment().refused)).toEqual([stranger.author]);
+    });
+  });
+
+  it('the writes of a frame are one transaction: a failure midway leaves nothing', async () => {
+    const group = newGroup();
+    const leader = await keyFor('leader');
+    const { client } = await createGroupAndUpload(group, leader);
+    await client.drain();
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      instance.exec("CREATE TRIGGER boom BEFORE INSERT ON quota BEGIN SELECT RAISE(ABORT, 'boom'); END");
+    });
+    client.send({ t: 'evs', items: [await visit(leader, 2), await visit(leader, 3)] });
+    expect((await client.closed).code).toBe(1011);
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, leader.author)).toEqual([1]);
+      expect(headOf(instance, leader.author)).toBe(1);
+    });
+  });
+
+  it('a member\'s own join is not stored in the roster table again', async () => {
+    const group = newGroup();
+    const { alice, leaderClient, inviteId } = await groupWithInvite(group);
+    const aliceClient = await authed(group, alice, { join: await joinEnvelope(group, alice, inviteId, 1) });
+    await aliceClient.nextOf('have');
+    await leaderClient.drain();
+    aliceClient.send({ t: 'evs', items: [await joinEnvelope(group, alice, inviteId, 9)] });
+    await aliceClient.drain(300);
+    await runInDurableObject(relayFor(group), async (instance: GroupRelay) => {
+      expect(logSeqs(instance, alice.author)).toEqual([1, 9]);
+      expect(instance.exec('SELECT 1 FROM roster WHERE author = ?', alice.author).length).toBe(1);
+    });
   });
 });

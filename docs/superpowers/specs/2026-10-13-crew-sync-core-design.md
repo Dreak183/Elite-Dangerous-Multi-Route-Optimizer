@@ -256,7 +256,7 @@ the next day.
   - The group may store at most 80,000 per UTC day (`err group_quota`). The rest of the account's
     100,000 stays as headroom for status rows and other Workers.
   - Only roster envelopes that can affect membership are exempt from both limits: the leader's
-    `group`, `invite` and `remove` envelopes that pass the roster checks (S1, S2). Every other
+    `group`, `invite`, `remove` and `join` envelopes that pass the roster checks (S1, S2). Every other
     envelope counts, including a member's own `join` and `invite`-kind envelopes of non-leaders.
     A non-member's `join` that admits its author is not an upload and is not counted.
   - Refused envelopes are offered again at the next `have`, so nothing is lost; it arrives a day

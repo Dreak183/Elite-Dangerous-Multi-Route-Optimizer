@@ -32,7 +32,9 @@ export const CLOSE_POLICY = 4008;
 const ITEM_OVERHEAD = 16; // {"e":"","s":""}, per item, as the client counts it
 const MAX_E_CHARS = Math.ceil((MAX_ENVELOPE_BYTES * 4) / 3);
 const MAX_S_CHARS = 86; // 64 bytes
-const MAX_REFUSALS = 8; // the attachment is small (2 KiB)
+// An attachment holds at most 16,384 bytes (knowledge/group-sync-transport.md). Worst case here: 64 refusals
+// of about 70 bytes (4.5 KB) plus a status of 8 KiB of canonical bytes, base64url about 11 KB: under the limit.
+const MAX_REFUSALS = 64;
 const DAY_MS = 86_400_000;
 
 export function utcDay(ms: number): number {
@@ -50,6 +52,8 @@ interface Attachment {
   statusAt?: number;
   /** author -> [first refused seq, UTC day for a daily refusal or 0]: kept for the connection. */
   refused?: Record<string, [number, number]>;
+  /** Set before the relay closes the socket: frames already queued behind the close are not processed. */
+  closing?: boolean;
   status?: Item;
 }
 
@@ -148,7 +152,7 @@ export class GroupRelay extends DurableObject<Env> {
       } catch (e) {
         console.error('group relay frame failed', e);
         try {
-          ws.close(1011, 'internal error');
+          this.shut(ws, 1011, 'internal error');
         } catch {
           // already closed
         }
@@ -156,16 +160,32 @@ export class GroupRelay extends DurableObject<Env> {
     });
   }
 
+  /** Closes a socket and marks it first, so frames queued behind the close find the mark and stop. */
+  private shut(ws: WebSocket, code: number, reason: string): void {
+    try {
+      const att = ws.deserializeAttachment() as Attachment | null;
+      if (att) ws.serializeAttachment({ ...att, closing: true } satisfies Attachment);
+    } catch {
+      // already closed
+    }
+    try {
+      ws.close(code, reason);
+    } catch {
+      // already closed
+    }
+  }
+
   private async handle(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     this.sweep();
     const stale = ws.deserializeAttachment() as Attachment | null;
+    if (stale?.closing) return;
     if (stale?.state === 'hello' && Date.now() - stale.openedAt > AUTH_GRACE_MS) return; // just closed by the sweep
     if (typeof message !== 'string') {
-      ws.close(CLOSE_POLICY, 'binary');
+      this.shut(ws, CLOSE_POLICY, 'binary');
       return;
     }
     if (utf8Size(message) > MAX_FRAME_CHARS) {
-      ws.close(CLOSE_POLICY, 'too_big');
+      this.shut(ws, CLOSE_POLICY, 'too_big');
       return;
     }
     let frame: any;
@@ -179,7 +199,7 @@ export class GroupRelay extends DurableObject<Env> {
     if (!att) return;
     if (att.state === 'hello') {
       if (frame.t === 'auth') await this.auth(ws, att, frame);
-      else ws.close(CLOSE_BAD_AUTH, 'auth first');
+      else this.shut(ws, CLOSE_BAD_AUTH, 'auth first');
       return;
     }
     if (frame.t === 'have') await this.catchUp(ws, frame);
@@ -252,7 +272,7 @@ export class GroupRelay extends DurableObject<Env> {
     const now = Date.now();
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as Attachment | null;
-      if (att?.state === 'hello' && now - att.openedAt > AUTH_GRACE_MS) ws.close(CLOSE_BAD_AUTH, 'auth timeout');
+      if (att?.state === 'hello' && now - att.openedAt > AUTH_GRACE_MS) this.shut(ws, CLOSE_BAD_AUTH, 'auth timeout');
     }
   }
 
@@ -333,15 +353,15 @@ export class GroupRelay extends DurableObject<Env> {
 
   private async auth(ws: WebSocket, att: Attachment, frame: any): Promise<void> {
     const { group, author } = frame;
-    if (group !== att.group || typeof author !== 'string' || !AUTHOR.test(author)) return ws.close(CLOSE_BAD_AUTH, 'bad auth');
+    if (group !== att.group || typeof author !== 'string' || !AUTHOR.test(author)) return this.shut(ws, CLOSE_BAD_AUTH, 'bad auth');
     const sig = b64urlDecode(frame.sig, 64);
     const message = encoder.encode(`edmrn-crew-auth\n${group}\n${att.nonce}`);
-    if (!sig || sig.length !== 64 || !(await verifySignature(author, sig, message))) return ws.close(CLOSE_BAD_AUTH, 'bad signature');
+    if (!sig || sig.length !== 64 || !(await verifySignature(author, sig, message))) return this.shut(ws, CLOSE_BAD_AUTH, 'bad signature');
     let meta = this.meta();
     if (!meta) {
       // An empty group: only a valid genesis from a listed leader creates it, and nothing is written before.
       const genesis = this.leaders().has(author) ? await this.checkAuthEnvelope(frame.genesis, author, 'group', group) : null;
-      if (!genesis) return ws.close(CLOSE_FORBIDDEN, 'no group');
+      if (!genesis) return this.shut(ws, CLOSE_FORBIDDEN, 'no group');
       this.ensureSchema();
       this.exec('INSERT INTO meta (k, v) VALUES (?, ?), (?, ?)', 'group', group, 'leader', author);
       this.storeAuthEnvelope(genesis.c, genesis.entry);
@@ -354,10 +374,10 @@ export class GroupRelay extends DurableObject<Env> {
     }
     const roster = await this.currentRoster();
     const member = roster?.members.get(author);
-    if (!roster || !member) return ws.close(CLOSE_FORBIDDEN, 'not_member');
-    if (member.lastSeq !== null) return ws.close(CLOSE_FORBIDDEN, 'removed');
+    if (!roster || !member) return this.shut(ws, CLOSE_FORBIDDEN, 'not_member');
+    if (member.lastSeq !== null) return this.shut(ws, CLOSE_FORBIDDEN, 'removed');
     for (const other of this.members()) {
-      if (other !== ws && (other.deserializeAttachment() as Attachment).author === author) other.close(CLOSE_REPLACED, 'replaced');
+      if (other !== ws && (other.deserializeAttachment() as Attachment).author === author) this.shut(other, CLOSE_REPLACED, 'replaced');
     }
     ws.serializeAttachment({ ...att, state: 'member', author, statusAt: 0 } satisfies Attachment);
     if (joined) this.broadcast(ws, { t: 'have', heads: this.listedHeads(roster) });
@@ -382,10 +402,9 @@ export class GroupRelay extends DurableObject<Env> {
   private listedHeads(roster: Roster): Record<string, number> {
     const heads = this.heads();
     const listed: Record<string, number> = {};
-    for (const [a, m] of roster.members) {
-      const head = heads.get(a) ?? 0;
-      listed[a] = m.lastSeq === null ? head : Math.min(head, m.lastSeq); // as catch-up serves (S7)
-    }
+    // The stored head, uncapped: a client holding a removed member's envelopes above last_seq would otherwise
+    // upload them on every connection and draw `removed` errs. Catch-up still serves only up to the cap.
+    for (const a of roster.members.keys()) listed[a] = heads.get(a) ?? 0;
     return listed;
   }
 
@@ -448,7 +467,7 @@ export class GroupRelay extends DurableObject<Env> {
     if (total > MAX_EVS_CHARS) {
       // No author is known, so the client cannot roll its head back: end the session, the next `have` is authoritative.
       this.error(ws, 'too_big');
-      return ws.close(CLOSE_POLICY, 'too_big');
+      return this.shut(ws, CLOSE_POLICY, 'too_big');
     }
     let roster = await this.currentRoster();
     if (!roster) return;
@@ -463,7 +482,8 @@ export class GroupRelay extends DurableObject<Env> {
     // Refusals last for the connection (S7): a client sends all of an author's frames before it reads
     // an err, so a refusal at seq 3 must also refuse a roster envelope at seq 5 in a later frame, or the
     // head would pass the hole. Daily refusals (quota) end with the UTC day.
-    const refused: Record<string, [number, number]> = { ...(att.refused ?? {}) };
+    const refused: Record<string, [number, number]> = {};
+    for (const [a, r] of Object.entries(att.refused ?? {})) if (r[1] === 0 || r[1] === day) refused[a] = r; // expired daily entries drop out
     const isRefused = (author: string, seq: number): boolean => {
       const r = refused[author];
       return r !== undefined && (r[1] === 0 || r[1] === day) && seq >= r[0];
@@ -491,7 +511,7 @@ export class GroupRelay extends DurableObject<Env> {
       }
       if (c === null) break;
       if ('bad' in c) {
-        refuse(c.env!.author, c.env!.seq, 'bad_frame');
+        refuse(c.env!.author, c.env!.seq, 'bad_sig'); // the client stops an author on bad_sig, not on bad_frame
         continue;
       }
       const { env, text } = c;
@@ -531,8 +551,9 @@ export class GroupRelay extends DurableObject<Env> {
         groupLeft -= 1;
       }
       advanced.set(author, env.seq);
-      // The roster table only needs what computeRoster can use: the leader's envelopes and joins.
-      ops.push({ c, entry: entry !== null && (author === roster.leader || entry.kind === 'join') ? entry : null, headless: false });
+      // The roster table holds what computeRoster can use: the leader's group/invite/remove, and a join only when it
+      // admits a non-member (the headless path above, or auth). A member's own join is already in the table.
+      ops.push({ c, entry: entry !== null && author === roster.leader && entry.kind !== 'join' ? entry : null, headless: false });
     }
 
     // Phase 2: every write of the frame in one synchronous transaction, after all checks.
@@ -551,11 +572,9 @@ export class GroupRelay extends DurableObject<Env> {
         this.exec('INSERT INTO quota (day, author, n) VALUES (?, ?, ?) ON CONFLICT (day, author) DO UPDATE SET n = n + excluded.n', day, author, n);
       }
     });
-    if (Object.keys(refused).length > MAX_REFUSALS) {
-      closeAfter = closeAfter ?? 'too many refusals';
-    } else {
-      ws.serializeAttachment({ ...att, refused } satisfies Attachment);
-    }
+    if (Object.keys(refused).length > MAX_REFUSALS) closeAfter = closeAfter ?? 'too many refusals';
+    // Always saved, and marked closing when the socket is about to close, so a queued frame is judged with this map.
+    ws.serializeAttachment({ ...att, refused: closeAfter ? Object.fromEntries(Object.entries(refused).slice(0, MAX_REFUSALS)) : refused, closing: closeAfter ? true : undefined } satisfies Attachment);
     if (forward.length) this.sendItems((f) => this.broadcast(ws, f), forward);
     if (rosterChanged) {
       this.rosterLoaded = false;
@@ -563,13 +582,13 @@ export class GroupRelay extends DurableObject<Env> {
       for (const other of this.members()) {
         const a = (other.deserializeAttachment() as Attachment).author!;
         const m = updated?.members.get(a);
-        if (!m || m.lastSeq !== null) other.close(CLOSE_FORBIDDEN, 'removed');
+        if (!m || m.lastSeq !== null) this.shut(other, CLOSE_FORBIDDEN, 'removed');
       }
       if (updated && [...updated.members.keys()].some((a) => !membersBefore.has(a))) {
         this.broadcast(null, { t: 'have', heads: this.listedHeads(updated) });
       }
     }
-    if (closeAfter) ws.close(CLOSE_POLICY, closeAfter);
+    if (closeAfter) this.shut(ws, CLOSE_POLICY, closeAfter);
   }
 
   // --- status (Task 14) ---------------------------------------------------------------------
