@@ -6,7 +6,7 @@
   and Spec A, crew capture (merged 2026-10-13, fast-forward to `d8ada51`).
 - Branch `feature/crew-sync-core` holds Spec B1, crew sync core (15 tasks implemented and
   reviewed one by one, 2026-10-13..20):
-  - **Python client (`edmrn/ext/`, `tests/`):** `966 passed, 1 skipped`
+  - **Python client (`edmrn/ext/`, `tests/`):** `970 passed, 1 skipped`
     (`.venv/Scripts/python.exe -m pytest -q`). The 1 skipped test is the opt-in localhost
     end-to-end test (`tests/test_relay_e2e.py`), which passes (`1 passed`) when run with
     `EDMRN_RELAY_E2E=1` against `wrangler dev`. `tests/test_neutron_resume_gui.py` sometimes skips
@@ -88,14 +88,8 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 ## Follow-ups from the crew sync core reviews (deferred, none blocking)
 
 - **Store and gate (`edmrn/ext/crew_store.py`, `crew_group.py`):**
-  - `CrewStore` assigns `self._gate` before the `append_own`/`set_gate` transaction commits; if that
-    transaction raises, the in-memory gate/own-set change remains and a later roster change could
-    lock in a stale own/friend prefix (also affects `CrewGroup._enter` undo, whose gate
-    re-application is unpinned by mutation). Fix: assign `self._gate` after commit.
   - Redundant second forced rebuild when `_retry_rebuild` succeeds inside a `set_gate` call that
     also changes own authors who already have rows.
-  - `_compute_roster` per-row guard (`crew_store.py:473`) logs a full traceback on every recompute
-    if an unexpected error occurs (should log a warning once).
   - Live/rebuild loop edge when the `admit` override is used with an empty `own` set (tests only).
 - **Controller and dialog (`edmrn/ext/crew_group.py`, `crew_dialog.py`):**
   - When `CrewGroup._record` hits a database lock, the draft stays queued in `Writer` and is
@@ -123,8 +117,6 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
   - `retries=1` in `api.call` can double-post a Discord webhook message if the first attempt
     succeeded on Discord's side before a timeout or 502 (relevant for Spec B2's find mirror).
 - **Events, roster and vectors (`edmrn/ext/crew_events.py`, `crew_roster.py`, `tests/`):**
-  - `EnvelopeError` messages are not cut to 200 characters (`PayloadError` is; a duplicate-key
-    message can be ~9 KB).
   - `plausible_received` raises `TypeError` if passed a naive `now` datetime.
   - `ascii_name` slices to 64 before `.strip()` (`' ' * 70 + 'z'` becomes `'CMDR'`).
   - `load_json` reports `"0 KB"` if called with `limit < 1024`; `_edsy` regex is rebuilt per call

@@ -570,12 +570,18 @@ def test_a_gate_failure_while_leaving_is_a_sentence_and_the_group_is_gone(world,
 
 
 def test_a_gate_failure_while_creating_leaves_no_group_behind(world, monkeypatch):
-    def locked(*args):
-        raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(world.crew, "set_gate", locked)
+    real_record = world.group._record
+
+    def record_then_lock(*args, **kwargs):
+        real_record(*args, **kwargs)
+        monkeypatch.setattr(world.store, "transaction",
+                            lambda *a, **kw: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")))
+
+    monkeypatch.setattr(world.group, "_record", record_then_lock)
     with pytest.raises(GroupError, match="open the group"):
         world.group.create_group("Crew")
     assert world.group.config is None and load_group(world.dir) is None and world.group.sync is None
+    assert world.crew._gate.group_id is None and world.crew._gate.leader is None
 
 
 def test_a_failing_group_file_save_while_creating_starts_nothing(world, monkeypatch):

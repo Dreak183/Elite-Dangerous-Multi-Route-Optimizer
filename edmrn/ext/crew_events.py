@@ -29,7 +29,16 @@ _KIND = re.compile(r'[a-z_]{1,32}')
 
 
 class EnvelopeError(ValueError):
-    """Bytes or a dict that are not a well-formed envelope."""
+    """Bytes or a dict that are not a well-formed envelope. The message is cut to 200 characters:
+    a hostile peer's keys and values end up in it and must not flood the log."""
+
+    MAX_MESSAGE = 200
+
+    def __init__(self, message: Any) -> None:
+        text = str(message)
+        if len(text) > self.MAX_MESSAGE:
+            text = text[:self.MAX_MESSAGE - 3] + '...'
+        super().__init__(text)
 
 
 class PayloadError(ValueError):

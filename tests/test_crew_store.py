@@ -530,3 +530,83 @@ def test_notes_by_address_hide_deleted_notes(crew, ring):
     crew.append_own([(me, note(note_id=note_id, text="x")), (me, note(note_id=note_id, text="x",
                                                                        deleted=True, at=ts(1)))])
     assert crew.notes(ADDR) == [] and crew.notes() == []
+
+
+def test_failed_set_gate_transaction_leaves_gate_and_baselined_unchanged(store, ring, friend, monkeypatch):
+    me = ring.for_commander("F1")
+    initial = CrewStore(store, admit=lambda author, seq: True)
+    initial.set_gate(frozenset({me.author}))
+    initial.insert_received(*sealed(friend, visit("F9", at=ts(1)), 1))
+    assert dump(store)["crew_systems"][0][2].startswith("1|")
+
+    cs = CrewStore(store, admit=lambda author, seq: True)
+    real_tx = store.transaction
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "transaction", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        cs.set_gate(frozenset({me.author, friend.author}))
+    assert cs._baselined is False and cs._gate.own == frozenset()
+
+    monkeypatch.setattr(store, "transaction", real_tx)
+    cs.set_gate(frozenset({me.author, friend.author}))
+    assert cs._baselined is True and cs._gate.own == frozenset({me.author, friend.author})
+    assert dump(store)["crew_systems"][0][2].startswith("0|")
+
+    cs.set_gate(frozenset({me.author}))
+    assert dump(store)["crew_systems"][0][2].startswith("1|")
+
+    monkeypatch.setattr(store, "transaction", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        cs.set_gate(frozenset({me.author, friend.author}))
+    assert cs._gate.own == frozenset({me.author})
+
+    monkeypatch.setattr(store, "transaction", real_tx)
+    cs.set_gate(frozenset({me.author, friend.author}))
+    assert cs._gate.own == frozenset({me.author, friend.author})
+    assert dump(store)["crew_systems"][0][2].startswith("0|")
+
+
+def test_failed_append_own_transaction_leaves_gate_unchanged(store, ring, friend, monkeypatch):
+    me = ring.for_commander("F1")
+    cs = CrewStore(store, admit=lambda author, seq: True)
+    cs.set_gate(frozenset({me.author}))
+    cs.insert_received(*sealed(friend, visit("F9", at=ts(1)), 1))
+    assert dump(store)["crew_systems"][0][2].startswith("1|")
+
+    real_tx = store.transaction
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "transaction", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        cs.append_own([(friend, visit("F9", at=ts(2), address="7"))])
+    assert cs._gate.own == frozenset({me.author})
+
+    monkeypatch.setattr(store, "transaction", real_tx)
+    cs.append_own([(friend, visit("F9", at=ts(2), address="7"))])
+    assert cs._gate.own == frozenset({me.author, friend.author})
+    assert next(r[2] for r in dump(store)["crew_systems"] if r[0] == ADDR).startswith("0|")
+
+
+def test_compute_roster_warns_without_traceback_on_corrupt_row(store, ring, monkeypatch, caplog):
+    import logging
+    import edmrn.ext.crew_store as crew_store_mod
+    me = ring.for_commander("F1")
+    group_id = ev.uuid7()
+    cs = CrewStore(store)
+    cs.append_own([(me, ev.Draft("group", "F1", ts(1),
+                                 {"group_id": group_id, "name": "Crew", "commander": "F1"},
+                                 event_id=ev.uuid7()))])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(crew_store_mod, "parse_roster_envelope", boom)
+    with caplog.at_level(logging.WARNING):
+        cs.set_gate(frozenset({me.author}), group_id, me.author)
+    records = [r for r in caplog.records if "roster envelope skipped" in r.message]
+    assert records and all(r.levelname == "WARNING" and r.exc_info is None for r in records)

@@ -437,28 +437,30 @@ class CrewStore:
             except Exception:
                 logger.exception('Crew rebuild retry failed')
 
-    def _fingerprint(self, roster: Optional[Roster]) -> str:
+    def _fingerprint(self, roster: Optional[Roster], gate: Optional[Gate] = None) -> str:
         """What the persisted projections depend on: the group and who may project up to which seq."""
+        g = self._gate if gate is None else gate
         members = [] if roster is None else sorted((m.author, m.last_seq) for m in roster.members.values())
-        blob = json.dumps([self._gate.group_id, self._gate.leader, members, sorted(self._gate.own)])
+        blob = json.dumps([g.group_id, g.leader, members, sorted(g.own)])
         return hashlib.sha256(blob.encode('utf-8')).hexdigest()
 
-    def _store_fingerprint(self, conn, roster: Optional[Roster]) -> None:
+    def _store_fingerprint(self, conn, roster: Optional[Roster], gate: Optional[Gate] = None) -> None:
         conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('roster', ?)",
-                     (self._fingerprint(roster),))
+                     (self._fingerprint(roster, gate),))
 
-    def _context(self, roster: Optional[Roster]) -> _Context:
+    def _context(self, roster: Optional[Roster], gate: Optional[Gate] = None) -> _Context:
+        g = self._gate if gate is None else gate
         if self._admit_override is not None:
             admits = self._admit_override
         elif roster is not None:
             admits = roster.admits
         else:
             admits = lambda author, seq: False
-        return _Context(self._gate.own, admits, self._clock())
+        return _Context(g.own, admits, self._clock())
 
-    def _compute_roster(self, conn) -> Optional[Roster]:
-        gate = self._gate
-        if gate.group_id is None or gate.leader is None:
+    def _compute_roster(self, conn, gate: Optional[Gate] = None) -> Optional[Roster]:
+        g = self._gate if gate is None else gate
+        if g.group_id is None or g.leader is None:
             return None
         now = self._clock()
         marks = ', '.join('?' * len(ev.ROSTER_KINDS))
@@ -467,13 +469,13 @@ class CrewStore:
         envelopes = []
         for row in rows:
             try:
-                entry = parse_roster_envelope(bytes(row[0]), gate.own, now)
+                entry = parse_roster_envelope(bytes(row[0]), g.own, now)
             except Exception:  # one stored row must never stall the roster for the whole group
-                logger.exception('roster envelope skipped')
+                logger.warning('roster envelope skipped')
                 continue
             if entry is not None:
                 envelopes.append(entry)
-        return compute_roster(envelopes, gate.group_id, gate.leader)
+        return compute_roster(envelopes, g.group_id, g.leader)
 
     @staticmethod
     def _membership_change(old: Optional[Roster], new: Optional[Roster]) -> tuple[set, bool]:
@@ -505,21 +507,22 @@ class CrewStore:
         conn.execute("INSERT OR REPLACE INTO crew_meta (key, value) VALUES ('rebuild', 'roster')")
         self._rebuild_pending = True
 
-    def _apply_roster_change(self, conn, force: bool = False) -> tuple[Optional[Roster], bool]:
+    def _apply_roster_change(self, conn, force: bool = False,
+                             gate: Optional[Gate] = None) -> tuple[Optional[Roster], bool]:
         """Inside a transaction: recompute membership and project newly admitted authors.
 
         A narrowing writes the rebuild marker in the same transaction (spec B1 S2), so a crash
         before the rebuild is repaired by rebuild_if_marked at the next start. Returns the new
         roster and whether a rebuild must follow the commit. `force` is an own-author change that
         affects stored rows."""
-        new = self._compute_roster(conn)
+        new = self._compute_roster(conn, gate)
         admitted, narrowed = self._membership_change(self._roster, new)
         narrowed = narrowed or force
         if narrowed:
             self._mark_rebuild(conn)
         elif admitted:
-            self._project_authors(conn, admitted, self._context(new))
-        self._store_fingerprint(conn, new)
+            self._project_authors(conn, admitted, self._context(new, gate))
+        self._store_fingerprint(conn, new, gate)
         return new, narrowed
 
     def set_gate(self, own: frozenset, group_id: Optional[str] = None,
@@ -529,22 +532,22 @@ class CrewStore:
         Projections persist, so the first call per process only records the roster as baseline
         (S2). It rebuilds only when the stored roster fingerprint differs: the group or its members
         changed while EDMRN was closed, or friends' envelopes were stored before any gate."""
-        old_own = self._gate.own
-        self._gate = Gate(frozenset(own), group_id, leader)
+        gate = Gate(frozenset(own), group_id, leader)
         if not self._baselined:
-            self._baselined = True
             with self.store.transaction() as conn:
-                roster = self._compute_roster(conn)
+                roster = self._compute_roster(conn, gate)
                 row = conn.execute("SELECT value FROM crew_meta WHERE key = 'roster'").fetchone()
-                stale = row is not None and row[0] != self._fingerprint(roster)
+                stale = row is not None and row[0] != self._fingerprint(roster, gate)
                 if row is None:
-                    marks = ', '.join('?' * len(self._gate.own))
+                    marks = ', '.join('?' * len(gate.own))
                     stale = conn.execute(f'SELECT 1 FROM crew_log WHERE author NOT IN ({marks}) LIMIT 1',
-                                         tuple(self._gate.own)).fetchone() is not None
+                                         tuple(gate.own)).fetchone() is not None
                 if stale:
                     self._mark_rebuild(conn)
                 else:
-                    self._store_fingerprint(conn, roster)
+                    self._store_fingerprint(conn, roster, gate)
+            self._gate = gate
+            self._baselined = True
             self._roster = roster
             if stale:
                 self.rebuild_projections()
@@ -552,7 +555,8 @@ class CrewStore:
         self._retry_rebuild()
         with self.store.transaction() as conn:
             new, narrowed = self._apply_roster_change(
-                conn, force=self._has_rows(conn, old_own ^ self._gate.own))
+                conn, force=self._has_rows(conn, self._gate.own ^ gate.own), gate=gate)
+        self._gate = gate
         self._roster = new
         if narrowed:
             self.rebuild_projections()
@@ -564,15 +568,14 @@ class CrewStore:
         allocated: dict[str, tuple[Identity, int]] = {}
         new_own = frozenset(identity.author for identity, _ in items)
         added = new_own - self._gate.own
-        if added:
-            self._gate = dataclasses.replace(self._gate, own=self._gate.own | new_own)
+        gate = dataclasses.replace(self._gate, own=self._gate.own | new_own) if added else self._gate
         roster_touched = False
         narrowed = False
         new_roster = self._roster
         with self.store.transaction(busy_timeout_ms=BUSY_TIMEOUT_MS) as conn:
             # A new own author who already has rows was projected as a friend: re-derive (S3).
             own_grew, force = self._gated and bool(added), self._gated and self._has_rows(conn, added)
-            ctx = self._context(self._roster)
+            ctx = self._context(self._roster, gate)
             for identity, draft in items:
                 ev.validate_payload(draft.kind, ev.ENVELOPE_VERSION, draft.payload)
                 event_id = draft.resolve_id(identity.author)
@@ -594,7 +597,8 @@ class CrewStore:
                 allocated[identity.author] = (identity, last + 1)
                 written += 1
             if roster_touched or own_grew:
-                new_roster, narrowed = self._apply_roster_change(conn, force)
+                new_roster, narrowed = self._apply_roster_change(conn, force, gate)
+        self._gate = gate
         self._roster = new_roster
         for identity, seq in allocated.values():
             try:

@@ -365,6 +365,13 @@ def test_payload_error_message_is_cut_to_200_characters():
     assert len(str(info.value)) <= 200
 
 
+def test_envelope_error_message_is_cut_to_200_characters():
+    key = b"x" * 5000
+    with pytest.raises(ev.EnvelopeError) as info:
+        ev.parse_envelope(b'{"' + key + b'":1,"' + key + b'":1}')
+    assert len(str(info.value)) <= 200 and str(info.value).endswith("...")
+
+
 def group(**over):
     p = {"group_id": UUID, "name": "Deep Space Crew", "commander": "Jameson"}
     p.update(over)

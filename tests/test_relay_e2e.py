@@ -77,6 +77,9 @@ def relay(tmp_path):
         cwd=ROOT / "crew-relay", stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     def up():
+        if proc.poll() is not None:
+            output = proc.stdout.read().decode("utf-8", errors="replace") if proc.stdout else ""
+            raise RuntimeError(f"wrangler dev exited early ({proc.returncode}): {output}")
         try:
             socket.create_connection(("127.0.0.1", PORT), timeout=1).close()
             return True
