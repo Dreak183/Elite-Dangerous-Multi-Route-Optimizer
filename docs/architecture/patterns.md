@@ -16,8 +16,10 @@ fixture runs, so a fixture-only redirect lets the real Documents folder be writt
 ## All external HTTP goes through `edmrn/ext/api.py`
 
 Rule (API hardening spec A1–A3):
-- `edmrn.ext.api.call` is the only code that sends a request. It sets the one User-Agent and an
-  explicit timeout, and retries 502/503/504, timeouts and connection errors.
+- `edmrn.ext.api.call` is the only code that sends an HTTP request. It sets the one User-Agent and
+  an explicit timeout, and retries 502/503/504, timeouts and connection errors. The crew relay
+  WebSocket (`edmrn.ext.crew_sync.websockets_connect`) is the one other network path (crew sync
+  core spec S19).
 - Query values travel only as `params` or a `json` body, never formatted into a URL.
 - A path segment taken from service data is validated (an `int` id64) or quoted (a job id).
 - Failures become one `ApiFailure` sentence. "Not found" stays distinct from "service failed":
@@ -45,3 +47,16 @@ Defect it prevents (`../knowledge/upstream-baseline.md`, "External APIs"):
 - Raw HTML and exception text reached the UI.
 - A Spansh outage looked like "System Not Found".
 - A webhook token reached the log through `requests` exception text (`log_url`).
+
+## Background threads never write `edmrn.db`
+
+Rule (crew capture spec C11, crew sync core spec S19): after `install()` opens and migrates
+`edmrn.db` during startup, only the Tk thread writes `edmrn.db`. Background threads
+(`JournalMonitor`, `edmrn-crew-replay`, `edmrn-crew-sync`) never open a `Store.transaction()`; they
+may only read in bounded pages through `Store.read()`. To record data from a background thread, put
+items onto a bounded queue (`Writer.enqueue` for own drafts, `Inbox.put` for received envelopes) and
+drain it on the Tk loop via `root.after` (`Writer.drain`, `Inbox.drain`).
+
+Defect it prevents: a database written from two threads on one connection under a Tk-thread writer
+makes the writer's short-timeout locked-retry and the store lock fight, stalling the Tk thread or
+causing spurious lock retries.

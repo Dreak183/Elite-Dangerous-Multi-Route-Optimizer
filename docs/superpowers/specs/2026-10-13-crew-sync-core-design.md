@@ -337,7 +337,8 @@ the next day.
     `wss://galroute.the-hub.cloud`) and "Join with invite" (paste box). The connection URL is the
     address plus `/v1/groups/<group_id>/ws`;
   - in a group: the connection state, the member list, "Pause sharing", and "Leave", which deletes
-    `group.json` and nothing else;
+    `group.json`, stops the sync, and narrows the gate to own authors (withdrawing friends'
+    projections while keeping `crew_log`);
   - for the leader:
     - "Create invite", with a label and an expiry, which signs the `invite` and shows S5a;
     - a field for the Discord webhook URL;
@@ -387,8 +388,9 @@ the next day.
 
 ### Data flow
 
-1. The writer stores an own envelope (Spec A). `crew_sync` sees the new log rows by polling its
-   own author's highest `seq` after each writer tick and batches them into `evs` (S7 step 6).
+1. The writer stores an own envelope (Spec A). `crew_sync` polls all stored heads every 5 s (and
+   immediately after recording an `invite` or `remove`) and batches missing envelopes into `evs`
+   (S7 step 6).
 2. The relay verifies, stores, counts and forwards the frame to the other members' sockets.
 3. A receiving client's thread queues the items; the Tk-loop applier stores them with
    `insert_received`, and the projector applies the gate (S3) and Spec A's validators.

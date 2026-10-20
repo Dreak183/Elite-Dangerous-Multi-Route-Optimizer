@@ -28,8 +28,9 @@ This folder is its own git repository (branch `main`) inside the `EDProjects` hu
 Upstream's stack, unchanged: Python ≥ 3.13 (`setup.py`), customtkinter, tksheet, pandas, scipy,
 python-tsp, matplotlib, requests (Spansh and EDSM), PyInstaller (`edmrn.spec`). Dependencies are
 declared in upstream's `requirements.txt`; ours (`cryptography` for signatures, `websockets` for the
-crew relay connection) go in `requirements-edmrn.txt`. Locally, uv runs the
-environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest under `tests/`
+crew relay connection) go in `requirements-edmrn.txt`. The crew relay is TypeScript in `crew-relay/`
+(Cloudflare Workers, Durable Objects, Wrangler, Vitest); the client uses `websockets`. Locally, uv
+runs the environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest under `tests/`
 (upstream ships none).
 
 ## Hard rules
