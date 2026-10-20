@@ -32,6 +32,7 @@ export const CLOSE_POLICY = 4008;
 const ITEM_OVERHEAD = 16; // {"e":"","s":""}, per item, as the client counts it
 const MAX_E_CHARS = Math.ceil((MAX_ENVELOPE_BYTES * 4) / 3);
 const MAX_S_CHARS = 86; // 64 bytes
+const MAX_STATUS_CHARS = Math.ceil((MAX_STATUS_BYTES * 4) / 3);
 // An attachment holds at most 16,384 bytes (knowledge/group-sync-transport.md). Worst case here: 64 refusals
 // of about 70 bytes (4.5 KB) plus a status of 8 KiB of canonical bytes, base64url about 11 KB: under the limit.
 const MAX_REFUSALS = 64;
@@ -76,6 +77,7 @@ const SCHEMA = [
 ];
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** A BLOB binding that owns exactly its bytes. */
 function blob(bytes: Uint8Array): ArrayBuffer {
@@ -591,17 +593,56 @@ export class GroupRelay extends DurableObject<Env> {
     if (closeAfter) this.shut(ws, CLOSE_POLICY, closeAfter);
   }
 
-  // --- status (Task 14) ---------------------------------------------------------------------
+  // --- status (S8) --------------------------------------------------------------------------
 
   private async status(ws: WebSocket, att: Attachment, frame: any): Promise<void> {
-    void ws; void att; void frame;
+    const now = Date.now();
+    if (now - (att.statusAt ?? 0) < STATUS_INTERVAL_MS) return this.error(ws, 'rate');
+    if (typeof frame.e !== 'string' || typeof frame.s !== 'string') return this.error(ws, 'bad_frame');
+    if (frame.e.length > MAX_STATUS_CHARS) return this.error(ws, 'too_big');
+    const data = b64urlDecode(frame.e, MAX_STATUS_BYTES);
+    const sig = b64urlDecode(frame.s, 64);
+    if (!data || !sig || sig.length !== 64) return this.error(ws, 'bad_frame');
+    let doc: any;
+    try {
+      doc = JSON.parse(decoder.decode(data));
+    } catch {
+      return this.error(ws, 'bad_frame');
+    }
+    if (typeof doc !== 'object' || doc === null || doc.author !== att.author || typeof doc.at !== 'string' ||
+        typeof doc.status !== 'object' || doc.status === null || Array.isArray(doc.status)) {
+      return this.error(ws, 'bad_frame');
+    }
+    if (!(await verifySignature(att.author!, sig, data))) return this.error(ws, 'bad_sig');
+    const item = { e: frame.e as string, s: frame.s as string };
+    ws.serializeAttachment({ ...att, statusAt: now, status: item } satisfies Attachment);
+    this.broadcast(ws, { t: 'st', ...item });
   }
 
   private sendStatuses(ws: WebSocket, author: string): void {
-    void ws; void author;
+    const isActive = (a: string): boolean => {
+      const m = this.roster?.members.get(a);
+      return m !== undefined && m.lastSeq === null;
+    };
+    const live = new Set<string>();
+    for (const other of this.members()) {
+      const a = other.deserializeAttachment() as Attachment;
+      if (other === ws || !a.author || a.author === author || !isActive(a.author)) continue;
+      live.add(a.author);
+      if (a.status) ws.send(JSON.stringify({ t: 'st', ...a.status }));
+    }
+    for (const row of this.exec<{ author: string; e: string; s: string }>('SELECT author, e, s FROM status')) {
+      if (row.author !== author && !live.has(row.author) && isActive(row.author)) {
+        ws.send(JSON.stringify({ t: 'st', e: row.e, s: row.s }));
+      }
+    }
   }
 
   private persistStatus(ws: WebSocket): void {
-    void ws;
+    const att = ws.deserializeAttachment() as Attachment | null;
+    if (att?.state !== 'member' || !att.status || !att.author) return;
+    this.exec('INSERT INTO status (author, e, s) VALUES (?, ?, ?) ON CONFLICT (author) DO UPDATE SET e = excluded.e, s = excluded.s',
+      att.author, att.status.e, att.status.s);
+    ws.serializeAttachment({ ...att, status: undefined });
   }
 }
