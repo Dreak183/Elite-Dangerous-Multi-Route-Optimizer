@@ -13,10 +13,11 @@ Rules only; detail lives in `docs/`. Keep this file short.
 EDMRN is a fork and continuation of *ED Multi Route Navigation*
 (NinurtaKalhu/Elite-Dangerous-Multi-Route-Optimizer, AGPL-3.0), a desktop route planning and
 optimization tool for Elite Dangerous, and the commander's main tool for finding systems and
-travelling. The fork adds current-location detection from the journal, saved routes, and crew
-features for a small group of friends: who is where in what ship, which systems are explored, finds,
-the leader's route, chat and notes — exchanged through a Cloudflare relay with peer-to-peer as a
-fallback (ADR-0005). Exploring the system the commander is in stays with Elite Observatory.
+travelling. The fork adds current-location detection from the journal, saved routes, the laden
+jump range, supercharged-start neutron routing, and crew features for a small group of friends: who
+is where in what ship, which systems are explored, finds, the leader's route, chat and notes —
+exchanged as a signed event log (ADR-0005) through a relay on the commander's own server
+(ADR-0009). Exploring the system the commander is in stays with Elite Observatory.
 
 The fork stays close to upstream and merges `upstream/main` regularly (remote `upstream`).
 
@@ -28,8 +29,10 @@ This folder is its own git repository (branch `main`) inside the `EDProjects` hu
 Upstream's stack, unchanged: Python ≥ 3.13 (`setup.py`), customtkinter, tksheet, pandas, scipy,
 python-tsp, matplotlib, requests (Spansh and EDSM), PyInstaller (`edmrn.spec`). Dependencies are
 declared in upstream's `requirements.txt`; ours (`cryptography` for signatures, `websockets` for the
-crew relay connection) go in `requirements-edmrn.txt`. The crew relay is TypeScript in `crew-relay/`
-(Cloudflare Workers, Durable Objects, Wrangler, Vitest); the client uses `websockets`. Locally, uv
+crew relay connection) go in `requirements-edmrn.txt`. The crew relay is a Python asyncio service
+in `relay/` on the `websockets` server and `sqlite3`, importing the client's protocol modules
+(ADR-0009); the TypeScript Worker in `crew-relay/` is its behaviour reference until the port
+removes it. Locally, uv
 runs the environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest under `tests/`
 (upstream ships none).
 

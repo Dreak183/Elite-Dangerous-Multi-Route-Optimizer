@@ -9,7 +9,8 @@ that links back. Template: `_template.md`.
 | [0002](0002-stay-close-to-upstream.md) | Stay mergeable with upstream; own code lives in `edmrn/ext/` |
 | [0003](0003-sqlite-for-local-storage.md) | *Superseded by 0004* — SQLite store |
 | [0004](0004-sqlite-store-unusable-db-disables-feature.md) | Local fork data lives in one SQLite database, one connection, rollback journal; an unusable database disables the feature (module boundary: see 0006) |
-| [0005](0005-crew-exchange-transport.md) | Crew data travels as a signed event log through a Cloudflare relay; peer-to-peer is a staged fallback (merge validation: see 0007) |
+| [0005](0005-crew-exchange-transport.md) | Crew data travels as a signed event log (merge validation: see 0007; transport superseded by 0009) |
 | [0006](0006-store-layer-and-crew-modules.md) | The store layer is `store.py` (connection, lock, migrations) plus feature modules that write only through `Store.transaction()` (received-record validation: see 0007) |
 | [0007](0007-received-envelopes-stored-projection-gated.md) | A received envelope is stored once signed and well-formed; payload validation and author binding gate only its projection |
 | [0008](0008-membership-from-leader-signed-roster.md) | Group membership is computed from leader-signed roster envelopes and gates projection |
+| [0009](0009-self-hosted-python-relay.md) | The crew relay is a Python service on the commander's own server, sharing the client's protocol modules; no peer-to-peer transport |
