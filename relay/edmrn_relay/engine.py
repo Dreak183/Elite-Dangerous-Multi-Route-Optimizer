@@ -6,6 +6,7 @@ modules; this file holds the relay's decisions only.
 """
 from __future__ import annotations
 
+import json
 import logging
 import secrets
 import time
@@ -205,6 +206,13 @@ class Relay:
     # -- dispatch -------------------------------------------------------------------------
 
     def receive(self, session: Session, message: str | bytes) -> list[Action]:
+        try:
+            return self._receive(session, message)
+        except Exception:
+            log.exception("internal error author=%s", _short(session.author))
+            return self._close(session, CLOSE_INTERNAL, "internal error")
+
+    def _receive(self, session: Session, message: str | bytes) -> list[Action]:
         if session.state == "closed" or session.closing:
             return []
         if session.state == "hello" and self._now() - session.opened_at > AUTH_TIMEOUT:
@@ -224,8 +232,149 @@ class Relay:
         return self._member_frame(session, frame)
 
     def _member_frame(self, session: Session, frame: dict) -> list[Action]:
-        # Task 3 (have, evs) and Task 5 (st) are handled here; any other type is ignored.
+        # Task 5 adds `st`; any other type is ignored.
+        if frame["t"] == "have":
+            return self._have(session, frame)
+        if frame["t"] == "evs":
+            return self._evs(session, frame)
         return []
+
+    # -- catch-up -------------------------------------------------------------------------
+
+    def _have(self, session: Session, frame: dict) -> list[Action]:
+        try:
+            heads = proto.parse_have(frame)
+        except proto.FrameError:
+            return [Send(session, _err("bad_frame"))]
+        group = self.group(session.group_id)
+        members = group.roster.members if group.roster else {}
+        actions: list[Action] = []
+        for author in sorted(group.heads):
+            until = group.heads[author]
+            member = members.get(author)
+            if member is not None and member.last_seq is not None:
+                until = min(until, member.last_seq)
+            after = heads.get(author, 0)
+            while after < until:
+                rows = self.store.log_after(group.group_id, author, after, until,
+                                            proto.MAX_EVS_ITEMS)
+                if not rows:
+                    break
+                for out in proto.evs_frames((r.e, r.s) for r in rows):
+                    actions.append(Send(session, proto.encode(out)))
+                after = rows[-1].seq
+        actions.append(Send(session, proto.encode({"t": "synced"})))
+        return actions
+
+    # -- uploads --------------------------------------------------------------------------
+
+    def _evs(self, session: Session, frame: dict) -> list[Action]:
+        items = frame.get("items")
+        if not isinstance(items, list) or len(items) > proto.MAX_EVS_ITEMS:  # E1
+            return [Send(session, _err("bad_frame"))]
+        total = sum(len(i["e"]) + len(i["s"]) + proto._ITEM_OVERHEAD for i in items
+                    if isinstance(i, dict) and isinstance(i.get("e"), str)
+                    and isinstance(i.get("s"), str))
+        if total > proto.MAX_EVS_BYTES:  # E2
+            return [Send(session, _err("too_big"))] + self._close(
+                session, proto.CLOSE_POLICY, "too_big")
+        group = self.group(session.group_id)
+        g = group.group_id
+        roster = group.roster
+        # E3
+        now = self._now()
+        day = utc_day(now)
+        if group.cleaned_day != day:
+            group.cleaned_day = day
+            for past, n in self.store.take_past_quota(g, day):
+                log.info(json.dumps({
+                    "event": "crew-daily-total", "group": g,
+                    "day": datetime.fromtimestamp(past * 86400, timezone.utc).strftime("%Y-%m-%d"),
+                    "envelopes": n}, separators=(",", ":")))
+        group_left = self.config.group_quota - self.store.group_quota_used(g, day)
+        refused = {a: r for a, r in session.refused.items() if r[1] in (0, day)}
+        errs: list[Action] = []
+        close_after: str | None = None
+        advanced: dict[str, int] = {}
+        counts: dict[str, int] = {}
+        used: dict[str, int] = {}
+        log_rows: list[LogRow] = []
+        roster_rows: list[LogRow] = []
+        forwarded: list[tuple[bytes, bytes]] = []
+
+        def refuse(author: str, seq: int, code: str, daily: bool = False) -> None:
+            errs.append(Send(session, _err(code, author, seq)))
+            existing = refused.get(author)
+            if existing is None or existing[0] > seq:
+                refused[author] = (seq, day if daily else 0)
+
+        # E4
+        for item in items:
+            c = decode_item(item)
+            if c == "oversize":
+                errs.append(Send(session, _err("too_big")))
+                close_after = "too_big"
+                break
+            if c == "undecodable":
+                errs.append(Send(session, _err("bad_frame")))
+                close_after = "bad item"
+                break
+            if isinstance(c, BadSig):
+                refuse(c.author, c.seq, "bad_sig")
+                continue
+            author, seq = c.env["author"], c.env["seq"]
+            block = refused.get(author)
+            if block is not None and seq >= block[0]:
+                continue
+            # Task 4: a join by a non-member is judged here.
+            if author not in roster.members:
+                refuse(author, seq, "not_member")
+                continue
+            if not roster.admits(author, seq):
+                refuse(author, seq, "removed")
+                continue
+            if seq <= advanced.get(author, group.heads.get(author, 0)):
+                continue
+            if not verify(author, c.s, c.e):
+                refuse(author, seq, "bad_sig")
+                continue
+            entry = roster_entry(c, now) if c.env["kind"] in ev.ROSTER_KINDS else None
+            exempt = entry is not None and author == group.leader
+            if not exempt:
+                if author not in used:
+                    used[author] = self.store.quota_used(g, day, author)
+                if used[author] + counts.get(author, 0) >= self.config.member_quota:
+                    refuse(author, seq, "quota", daily=True)
+                    continue
+                if group_left <= 0:
+                    refuse(author, seq, "group_quota", daily=True)
+                    continue
+                counts[author] = counts.get(author, 0) + 1
+                group_left -= 1
+            advanced[author] = seq
+            log_rows.append(LogRow(author, seq, c.e, c.s))
+            forwarded.append((c.e, c.s))
+            if exempt and entry.kind != "join":
+                roster_rows.append(LogRow(author, seq, c.e, c.s))
+        # E5, E6: the commit comes first, memory follows.
+        roster_changed = self.store.apply_frame(g, day, log_rows, roster_rows, advanced, counts)
+        group.heads.update(advanced)
+        session.refused = refused
+        if roster_changed:
+            self.reload_roster(group)
+        if len(refused) > MAX_REFUSALS:  # E7
+            close_after = close_after or "too many refusals"
+        actions = errs
+        if forwarded:  # E8
+            for other in group.sessions:
+                if other is session or other.state != "member" or other.closing:
+                    continue
+                for out in proto.evs_frames(forwarded):
+                    actions.append(Send(other, proto.encode(out)))
+        # Task 4: E9, the roster consequences.
+        if close_after:  # E10
+            actions += self._close(session, proto.CLOSE_POLICY, close_after)
+        return actions
 
     # -- auth -----------------------------------------------------------------------------
 

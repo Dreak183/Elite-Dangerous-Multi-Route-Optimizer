@@ -13,6 +13,7 @@ from test_crew_vectors import _generator  # same module object as the collected 
 
 from edmrn.ext import crew_events as ev
 from edmrn.ext import crew_protocol as proto
+from edmrn.ext import crew_roster
 from edmrn_relay.config import RelayConfig
 from edmrn_relay.engine import Action, Close, Relay, Send, Session
 from edmrn_relay.store import RelayStore
@@ -195,6 +196,31 @@ class Harness:
 
     def create_group(self, group_id: str, key) -> FakeConn:
         return self.authed(group_id, key, genesis=self.genesis(key, group_id))
+
+    def create_group_and_upload(self, group_id: str, key) -> FakeConn:
+        conn = self.create_group(group_id, key)
+        conn.next_of("have")
+        self.send(conn, {"t": "have", "heads": {}})
+        conn.next_of("synced")
+        self.send(conn, {"t": "evs", "items": [self.genesis(key, group_id)]})
+        return conn
+
+    def invite(self, conn: FakeConn, group_id: str, key, seq: int, token: str = TOKEN,
+               expires_in: float = 3600.0) -> str:
+        invite_id = uuid7()
+        item = self.envelope(key, seq, "invite", {
+            "group_id": group_id, "invite_id": invite_id,
+            "token_hash": crew_roster.token_hash(token),
+            "expires_at": self.stamp(expires_in), "label": None})
+        self.send(conn, {"t": "evs", "items": [item]})
+        return invite_id
+
+    def set_quota(self, group_id: str, author: str, count: int, day: int | None = None) -> None:
+        day = int(self.clock.now // 86400) if day is None else day
+        self.store.db.execute(
+            "INSERT INTO quota (group_id, day, author, count) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (group_id, day, author) DO UPDATE SET count = excluded.count",
+            (group_id, day, author, count))
 
     # -- reading the database -------------------------------------------------------------
 
