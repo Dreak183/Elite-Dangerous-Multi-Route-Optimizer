@@ -1,0 +1,11 @@
+*
+!LICENSE
+!relay/requirements.txt
+!edmrn/__init__.py
+!edmrn/ext/__init__.py
+!edmrn/ext/crew_events.py
+!edmrn/ext/crew_identity.py
+!edmrn/ext/crew_roster.py
+!edmrn/ext/crew_protocol.py
+!relay/edmrn_relay
+**/__pycache__

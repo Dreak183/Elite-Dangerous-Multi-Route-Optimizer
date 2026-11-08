@@ -1,0 +1,4 @@
+# Caddy proxies WebSocket upgrades and sets no read timeout by default.
+{$RELAY_HOST} {
+	reverse_proxy relay:8765
+}

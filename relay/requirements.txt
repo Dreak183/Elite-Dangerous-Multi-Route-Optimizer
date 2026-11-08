@@ -1,0 +1,3 @@
+# Exact pins keep server images reproducible; the client's requirements-edmrn.txt keeps lower bounds.
+cryptography==50.0.2
+websockets==17.2

@@ -1,0 +1,21 @@
+# Secrets and keys live in relay/.env (git-ignored).
+services:
+  relay:
+    build: {context: .., dockerfile: relay/Dockerfile}
+    restart: unless-stopped
+    environment:
+      EDMRN_RELAY_LEADERS: ${EDMRN_RELAY_LEADERS:?set EDMRN_RELAY_LEADERS in relay/.env}
+      EDMRN_RELAY_SOURCE_URL: ${EDMRN_RELAY_SOURCE_URL:-}
+    volumes: [relay-data:/data]
+    # A stop waits up to 15 s (SHUTDOWN_GRACE) for queued closes plus websockets' close handshake
+    # (10 s); a shorter period would kill the relay before it has persisted the statuses.
+    stop_grace_period: 30s
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [relay]
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      RELAY_HOST: ${RELAY_HOST:?set RELAY_HOST in relay/.env}
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddy-data:/data, caddy-config:/config]
+volumes: {relay-data: {}, caddy-data: {}, caddy-config: {}}

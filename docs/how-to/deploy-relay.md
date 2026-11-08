@@ -1,36 +1,100 @@
 # Deploying the crew relay
 
-The relay is the Worker in `crew-relay/` (crew sync core spec S17). It runs on the commander's
-Cloudflare account at `galroute.the-hub.cloud`. On the Free plan nothing is charged; over a daily
-limit operations fail until 00:00 UTC (`../../../knowledge/group-sync-transport.md` §1.1).
+## What it is
 
-## Before the first deploy
+The relay is the Python asyncio service in `relay/` (ADR-0009). It listens on loopback, or inside
+its container, and speaks plain WebSocket and HTTP; TLS ends at Caddy or at the server's existing
+reverse proxy. The client's address is `wss://galroute.the-hub.cloud`: host only, port 443, root
+path (`edmrn/ext/crew_roster.check_relay_url`). The proxy must therefore serve the relay at the
+root of port 443, pass WebSocket upgrades, and keep idle connections open longer than the client's
+30 s ping interval (`edmrn/ext/crew_sync.py`).
 
-- The zone `the-hub.cloud` is listed as Active in the Cloudflare dashboard (Websites).
-- Node 22 or newer (Wrangler 4 requires it): `node --version`.
-- Dependencies and tests: `cd crew-relay`, `npm ci`, `npm test`.
+Configuration is by flag or by `EDMRN_RELAY_*` variable (HOST, PORT, DB, LEADERS, SOURCE_URL,
+MEMBER_QUOTA, GROUP_QUOTA); an empty variable counts as unset. Logs go to stdout. SIGTERM persists
+the statuses and closes every socket with 1001, which takes up to 15 s plus the close handshake;
+the stop timeouts below are 30 s for that reason.
 
-## First deploy
+## DNS
 
-1. Sign in: `npx wrangler login`. A browser tab opens on Cloudflare; choose Allow. Check with
-   `npx wrangler whoami`, which names the account.
-2. Leader key: in EDMRN open Settings > Crew... and copy "Your crew key". In
-   `crew-relay/wrangler.toml` set `CREW_LEADERS = "<key>"` (several keys: comma-separated). The
-   key is public; commit the change.
-3. Source URL: set `SOURCE_URL` to the GitHub fork's URL once it exists; leave it empty until then.
-4. Deploy: `npx wrangler deploy`. Wrangler creates the Worker, the Durable Object class (migration
-   `v1`), and the DNS record and certificate for `galroute.the-hub.cloud`.
-5. Check: open `https://galroute.the-hub.cloud/`; it answers with a one-line greeting. A first
-   certificate can take a few minutes.
-6. In EDMRN: Settings > Crew... > Create group. The relay address is prefilled. The connection
-   shows "Connected".
+Create an A record, plus an AAAA record for IPv6, `galroute` pointing at the server's IP in the
+Cloudflare DNS of `the-hub.cloud`, with proxy status "DNS only". Check with
+`nslookup galroute.the-hub.cloud`.
+
+## Leader key
+
+EDMRN > Settings > Crew... > copy "Your crew key". Several keys are separated by commas. The keys
+are public.
+
+## Option A: Docker Compose with Caddy
+
+Needs Docker Engine with the compose plugin and ports 80 and 443 free. The image is built on the
+server; it cannot be built on the Windows development machine, where Docker is not installed.
+
+`relay/.env` (git-ignored):
+
+```
+RELAY_HOST=galroute.the-hub.cloud
+EDMRN_RELAY_LEADERS=<key>
+EDMRN_RELAY_SOURCE_URL=<fork URL or empty>
+```
+
+Start and check:
+
+```
+cd relay && docker compose up -d --build
+curl https://galroute.the-hub.cloud/
+```
+
+The `curl` shows the greeting. Caddy obtains the certificate on the first request, which can take
+a minute. The compose file builds from the repository root; the Dockerfile's `COPY` lines are the
+list of `edmrn` files in the image, and `Dockerfile.dockerignore` admits exactly those.
+
+## Option B: systemd behind an existing reverse proxy
+
+```
+useradd --system edmrn-relay
+git clone <fork URL> /opt/edmrn
+uv venv --python 3.13 /opt/edmrn/.venv-relay
+uv pip install --python /opt/edmrn/.venv-relay -r /opt/edmrn/relay/requirements.txt
+```
+
+Write `/etc/edmrn-relay.env` with the `EDMRN_RELAY_*` variables (at least `EDMRN_RELAY_LEADERS`),
+copy `relay/edmrn-relay.service` to `/etc/systemd/system/`, then:
+
+```
+systemctl daemon-reload
+systemctl enable --now edmrn-relay
+```
+
+The nginx `server` block for `galroute.the-hub.cloud` (certificate from certbot):
+
+```
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 120s;
+    proxy_send_timeout 120s;
+}
+```
+
+120 s is above the client's 30 s ping interval; nginx's default of 60 s would also do, but the
+timeout must never be lower than a few ping intervals.
 
 ## Operating
 
-- Live logs: `npx wrangler tail`. Each past day appears once as a `crew-daily-total` line.
-- Usage: dashboard > Workers & Pages > `edmrn-crew-relay` > Metrics, and the Durable Objects
-  usage (rows written) in the account's billing usage view.
-- Update: change the code, `npm test`, `npx wrangler deploy`. Groups keep their data.
-- Another leader: add the key to `CREW_LEADERS` and deploy.
-- Every member holds a full replica, so an emptied relay is re-seeded by the leader's next
-  connection (spec S7).
+- **Logs:** `docker compose logs -f relay` or `journalctl -u edmrn-relay -f`. Each past day
+  appears once as a `crew-daily-total` line.
+- **Backup:** option A:
+  `docker compose exec relay python -c "import sqlite3; sqlite3.connect('/data/relay.db').backup(sqlite3.connect('/data/backup.db'))"`,
+  then `docker compose cp relay:/data/backup.db ./relay-backup-$(date +%F).db`. Option B:
+  `sqlite3 /var/lib/edmrn-relay/relay.db ".backup /var/backups/relay-$(date +%F).db"`.
+- **Update:** `git pull`, then `docker compose up -d --build` or `systemctl restart edmrn-relay`.
+  Members reconnect by themselves.
+- **Adding a leader:** extend `EDMRN_RELAY_LEADERS` and restart.
+- **Limits:** `EDMRN_RELAY_MEMBER_QUOTA` and `EDMRN_RELAY_GROUP_QUOTA` (defaults 5,000 and 80,000
+  per UTC day) are abuse limits.
+- **Re-seed:** a lost database costs nothing permanent. Every member holds a full replica, so the
+  next connections re-seed it (crew sync core spec S7).

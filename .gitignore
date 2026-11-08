@@ -55,3 +55,4 @@ dist/*.exe
 .claude/settings.local.json
 crew-relay/node_modules/
 crew-relay/.wrangler/
+relay.db*

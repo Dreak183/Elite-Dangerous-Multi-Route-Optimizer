@@ -85,7 +85,14 @@ Shared client/relay test vectors (`crew-relay/test/vectors.json`) are generated 
 Regenerate them only when the spec changes a shared rule (envelope structure, signatures, roster
 membership, timestamp plausibility, invite format or character whitelist).
 
-`tests/test_relay_loopback.py` runs two EDMRN crew clients against the real relay on 127.0.0.1 in the default run.
+Run the relay locally, in PowerShell from the repository root (pass your author key from
+Settings > Crew...), then point "Create group" at `ws://127.0.0.1:8765`:
+
+```
+$env:PYTHONPATH='.;relay'; .venv/Scripts/python.exe -m edmrn_relay --port 8765 --db "$env:TEMPelay.db" --leaders <your-author-key>
+```
+
+The relay's tests are `tests/test_relay_*.py`, in the default run. `tests/test_relay_loopback.py` runs two EDMRN crew clients against the real relay on 127.0.0.1 in the default run.
 
 For manual local tries (pass your author key from Settings > Crew...):
 
@@ -94,7 +101,7 @@ cd crew-relay
 npx wrangler dev --ip 127.0.0.1 --port 8799 --var CREW_LEADERS:<your-author-key>
 ```
 
-Deploying and operating the relay on Cloudflare: [deploy-relay.md](deploy-relay.md).
+Deploying and operating the relay: [deploy-relay.md](deploy-relay.md).
 
 ## Manual live check of the external APIs
 
