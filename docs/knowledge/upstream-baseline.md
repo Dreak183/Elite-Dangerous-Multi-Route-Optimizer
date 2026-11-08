@@ -85,6 +85,16 @@ exchange. It also lists the upstream defects that our features would sit on top 
   (`/api/nearest` is used only by the manual coordinate search in `app.py`) **[community]**.
 - There are no retries: one 502 or timeout from an overloaded Spansh ends the calculation
   **[community]**.
+- **Defect — maximum range, not laden range:** `_journal_callback` fills "Ship Jump Range" with
+  `Loadout.MaxJumpRange` on every `Loadout`. That value assumes no cargo and one jump of fuel
+  (`../../../knowledge/fsd-jump-range.md`), so plotted routes contain jumps the loaded ship cannot
+  make **[community]**.
+- **Defect — no supercharge at the start:** the route is used as Spansh returns it, and Spansh's
+  neutron plotter never supercharges at the start system (`../../../knowledge/bulk-data.md`,
+  "Neutron route plotter") **[community]**.
+- **Galaxy Plotter endpoint:** `galaxy_plotter.GalaxyPlotter` posts its exact-plotter parameters
+  (`ship_build`, `cargo`, `already_supercharged`, …) to `/api/route`, the neutron plotter's endpoint
+  **[community]**; whether Spansh honours them there is unchecked.
 - **Saving:** `save_neutron_route` writes `neutron_route.json` (waypoints, statuses, current index)
   only into `app.current_backup_folder`. That folder exists only after a CSV route was optimised or
   loaded, so a stand-alone neutron route is never saved. From, to, range and boost are not stored.
@@ -109,7 +119,9 @@ against the live services.
 
   Nothing retries. User-Agents differ per site, and some send none **[community]**.
 - Dead copies: nothing in the UI reaches `galaxy_handler.py` or `journal_handler.py`. The live Galaxy
-  code is in `app.py` **[community]**.
+  code is in `app.py` **[community]**. Likewise `app._create_optimizer_tab` and
+  `app._create_neutron_tab` are never called; the live tabs come from `ui_components`
+  (`create_optimizer_tab`, `create_neutron_tab`) **[community]**.
 - **Defect — Custom Route never uses Spansh:** it reads `result`/`coords`, but the search answers
   `results[]` with top-level `x,y,z`. Every lookup therefore falls through to EDSM, and every
   failure shows "System Not Found" **[probe]**.
