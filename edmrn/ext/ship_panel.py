@@ -61,8 +61,12 @@ class RangeBinding:
         self.app = app
         self.auto = True
         self.state = ShipState()
-        self._written: Optional[str] = None
-        self._last_drive: Any = None
+        try:
+            # The baseline for "did the user type": a Neutron var starts as a copy of this text.
+            self._written: Optional[str] = app.jump_range.get()
+        except Exception:
+            self._written = None
+        self._last_loadout: Any = None
         self._panels: list[tuple[Any, Any]] = []
 
     def register_panel(self, label, checkbox_var) -> None:
@@ -87,19 +91,20 @@ class RangeBinding:
         except Exception as e:
             logger.error(f"Range update failed: {e}")
 
-    def _apply_auto(self, state: ShipState) -> None:
+    def _apply_auto(self, state: ShipState, boost_too: bool = True) -> None:
         value = _field_value(state)
         if value is not None:
             var = self.app.jump_range
             if var.get() != value:
                 var.set(value)
             self._written = value
-        drive = state.drive
-        if drive is not None and drive != self._last_drive:
-            self._last_drive = drive
-            boost = getattr(self.app, 'neutron_boost_var', None)
+        loadout = (state.drive, state.max_jump_range)
+        if loadout != (None, None) and loadout != self._last_loadout:
+            self._last_loadout = loadout
+            boost = getattr(self.app, 'neutron_boost_var', None) if boost_too else None
             if boost is not None:
-                boost.set(BOOST_LABELS['x6' if drive.mk2 else 'x4'])
+                mk2 = state.drive is not None and state.drive.mk2
+                boost.set(BOOST_LABELS['x6' if mk2 else 'x4'])
 
     def set_auto(self, value: bool) -> None:
         try:
@@ -110,8 +115,7 @@ class RangeBinding:
                 except Exception as e:
                     logger.debug(f"Auto checkbox not updated: {e}")
             if self.auto:
-                self._last_drive = None
-                self._apply_auto(self.state)
+                self._apply_auto(self.state, boost_too=False)  # J4: only a Loadout sets the boost
         except Exception as e:
             logger.error(f"Auto switch failed: {e}")
 
@@ -119,7 +123,7 @@ class RangeBinding:
         """A key in a range entry: text that differs from what we wrote means the user typed."""
         try:
             var = var if var is not None else self.app.jump_range
-            if self.auto and self._written is not None and var.get() != self._written:
+            if self.auto and var.get() != self._written:
                 self.set_auto(False)
         except Exception as e:
             logger.error(f"Range key handler failed: {e}")
@@ -136,6 +140,11 @@ def binding_for(app) -> RangeBinding:
 def _inside(widget, parent) -> bool:
     return widget is not None and (getattr(widget, 'master', None) is parent
                                    or str(widget).startswith(str(parent) + '.'))
+
+
+def key_handler(binding: RangeBinding, app, var_name: str):
+    """<KeyRelease> handler of one range entry: compares the variable named ``var_name``."""
+    return lambda _event=None: binding.on_key(getattr(app, var_name, None))
 
 
 def add_range_panel(app, parent) -> None:
@@ -155,8 +164,6 @@ def add_range_panel(app, parent) -> None:
                                ('neutron_range_entry', 'neutron_range_var')):
             entry = getattr(app, name, None)
             if _inside(entry, parent):
-                entry.bind('<KeyRelease>',
-                           lambda _e, n=var_name: binding.on_key(getattr(app, n, None)),
-                           add='+')
+                entry.bind('<KeyRelease>', key_handler(binding, app, var_name), add='+')
     except Exception as e:
         logger.error(f"Range panel not added: {e}")

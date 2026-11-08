@@ -48,7 +48,7 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
 | `edmrn/app.py` (location fallback) | Three lines in the jump handler: `tracked_system(self)` is asked before `cmdr_location.get()` when `last_known_system` is empty | Same reason: the compound header text is not a system name (location spec) | no |
 | `edmrn/app.py` (ship range) | Two lines directly after `install_edmrn_crew(self)` in `EDMRN_App.__init__`: `edmrn.ext.ship.install(self)` | Wires the ship range tracker: journal and `Status.json` listeners, the cold start (ship range spec) | no |
 | `edmrn/ui_components.py` (route tab) | Two lines after `self.app.range_entry.pack(...)` in `create_optimizer_tab`: `add_range_panel(self.app, jump_input_frame)` | Shows laden/now/max range and the Auto switch (ship range spec J2, J3). The same widgets in `app.py`'s `_create_optimizer_tab` are dead upstream code and get no hook | no |
-| `edmrn/ui_components.py` (range) | Two lines after the Neutron range entry: `add_range_panel(self.app, range_frame)` | Same, on the Neutron tab | no |
+| `edmrn/ui_components.py` (range) | Two lines after the Neutron range entry in `create_neutron_tab`: `add_range_panel(self.app, range_frame)` | Same, on the Neutron tab | no |
 | `edmrn/app.py` (`_journal_callback`) | The `Loadout` branch fills `jump_range` with `MaxJumpRange` only when `ship_tracker` is absent | `MaxJumpRange` assumes no cargo and one jump of fuel; the laden range replaces it (ship range spec J2) | yes |
 
 ## Neutron route persistence (neutron resume spec, ADR-0004)

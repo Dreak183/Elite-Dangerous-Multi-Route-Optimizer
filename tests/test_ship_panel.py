@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -6,7 +7,8 @@ import pytest
 from edmrn.ext import ship as ship_module
 from edmrn.ext.fsd import drive_from_loadout
 from edmrn.ext.ship import ShipState, install
-from edmrn.ext.ship_panel import RangeBinding, add_range_panel, binding_for, range_text
+from edmrn.ext.ship_panel import (RangeBinding, add_range_panel, binding_for, key_handler,
+                                  range_text)
 from edmrn.fuel_tracker import FuelTracker
 from edmrn.journal import JournalMonitor
 from test_fsd import MANDALAY_BOOSTED
@@ -121,6 +123,60 @@ def test_new_drive_sets_boost_label_while_auto():
     RangeBinding(make_app()).on_state(state())   # no neutron_boost_var: no error
 
 
+def test_edit_before_first_write_turns_auto_off():
+    app = SimpleNamespace(jump_range=FakeVar("75"))
+    binding = RangeBinding(app)
+    app.jump_range.set("60")
+    binding.on_key()
+    assert binding.auto is False
+    binding.on_state(state())
+    assert app.jump_range.get() == "60"
+
+
+def test_unchanged_text_before_first_write_keeps_auto():
+    app = SimpleNamespace(jump_range=FakeVar("75"))
+    binding = RangeBinding(app)
+    binding.on_key()
+    assert binding.auto is True
+
+
+def test_unrecognised_drive_loadout_sets_x4():
+    boost = FakeVar()
+    binding = RangeBinding(make_app(neutron_boost_var=boost))
+    binding.on_state(replace(state(), drive=MK2))
+    assert boost.get() == "x6 (Caspian)"
+    binding.on_state(ShipState(max_jump_range=40.0))
+    assert boost.get() == "x4 (Normal)"
+
+
+def test_set_auto_true_leaves_the_boost_alone():
+    boost = FakeVar("x6 (Caspian)")
+    app = make_app(neutron_boost_var=boost)
+    binding = RangeBinding(app)
+    binding.on_state(state())
+    assert boost.get() == "x4 (Normal)"
+    boost.set("x6 (Caspian)")
+    binding.set_auto(False)
+    binding.on_state(replace(state(), drive=MK2))   # a Loadout while Auto is off
+    app.jump_range.set("1")
+    binding.set_auto(True)
+    assert boost.get() == "x6 (Caspian)"
+    assert app.jump_range.get() == "87.1"
+    binding.on_state(replace(state(), drive=MK2, cargo=5.0))   # same loadout: still no rewrite
+    assert boost.get() == "x6 (Caspian)"
+
+
+def test_key_handlers_use_their_own_variable():
+    route, neutron = FakeVar("1"), FakeVar("1")
+    app = SimpleNamespace(jump_range=route, neutron_range_var=neutron)
+    binding = RangeBinding(app)
+    route.set("2")
+    key_handler(binding, app, "neutron_range_var")()
+    assert binding.auto is True      # the neutron var still holds the baseline
+    key_handler(binding, app, "jump_range")()
+    assert binding.auto is False
+
+
 def test_on_state_never_raises():
     app = SimpleNamespace(jump_range=None)
     RangeBinding(app).on_state(state())
@@ -200,11 +256,13 @@ def test_add_range_panel_builds_widgets(_tk_root):
     assert binding.auto is False
 
 
-def test_add_range_panel_logs_instead_of_raising(_tk_root, monkeypatch):
+def test_add_range_panel_logs_instead_of_raising(_tk_root, monkeypatch, caplog):
     frame = ctk.CTkFrame(_tk_root)
 
     def boom(self, *a, **k):
         raise RuntimeError("pack failed")
 
     monkeypatch.setattr(ctk.CTkLabel, "pack", boom)
-    add_range_panel(SimpleNamespace(root=_tk_root, jump_range=FakeVar()), frame)
+    with caplog.at_level(logging.ERROR, logger="EDMRN.ShipPanel"):
+        add_range_panel(SimpleNamespace(root=_tk_root, jump_range=FakeVar()), frame)
+    assert any("pack failed" in r.getMessage() for r in caplog.records)
