@@ -4,7 +4,7 @@ import json
 import pytest
 
 from edmrn_relay.engine import BadSig, Checked, decode_item, roster_entry
-from relay_fakes import Clock, Harness, auth_frame
+from relay_fakes import Clock, Harness
 from test_crew_vectors import VECTORS, now as vectors_now, raw
 
 v = json.loads(VECTORS.read_text(encoding="utf-8"))
@@ -50,4 +50,5 @@ def test_decode_item_classes():
     assert decode_item({"e": good["e"], "s": "A" * 87}) == "oversize"
     env = json.loads(raw(good["e"]))
     assert decode_item({"e": good["e"], "s": "A"}) == BadSig(env["author"], env["seq"])
+    assert decode_item({"e": good["e"], "s": "AA"}) == BadSig(env["author"], env["seq"])
     assert isinstance(decode_item({"e": good["e"], "s": good["s"], "x": 1}), Checked)

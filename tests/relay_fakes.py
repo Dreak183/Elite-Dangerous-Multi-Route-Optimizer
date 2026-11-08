@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import secrets
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -147,7 +146,7 @@ class Harness:
             target = action.session.conn
             if isinstance(action, Send):
                 target.frames.append(json.loads(action.text))
-            else:
+            elif isinstance(action, Close):
                 target.closed = (action.code, action.reason)
                 self.relay.disconnect(action.session)
 

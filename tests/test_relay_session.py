@@ -46,10 +46,12 @@ def test_genesis_for_another_group_is_refused(h):
 def test_nothing_is_stored_before_a_valid_genesis(h):
     g = new_group()
     alice = key_for("alice")
+    changes = h.store.db.total_changes
     assert h.authed(g, leader).closed == (4003, "no group")
     assert h.authed(g, alice, genesis=h.genesis(alice, g)).closed == (4003, "no group")
     assert h.authed(g, leader, genesis=h.genesis(leader, new_group())).closed == (4003, "no group")
     assert h.authed(g, leader, sig="A" * 86).closed == (4001, "bad signature")
+    assert h.store.db.total_changes == changes
     assert set(h.table_counts(g).values()) == {0}
     assert g not in h.relay.groups
     h.create_group(g, leader)
@@ -206,3 +208,43 @@ def test_connect_refuses_a_group_id_that_is_not_a_uuid7(h):
 def test_strangers_are_distinct_valid_authors():
     a, b = strangers(2)
     assert a.author != b.author and len(a.sign(b"x")) == 64
+
+
+def test_genesis_checks_each_refuse_without_writing(h):
+    g = new_group()
+    alice = key_for("alice")
+    good = h.genesis(leader, g)
+    forged = {"e": good["e"], "s": h.genesis(leader, g)["s"]}
+    # signed by the leader over bytes that name alice as author: only the author check refuses it
+    other_author = h.genesis(alice, g)
+    other_author["s"] = proto.b64(leader.sign(proto.unb64(other_author["e"], 16384)))
+    # a valid invite by the leader for this group: only the kind check refuses it
+    wrong_kind = h.envelope(leader, 1, "invite", {
+        "group_id": g, "invite_id": new_group(), "token_hash": "0" * 64,
+        "expires_at": h.stamp(3600), "label": None})
+    changes = h.store.db.total_changes
+    for genesis in (forged, other_author, wrong_kind):
+        assert h.authed(g, leader, genesis=genesis).closed == (4003, "no group")
+    assert h.store.db.total_changes == changes
+    assert g not in h.relay.groups
+
+
+def test_closing_session_ignores_everything_before_disconnect(h):
+    g = new_group()
+    c = h.open(g)
+    session = h.session(c)
+    actions = h.relay.receive(session, proto.encode({"t": "have", "heads": {}}))
+    assert [type(a).__name__ for a in actions] == ["Close"] and session.closing
+    assert h.relay.receive(session, "not json") == []
+    assert h.relay.expire_auth(session) == []
+
+
+def test_replace_skips_a_member_session_already_closing(h):
+    g = new_group()
+    first = h.create_group(g, leader)
+    old = h.session(first)
+    old.closing = True
+    second = h.open(g)
+    hello = second.next_of("hello")
+    actions = h.relay.receive(h.session(second), proto.encode(auth_frame(leader, g, hello["nonce"])))
+    assert not any(type(a).__name__ == "Close" for a in actions)

@@ -152,17 +152,19 @@ class Relay:
             group = Group(group_id, None, {}, [], None, [], {})
         else:
             group = Group(group_id, loaded.leader, dict(loaded.heads), [], None, [], {})
-            self.reload_roster(group)
+            self._set_roster(group, loaded.roster)
         self.groups[group_id] = group
         return group
 
     def reload_roster(self, group: Group) -> None:
+        self._set_roster(group, self.store.roster_bytes(group.group_id))
+
+    def _set_roster(self, group: Group, raws: list[bytes]) -> None:
         if group.leader is None:
             group.roster_entries, group.roster = [], None
             return
         when = datetime.fromtimestamp(self._now(), timezone.utc)
-        entries = [parse_roster_envelope(raw, frozenset(), when)
-                   for raw in self.store.roster_bytes(group.group_id)]
+        entries = [parse_roster_envelope(raw, frozenset(), when) for raw in raws]
         group.roster_entries = [e for e in entries if e is not None]
         group.roster = compute_roster(group.roster_entries, group.group_id, group.leader)
 
@@ -180,7 +182,7 @@ class Relay:
 
     def expire_auth(self, session: Session) -> list[Action]:
         if session.state == "hello" and not session.closing:
-            return self._close(session, 4001, "auth timeout")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "auth timeout")
         return []
 
     def disconnect(self, session: Session) -> None:
@@ -206,11 +208,11 @@ class Relay:
         if session.state == "closed" or session.closing:
             return []
         if session.state == "hello" and self._now() - session.opened_at > AUTH_TIMEOUT:
-            return self._close(session, 4001, "auth timeout")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "auth timeout")
         if isinstance(message, (bytes, bytearray)):
-            return self._close(session, 4008, "binary")
+            return self._close(session, proto.CLOSE_POLICY, "binary")
         if len(message.encode("utf-8", "surrogatepass")) > proto.MAX_FRAME_BYTES:
-            return self._close(session, 4008, "too_big")
+            return self._close(session, proto.CLOSE_POLICY, "too_big")
         try:
             frame = proto.decode(message)
         except proto.FrameError:
@@ -218,7 +220,7 @@ class Relay:
         if session.state == "hello":
             if frame["t"] == "auth":
                 return self._auth(session, frame)
-            return self._close(session, 4001, "auth first")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "auth first")
         return self._member_frame(session, frame)
 
     def _member_frame(self, session: Session, frame: dict) -> list[Action]:
@@ -231,20 +233,20 @@ class Relay:
         group = self.group(session.group_id)
         author = frame.get("author")
         if frame.get("group") != session.group_id or not ev.is_author(author):
-            return self._close(session, 4001, "bad auth")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "bad auth")
         try:
             sig = proto.unb64(frame.get("sig"), proto.SIGNATURE_BYTES)
         except proto.FrameError:
-            return self._close(session, 4001, "bad signature")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "bad signature")
         if (len(sig) != proto.SIGNATURE_BYTES
                 or not verify(author, sig, proto.auth_message(session.group_id, session.nonce))):
-            return self._close(session, 4001, "bad signature")
+            return self._close(session, proto.CLOSE_BAD_AUTH, "bad signature")
         if group.leader is None:
             genesis = None
             if author in self.config.leaders:
                 genesis = self._check_auth_envelope(session, frame.get("genesis"), author, "group")
             if genesis is None:
-                return self._close(session, 4003, "no group")
+                return self._close(session, proto.CLOSE_FORBIDDEN, "no group")
             checked, _ = genesis
             self.store.create_group(session.group_id, author, int(self._now()),
                                     LogRow(author, checked.env["seq"], checked.e, checked.s))
@@ -254,14 +256,14 @@ class Relay:
         # Task 4: join at auth.
         member = group.roster.members.get(author) if group.roster else None
         if member is None:
-            return self._close(session, 4003, "not_member")
+            return self._close(session, proto.CLOSE_FORBIDDEN, "not_member")
         if member.last_seq is not None:
-            return self._close(session, 4003, "removed")
+            return self._close(session, proto.CLOSE_FORBIDDEN, "removed")
         actions: list[Action] = []
         for other in list(group.sessions):
             if (other is not session and other.state == "member" and other.author == author
                     and not other.closing):
-                actions += self._close(other, 4000, "replaced")
+                actions += self._close(other, proto.CLOSE_REPLACED, "replaced")
         session.state = "member"
         session.author = author
         # Task 4: a `have` to every other member session on admission.
