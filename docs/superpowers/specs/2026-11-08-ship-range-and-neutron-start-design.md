@@ -113,7 +113,9 @@ Two defects make plotted neutron routes wrong in daily use.
   and never sees that session's `Loadout`.
 - `install(app)` creates `app.ship_tracker`, registers both listeners and starts the cold start.
   Observers reach Tk through `root.after`.
-- `start_boost(app, from_system, used_from)`: the journal part of J5's order, or `None`.
+- `start_boost(app, from_system)`: the journal part of J5's order when `from_system` is the tracked
+  current system: the pending boost or the arrival star's multiplier, `1.0` when the journal knows
+  the arrival star and it gives no boost, and `None` when the journal knows nothing about it.
 
 ### UI: range panel
 
@@ -129,7 +131,8 @@ Two defects make plotted neutron routes wrong in daily use.
 - `optimize_start(data, range_ly, start_boost, multiplier)` takes Spansh's result body and returns
   `(data, note)`; `data` is a copy whose `result.system_jumps` follows J5, `note` is the J5 line or
   `None`. It never raises: malformed input returns the input unchanged.
-- `multiplier` (the request's 4 or 6) applies when `start_boost` is `None` and the first entry is
+- `multiplier` (the request's 4 or 6) applies only when `start_boost` is `None` (no journal data)
+  and the first entry is
   `neutron_star`.
 
 ### Upstream hook points
@@ -138,8 +141,8 @@ Two defects make plotted neutron routes wrong in daily use.
 |---|---|
 | `edmrn/app.py` | Two lines after `install_edmrn_crew(self)`: `edmrn.ext.ship.install(self)` |
 | `edmrn/app.py` (`_journal_callback`) | The `Loadout` branch skips its `jump_range` fill when `app.ship_tracker` exists |
-| `edmrn/app.py` (route tab) | One line after `self.range_entry.pack(...)`: `add_range_panel(self, jump_input_frame)` |
-| `edmrn/ui_components.py` | One line after the Neutron range entry: `add_range_panel(self.app, range_frame)` |
+| `edmrn/ui_components.py` (`create_optimizer_tab`) | Two lines after the route tab's range entry: `add_range_panel(self.app, <its frame>)`; upstream's `app._create_optimizer_tab` is dead code |
+| `edmrn/ui_components.py` (`create_neutron_tab`) | Two lines after the Neutron range entry: `add_range_panel(self.app, range_frame)` |
 | `edmrn/neutron.py` | `calculate_route` and `calculate_route_async` accept `start_boost=None`; after a successful poll, `optimize_start` runs before `_process_route_data` and its note joins the result's `note` |
 | `edmrn/neutron_manager.py` | Passes `start_boost=edmrn.ext.ship.start_boost(...)` and shows the joined note |
 
