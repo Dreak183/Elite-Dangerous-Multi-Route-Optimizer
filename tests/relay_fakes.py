@@ -1,7 +1,9 @@
 """Harness of the relay tests: keys, envelopes, fake connections and a driver over the engine."""
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -16,6 +18,7 @@ from edmrn.ext import crew_protocol as proto
 from edmrn.ext import crew_roster
 from edmrn_relay.config import RelayConfig
 from edmrn_relay.engine import Action, Close, Relay, Send, Session, utc_day
+from edmrn_relay.server import RelayServer
 from edmrn_relay.store import RelayStore
 
 TOKEN = "11" * 32
@@ -271,3 +274,51 @@ class Harness:
         return {t: self.store.db.execute(
             f"SELECT COUNT(*) FROM {t} WHERE group_id = ?", (group_id,)).fetchone()[0]
             for t in ("groups", "log", "heads", "roster", "quota", "status")}
+
+
+class ServerThread:
+    """A real RelayServer on its own event loop in thread "edmrn-relay-test"; `port` is the bound port."""
+
+    def __init__(self, config: RelayConfig) -> None:
+        self.port = 0
+        self._server = RelayServer(config)
+        self._loop = asyncio.new_event_loop()
+        self._started = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="edmrn-relay-test", daemon=True)
+        self._thread.start()
+        if not self._started.wait(10):
+            self._shutdown_loop()
+            raise RuntimeError("the relay did not start within 10 s")
+        if self._error is not None:
+            self._thread.join(10)
+            raise self._error
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        try:
+            try:
+                self.port = self._loop.run_until_complete(self._server.start())
+            except BaseException as error:  # handed to the constructor's caller
+                self._error = error
+                return
+            finally:
+                self._started.set()
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
+
+    def _shutdown_loop(self) -> None:
+        if self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+            self._thread.join(10)
+
+    def stop(self) -> None:
+        if self._thread.is_alive():
+            future = asyncio.run_coroutine_threadsafe(self._server.stop(), self._loop)
+            try:
+                future.result(10)
+            finally:
+                self._shutdown_loop()
+        self._thread.join(10)
+        assert not self._thread.is_alive(), "the relay test thread did not stop"

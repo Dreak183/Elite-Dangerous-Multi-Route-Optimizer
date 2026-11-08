@@ -63,8 +63,7 @@ After the run, `$H/EDMRN_Route_Data/crew_keys/` holds one key file and the `crew
 
 From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
 against real data (`../architecture/patterns.md`). No default test touches the network (tests
-marked `loopback` reach 127.0.0.1 only; the opt-in `relay_e2e` test below talks to `wrangler dev`
-on localhost). Monitor tests start real threads and poll for up to 5 s each.
+marked `loopback` reach 127.0.0.1 only). Monitor tests start real threads and poll for up to 5 s each.
 
 ## Crew relay
 
@@ -86,16 +85,7 @@ Shared client/relay test vectors (`crew-relay/test/vectors.json`) are generated 
 Regenerate them only when the spec changes a shared rule (envelope structure, signatures, roster
 membership, timestamp plausibility, invite format or character whitelist).
 
-Opt-in end-to-end test (two EDMRN crew clients against `wrangler dev` on `127.0.0.1:8799`; skipped
-by default):
-
-```
-# Git Bash
-EDMRN_RELAY_E2E=1 .venv/Scripts/python.exe -m pytest tests/test_relay_e2e.py -q
-
-# PowerShell
-$env:EDMRN_RELAY_E2E='1'; .venv/Scripts/python.exe -m pytest tests/test_relay_e2e.py -q
-```
+`tests/test_relay_loopback.py` runs two EDMRN crew clients against the real relay on 127.0.0.1 in the default run.
 
 For manual local tries (pass your author key from Settings > Crew...):
 

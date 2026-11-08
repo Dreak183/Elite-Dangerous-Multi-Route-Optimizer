@@ -18,8 +18,6 @@ import pytest  # noqa: E402  (must follow the redirect)
 
 @pytest.fixture(autouse=True)
 def no_network(request, monkeypatch):
-    if request.node.get_closest_marker("relay_e2e"):
-        return  # the opt-in end-to-end test talks to wrangler dev on 127.0.0.1 (spec B1 Testing)
     import socket
 
     def refuse(*args, **kwargs):
