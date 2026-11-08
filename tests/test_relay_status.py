@@ -236,8 +236,33 @@ def test_shutdown_closes_sessions_that_have_not_authenticated(h):
     assert pending.closed == (1001, "relay shutting down")
 
 
+def _spy(h):
+    """Every nonce the relay sent and every `e` any client sent, collected as they pass."""
+    seen = {"nonces": [], "es": []}
+    apply, send = h._apply, h.send
+
+    def spy_apply(actions):
+        for a in actions:
+            if hasattr(a, "text"):
+                f = json.loads(a.text)
+                if f.get("t") == "hello":
+                    seen["nonces"].append(f["nonce"])
+        apply(actions)
+
+    def spy_send(conn, frame):
+        if isinstance(frame, dict):
+            for item in frame.get("items", []) + [frame, frame.get("join"), frame.get("genesis")]:
+                if isinstance(item, dict) and isinstance(item.get("e"), str):
+                    seen["es"].append(item["e"])
+        send(conn, frame)
+
+    h._apply, h.send = spy_apply, spy_send
+    return seen
+
+
 def test_logs_never_carry_envelope_contents(h, caplog):
     caplog.set_level(logging.DEBUG, "edmrn_relay")
+    seen = _spy(h)
     g, _, _, lc, ac = h.two_members()
     secret = h.envelope(alice, 2, "visit", {"commander": "A", "system": "Secret Sol",
                                             "address": "2", "coords": None})
@@ -247,8 +272,90 @@ def test_logs_never_carry_envelope_contents(h, caplog):
     h.send(lc, {"t": "evs", "items": [h.envelope(
         leader, 3, "remove", {"group_id": g, "member": A, "last_seq": 2})]})
     h.shutdown()
-    forbidden = ["Secret Sol", secret["e"], st["e"], TOKEN]
-    text = "\n".join(r.getMessage() for r in caplog.records)
+    # genesis, invite, join, visit, status, remove: all seen; two connections, two nonces
+    assert len(seen["es"]) >= 6 and len(seen["nonces"]) >= 2 and len(set(seen["es"])) >= 6
+    text = " ".join(r.getMessage() for r in caplog.records)
     assert caplog.records
-    for needle in forbidden:
+    for needle in ["Secret Sol", TOKEN, *seen["es"], *seen["nonces"]]:
         assert needle not in text
+
+
+def test_a_present_member_without_a_live_status_is_served_from_the_store(h):
+    g, _, _, lc, ac = h.two_members()
+    h.send(ac, h.status(alice, 0.3))
+    lc.take()
+    ac2 = h.authed(g, alice)  # replaces ac; ac2 holds no status of its own
+    ac2.take()
+    h.send(ac2, h.status(alice, 0.2))
+    assert ac2.next_of("err")["code"] == "rate"
+    again = h.authed(g, leader)
+    assert doc(again.next_of("st"))["status"]["hull"] == 0.3
+
+
+def test_a_replaced_sessions_late_disconnect_does_not_overwrite_a_newer_status(h):
+    g, _, _, lc, ac = h.two_members()
+    h.send(ac, h.status(alice, 0.3))
+    old = h.session(ac)
+    # the replacement is applied without the old connection's disconnect (it arrives late)
+    ac2 = h.open(g)
+    hello = ac2.next_of("hello")
+    from relay_fakes import auth_frame
+    actions = h.relay.receive(h.session(ac2), proto.encode(auth_frame(alice, g, hello["nonce"])))
+    h._apply([a for a in actions if h.session is not None and a.session is not old])
+    assert stored(h, g) == [A]
+    h.clock.advance(30)
+    h.send(ac2, h.status(alice, 0.1))
+    h.close(ac2)
+    h.relay.disconnect(old)  # the late one
+    fresh = h.authed(g, leader)
+    assert doc(fresh.next_of("st"))["status"]["hull"] == 0.1
+
+
+class _Boom:
+    def __init__(self, store):
+        self.store, self.fail = store, True
+
+    def __getattr__(self, name):
+        return getattr(self.store, name)
+
+    def save_status(self, *a):
+        if self.fail:
+            raise RuntimeError("disk full")
+        return self.store.save_status(*a)
+
+
+def test_a_failing_save_in_disconnect_does_not_raise_and_removes_the_session(h, caplog):
+    g, _, _, lc, ac = h.two_members()
+    h.send(ac, h.status(alice, 0.3))
+    h.relay.store = _Boom(h.store)
+    caplog.set_level(logging.ERROR, "edmrn_relay")
+    s = h.session(ac)
+    h.close(ac)
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+    assert s.state == "closed" and s not in h.relay.groups[g].sessions
+    assert stored(h, g) == []
+
+
+def test_a_failing_save_in_shutdown_still_closes_everyone_and_disconnect_retries(h, caplog):
+    g, _, _, lc, ac = h.two_members()
+    h.send(ac, h.status(alice, 0.3))
+    boom = h.relay.store = _Boom(h.store)
+    caplog.set_level(logging.ERROR, "edmrn_relay")
+    actions = h.relay.shutdown()
+    assert sorted(a.session.author for a in actions) == sorted([L, A])
+    assert any(r.levelno == logging.ERROR for r in caplog.records)
+    assert stored(h, g) == []
+    boom.fail = False
+    h._apply(actions)  # the closes are applied, each disconnect retries the save
+    assert stored(h, g) == [A]
+
+
+def test_shutdown_skips_sessions_already_closing_and_logs_each_close(h, caplog):
+    g, _, _, lc, ac = h.two_members()
+    caplog.set_level(logging.INFO, "edmrn_relay")
+    h.relay._close(h.session(ac), 4000, "replaced")  # closing, disconnect not yet applied
+    caplog.clear()
+    actions = h.relay.shutdown()
+    assert [a.session for a in actions] == [h.session(lc)]
+    lines = [r.getMessage() for r in caplog.records if "close" in r.getMessage()]
+    assert lines == [f"close 1001 relay shutting down author={L[:12]}"]

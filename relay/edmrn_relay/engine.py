@@ -232,7 +232,9 @@ class Relay:
 
     def _persist_status(self, session: Session) -> None:
         """Write a member's latest status to the store and forget it in memory (B1 S8). A failing
-        write is logged and keeps the status in memory for the next attempt."""
+        write is logged and the status stays on the session; `disconnect` then drops the session,
+        so only `shutdown` (which is followed by `disconnect`) could try again, and a failure in
+        `disconnect` loses the status."""
         if session.status is None or session.author is None:
             return
         try:
@@ -248,11 +250,10 @@ class Relay:
         actions: list[Action] = []
         for group in list(self.groups.values()):
             for session in list(group.sessions):
-                if session.state == "closed":
+                if session.state == "closed" or session.closing:
                     continue
                 self._persist_status(session)
-                session.closing = True
-                actions.append(Close(session, CLOSE_GOING_AWAY, "relay shutting down"))
+                actions += self._close(session, CLOSE_GOING_AWAY, "relay shutting down")
         log.info("shutdown sessions=%d", len(actions))
         return actions
 
@@ -349,8 +350,8 @@ class Relay:
             if (other is session or other.state != "member" or other.closing
                     or other.author == session.author or not active(other.author)):
                 continue
-            live.add(other.author)
-            if other.status is not None:
+            if other.status is not None:  # a member without one is served from the store below
+                live.add(other.author)
                 actions.append(Send(session, proto.encode(proto.status_frame(*other.status))))
         for author, e, s in self.store.statuses(group.group_id):
             if author != session.author and author not in live and active(author):
@@ -591,6 +592,7 @@ class Relay:
         for other in list(group.sessions):
             if (other is not session and other.state == "member" and other.author == author
                     and not other.closing):
+                self._persist_status(other)  # its late disconnect then has nothing older to write
                 actions += self._close(other, proto.CLOSE_REPLACED, "replaced")
         session.state = "member"
         session.author = author
