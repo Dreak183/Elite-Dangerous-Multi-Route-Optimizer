@@ -1,6 +1,9 @@
 import logging
 import os
+import socket
 from pathlib import Path
+
+import pytest
 
 from edmrn.logger import get_logger
 
@@ -18,3 +21,28 @@ def test_import_time_log_file_lives_in_session_home():
              and h.baseFilename.endswith(".log")]  # skips pytest's own devnull handler
     assert files, "upstream logging did not create a file handler"
     assert all("edmrn-test-home-" in f for f in files), files
+
+
+@pytest.mark.loopback
+def test_loopback_marker_allows_127_0_0_1_only():
+    with pytest.raises(RuntimeError):
+        socket.create_connection(("192.0.2.1", 9), timeout=0.1)
+    with pytest.raises(RuntimeError):
+        socket.getaddrinfo("localhost", 80)
+    with pytest.raises(RuntimeError):
+        socket.socket().connect(("10.255.255.1", 9))
+    with pytest.raises(RuntimeError):
+        socket.socket().connect_ex(("10.255.255.1", 9))
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        with socket.create_connection(("127.0.0.1", listener.getsockname()[1])):
+            pass
+
+
+def test_unmarked_tests_cannot_reach_loopback():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        with pytest.raises(RuntimeError):
+            socket.create_connection(("127.0.0.1", listener.getsockname()[1]))

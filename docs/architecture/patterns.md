@@ -34,7 +34,7 @@ Rule (API hardening spec A1–A3):
 - Tests inject `call`/`transport`, `sleep` and `clock`; patch the name the calling module
   imported, or pass `call=`; `call=`/`transport=` defaults are bound at import. An autouse fixture
   in `tests/conftest.py` makes `socket.connect`, `getaddrinfo` and `create_connection` raise, so a
-  test that reaches the network fails.
+  test that reaches the network fails; tests marked `loopback` may connect to 127.0.0.1 only.
 - `tests/test_http_path.py` fails when any module other than `api.py` uses the direct forms
   `requests.<verb>(`, `requests.Session(` or `urlopen(`. Aliased imports (`from requests import
   get`, `import requests as ...`) and `http.client` are not detected; review catches them. The

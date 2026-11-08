@@ -25,6 +25,36 @@ def no_network(request, monkeypatch):
     def refuse(*args, **kwargs):
         raise RuntimeError("network access in tests is forbidden")
 
+    if request.node.get_closest_marker("loopback"):
+        # asyncio on Windows connects a loopback socket pair per event loop; relay tests talk to 127.0.0.1
+        real = {name: getattr(socket.socket, name) for name in ("connect", "connect_ex")}
+        real_getaddrinfo, real_create = socket.getaddrinfo, socket.create_connection
+
+        def only_loopback(address):
+            if not (isinstance(address, tuple) and address and address[0] == "127.0.0.1"):
+                refuse()
+
+        def guarded_method(name):
+            def method(self, address, *args, **kwargs):
+                only_loopback(address)
+                return real[name](self, address, *args, **kwargs)
+            return method
+
+        def guarded_getaddrinfo(host, *args, **kwargs):
+            if host != "127.0.0.1":
+                refuse()
+            return real_getaddrinfo(host, *args, **kwargs)
+
+        def guarded_create(address, *args, **kwargs):
+            only_loopback(address)
+            return real_create(address, *args, **kwargs)
+
+        for name in real:
+            monkeypatch.setattr(socket.socket, name, guarded_method(name))
+        monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
+        monkeypatch.setattr(socket, "create_connection", guarded_create)
+        return
+
     for name in ("connect", "connect_ex"):
         monkeypatch.setattr(socket.socket, name, refuse)
     monkeypatch.setattr(socket, "getaddrinfo", refuse)
