@@ -27,10 +27,15 @@
 
 1. Read `../../CLAUDE.md`, the ADRs (`../architecture/decisions/`), `../architecture/overview.md`
    and `../knowledge/upstream-baseline.md`.
-2. **Self-hosted relay (Phase 2):** branch `feature/self-hosted-relay` holds ADR-0009 and the spec
-   `../superpowers/specs/2026-11-08-self-hosted-relay-design.md`. Next: plan
-   (`superpowers:writing-plans`) → subagent-driven development → final review → merge. The port's
-   behaviour reference is `crew-relay/src/group.ts` with its tests, deleted in the plan's last task.
+2. **Self-hosted relay (Phase 2), in progress on branch `feature/self-hosted-relay`:** ADR-0009, the
+   spec `../superpowers/specs/2026-11-08-self-hosted-relay-design.md` and the 9-task plan
+   `../superpowers/plans/2026-11-08-self-hosted-relay.md` are committed; execution runs with
+   `superpowers:subagent-driven-development`. Its ledger (completed tasks, rulings, deferred minors)
+   is `../../.superpowers/sdd/2026-11-08-self-hosted-relay/progress.md` — git-ignored, local to this
+   machine; if it is missing, `git log` on the branch shows which tasks landed (`feat(relay): …`).
+   Rulings so far: exact version pins in `relay/requirements.txt` (amends spec R7); the client's
+   missing status resend after `err rate` goes to Spec B2. Docker is not installed on the
+   development machine, so the image is first built in the deploy session.
 3. **Deploy session with the commander** (needs the commander): server OS, Docker or not, an
    existing reverse proxy on 443, the DNS record for `galroute.the-hub.cloud`, and the leader key
    from Settings > Crew....
