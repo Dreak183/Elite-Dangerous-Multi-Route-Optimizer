@@ -5,14 +5,13 @@ Event field shapes: knowledge/reference-data.md section 6 in the EDProjects hub.
 """
 from __future__ import annotations
 
-import glob
-import json
 import math
-import os
+import os  # noqa: F401  (tests patch os.path through this module)
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
+from edmrn.ext.journal_replay import replay_newest
 from edmrn.journal import JournalMonitor
 from edmrn.logger import get_logger
 
@@ -181,42 +180,15 @@ class LocationTracker:
                 logger.error(f"Location observer failed: {e}")
 
 
-def _mtime_or_zero(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0
-
-
 def cold_start(journal_dir: Optional[str], tracker: LocationTracker,
                max_files: int = 5) -> Optional[LocationState]:
     """Replay the newest journal files until one yields a system; hand it to the tracker."""
-    if not journal_dir or not os.path.isdir(journal_dir):
+    replay = replay_newest(journal_dir, LocationTracker,
+                           lambda state: state.system is not None, max_files)
+    if replay is None:
         return None
-    try:
-        files = sorted(glob.glob(os.path.join(glob.escape(journal_dir), 'Journal.*.log')),
-                       key=_mtime_or_zero, reverse=True)
-    except OSError as e:
-        logger.error(f"Cold start could not list journals: {e}")
-        return None
-    for path in files[:max_files]:
-        replay = LocationTracker()
-        try:
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    if '"event"' not in line:
-                        continue
-                    try:
-                        replay.feed(json.loads(line))
-                    except (ValueError, RecursionError):
-                        continue
-        except OSError as e:
-            logger.warning(f"Cold start skipped {os.path.basename(path)}: {e}")
-            continue
-        if replay.state.system is not None:
-            tracker.adopt(replay.state)
-            return replay.state
-    return None
+    tracker.adopt(replay.state)
+    return replay.state
 
 
 def format_location(state: LocationState) -> Optional[str]:

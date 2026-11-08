@@ -64,6 +64,7 @@ GOOD_FUEL = {"FuelMain": 20.0}
     {"Flags": MAIN_SHIP, "Cargo": True},
     {"Flags": MAIN_SHIP, "Cargo": float("nan")},
     {"Flags": MAIN_SHIP, "Cargo": float("inf")},
+    {"Flags": MAIN_SHIP, "Cargo": float("-inf")},
     {"Flags": MAIN_SHIP, "Fuel": {"FuelMain": float("nan")}},
     {"Flags": MAIN_SHIP, "Fuel": {"FuelMain": float("inf")}},
     {"Flags": MAIN_SHIP, "Fuel": {"FuelMain": -1.0}},
@@ -258,3 +259,117 @@ def test_install_registers_listeners_and_skips_upstream_fill(monkeypatch, tmp_pa
     without = fake_self()
     app_module.EDMRN_App._journal_callback(without, None, loadout)
     assert without.jump_range.calls == ["50.0"]
+
+
+def test_huge_int_cargo_does_not_drop_valid_fuel():
+    state = loaded(MANDALAY_BOOSTED)
+    new = apply_status(state, {"Flags": MAIN_SHIP, "Fuel": {"FuelMain": 20.0}, "Cargo": 10**400})
+    assert new.fuel_main == 20.0 and new.cargo is None
+    assert apply_status(state, {"Flags": MAIN_SHIP, "Fuel": {"FuelMain": 10**400}}) is state
+    assert loaded(event("JetConeBoost", BoostValue=10**400)).supercharge is None
+
+
+def _loadout(ts, max_range, **extra):
+    return {**MANDALAY_BOOSTED, "timestamp": ts, "MaxJumpRange": max_range, **extra}
+
+
+def test_adopt_takes_the_drive_when_live_events_are_newer_but_no_loadout_seen():
+    live = ShipTracker()
+    live.feed(event("FSDJump", ts="2026-10-11T13:00:00Z", StarSystem="X"))
+    replay = loaded(event("LoadGame", Commander="A"), MANDALAY_BOOSTED)
+    replay = replace(replay, journal_at="2026-10-11T12:00:00Z", system="Old")
+    seen = []
+    live.subscribe(seen.append)
+
+    assert live.adopt(replay) is True
+
+    assert live.state.drive is not None and live.state.max_jump_range == 95.444145
+    assert live.state.system == "X" and live.state.commander is None
+    assert live.state.journal_at == "2026-10-11T13:00:00Z"
+    assert len(seen) == 1
+    assert live.adopt(replay) is False   # nothing left to take
+
+
+def test_adopt_equal_timestamp_is_refused_for_everything_but_the_missing_drive():
+    live = ShipTracker()
+    live.feed(event("FSDJump", ts="2026-10-11T12:00:00Z", StarSystem="X"))
+    replay = replace(loaded(MANDALAY_BOOSTED), journal_at="2026-10-11T12:00:00Z", system="Old",
+                     cargo=9.0)
+    assert live.adopt(replay) is True
+    assert live.state.system == "X" and live.state.cargo is None
+    # a live Loadout seen: the replay is refused outright
+    live.feed(_loadout("2026-10-11T12:00:01Z", 50.0))
+    other = replace(loaded(UNKNOWN_DRIVE), journal_at="2026-10-11T12:00:00Z")
+    before = live.state
+    assert live.adopt(other) is False
+    assert live.state is before
+
+
+class StoringRoot:
+    def __init__(self):
+        self.callbacks = []
+
+    def after(self, ms, fn, *args):
+        self.callbacks.append(lambda: fn(*args))
+
+
+def test_tk_callback_uses_the_tracker_state_not_the_notified_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setattr(JournalMonitor, "event_listeners", [])
+    monkeypatch.setattr(FuelTracker, "status_listeners", [])
+    monkeypatch.setattr(ship_module, "journal_dir_for", lambda app: str(tmp_path))
+    seen = []
+
+    class Binding:
+        def on_state(self, state):
+            seen.append(state)
+
+    panel = SimpleNamespace(binding_for=lambda app: Binding())
+    monkeypatch.setitem(sys.modules, "edmrn.ext.ship_panel", panel)
+    root = StoringRoot()
+    app = SimpleNamespace(root=root, config=SimpleNamespace(journal_path=""), journal_monitor=None)
+    tracker = install(app)
+
+    tracker.feed(event("FSDJump", StarSystem="A"))
+    tracker.feed(event("FSDJump", StarSystem="B"))
+    assert len(root.callbacks) == 2
+    for callback in reversed(root.callbacks):
+        callback()
+
+    assert [s.system for s in seen] == ["B", "B"]
+
+
+def test_tk_callback_failure_is_logged_not_raised(monkeypatch, tmp_path):
+    monkeypatch.setattr(JournalMonitor, "event_listeners", [])
+    monkeypatch.setattr(FuelTracker, "status_listeners", [])
+    monkeypatch.setattr(ship_module, "journal_dir_for", lambda app: str(tmp_path))
+
+    def broken(app):
+        raise RuntimeError("no binding")
+
+    monkeypatch.setitem(sys.modules, "edmrn.ext.ship_panel", SimpleNamespace(binding_for=broken))
+    root = StoringRoot()
+    tracker = install(SimpleNamespace(root=root, config=SimpleNamespace(journal_path=""),
+                                      journal_monitor=None))
+    tracker.feed(event("FSDJump", StarSystem="A"))
+    root.callbacks[0]()   # must not raise
+
+
+def test_replay_newest_is_newest_first_and_honours_max_files(tmp_path):
+    import os
+    from edmrn.ext.journal_replay import replay_newest
+    older = journal_file(tmp_path, "2026-10-10T120000")
+    newer = journal_file(tmp_path, "2026-10-11T120000")
+    append_events(older, _loadout("2026-10-10T12:00:00Z", 40.0))
+    append_events(newer, _loadout("2026-10-11T12:00:00Z", 50.0))
+    os.utime(older, (1_000_000, 1_000_000))
+    os.utime(newer, (2_000_000, 2_000_000))
+
+    def wanted(state):
+        return state.max_jump_range is not None
+
+    assert replay_newest(str(tmp_path), ShipTracker, wanted).state.max_jump_range == 50.0
+    # the newest file has no match: the older one is reached only with max_files >= 2
+    only_older = lambda state: state.max_jump_range == 40.0
+    assert replay_newest(str(tmp_path), ShipTracker, only_older, max_files=1) is None
+    assert replay_newest(str(tmp_path), ShipTracker, only_older, max_files=2).state.max_jump_range == 40.0
+    assert replay_newest(str(tmp_path / "nope"), ShipTracker, wanted) is None

@@ -7,16 +7,15 @@ model does not validate its inputs and ``json.loads`` accepts ``NaN`` and ``Infi
 """
 from __future__ import annotations
 
-import glob
-import json
 import math
-import os
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
+from edmrn.ext.crew_events import bounded_number
 from edmrn.ext.fsd import Drive, drive_from_loadout, jump_range, supercharge_multiplier
 from edmrn.ext.crew_status import IN_MAIN_SHIP
+from edmrn.ext.journal_replay import replay_newest
 from edmrn.ext.location import journal_dir_for
 from edmrn.fuel_tracker import FuelTracker
 from edmrn.journal import JournalMonitor
@@ -59,8 +58,12 @@ Observer = Callable[[ShipState], None]
 
 
 def _is_finite(value: Any) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:  # an int beyond the float range
+        return False
 
 
 def _finite(value: Any, default: float) -> float:
@@ -73,9 +76,7 @@ def _str(value: Any) -> Optional[str]:
 
 def _tons(value: Any) -> Optional[float]:
     """A real finite number of tons in 0 ... MAX_TONS (bool rejected), else None."""
-    if _is_finite(value) and 0 <= value <= MAX_TONS:
-        return float(value)
-    return None
+    return bounded_number(value, MAX_TONS)
 
 
 def _positive(value: Any) -> Optional[float]:
@@ -202,17 +203,23 @@ class ShipTracker:
     def adopt(self, state: ShipState) -> bool:
         """Take a replayed state unless the tracker already holds newer journal data.
 
-        The live fuel and cargo (from Status.json) win over the replay's.
+        The live fuel and cargo (from Status.json) win over the replay's. When live journal data
+        is newer but no live Loadout was seen, the replay's drive and maximum range are still taken.
         """
         with self._lock:
             current = self._state
             if current.journal_at is not None and (
                     state.journal_at is None or state.journal_at <= current.journal_at):
-                return False
-            merged = replace(
-                state,
-                fuel_main=current.fuel_main if current.fuel_main is not None else state.fuel_main,
-                cargo=current.cargo if current.cargo is not None else state.cargo)
+                if current.drive is not None or current.max_jump_range is not None:
+                    return False
+                merged = replace(current, drive=state.drive,
+                                 max_jump_range=state.max_jump_range)
+            else:
+                merged = replace(
+                    state,
+                    fuel_main=(current.fuel_main if current.fuel_main is not None
+                               else state.fuel_main),
+                    cargo=current.cargo if current.cargo is not None else state.cargo)
             if merged == current:
                 return False
             self._state = merged
@@ -229,42 +236,16 @@ class ShipTracker:
                 logger.error(f"Ship observer failed: {e}")
 
 
-def _mtime_or_zero(path: str) -> float:
-    try:
-        return os.path.getmtime(path)
-    except OSError:
-        return 0.0
-
-
 def cold_start(journal_dir: Optional[str], tracker: ShipTracker,
                max_files: int = 5) -> Optional[ShipState]:
     """Replay the newest journal files until one yields a drive; hand it to the tracker."""
-    if not journal_dir or not os.path.isdir(journal_dir):
+    replay = replay_newest(
+        journal_dir, ShipTracker,
+        lambda state: state.drive is not None or state.max_jump_range is not None, max_files)
+    if replay is None:
         return None
-    try:
-        files = sorted(glob.glob(os.path.join(glob.escape(journal_dir), 'Journal.*.log')),
-                       key=_mtime_or_zero, reverse=True)
-    except OSError as e:
-        logger.error(f"Cold start could not list journals: {e}")
-        return None
-    for path in files[:max_files]:
-        replay = ShipTracker()
-        try:
-            with open(path, 'r', encoding='utf-8', errors='replace') as f:
-                for line in f:
-                    if '"event"' not in line:
-                        continue
-                    try:
-                        replay.feed(json.loads(line))
-                    except (ValueError, RecursionError):
-                        continue
-        except OSError as e:
-            logger.warning(f"Cold start skipped {os.path.basename(path)}: {e}")
-            continue
-        if replay.state.drive is not None or replay.state.max_jump_range is not None:
-            tracker.adopt(replay.state)
-            return replay.state
-    return None
+    tracker.adopt(replay.state)
+    return replay.state
 
 
 def start_boost(app, from_system: str) -> Optional[float]:
@@ -302,9 +283,16 @@ def install(app) -> ShipTracker:
     except ImportError:
         binding_for = None
     if binding_for is not None:
-        def on_change(state: ShipState) -> None:
+        def apply_on_tk() -> None:
+            # Read the tracker here, not at notify time: a stale snapshot must never win.
             try:
-                app.root.after(0, lambda: binding_for(app).on_state(state))
+                binding_for(app).on_state(tracker.state)
+            except Exception as e:
+                logger.error(f"Range update failed: {e}")
+
+        def on_change(_state: ShipState) -> None:
+            try:
+                app.root.after(0, apply_on_tk)
             except Exception as e:
                 logger.debug(f"Range update skipped: {e}")
 
