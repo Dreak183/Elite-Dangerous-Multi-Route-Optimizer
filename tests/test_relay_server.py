@@ -238,18 +238,50 @@ def test_run_stops_on_the_event_and_persists_statuses(tmp_path):
 
 
 def test_stop_refuses_new_connections_during_the_grace(tmp_path, monkeypatch):
-    monkeypatch.setattr(server_module, "SHUTDOWN_GRACE", 0.5)
+    monkeypatch.setattr(server_module, "SHUTDOWN_GRACE", 1.0)
+
+    class Stuck:  # never answers its close, so the grace stays open
+        async def close(self, code, reason):
+            await asyncio.Event().wait()
 
     async def scenario():
         server = RelayServer(make_config(tmp_path))
         port = await server.start()
-        ws, _ = await open_group(port, new_group(), key_for("leader"))
-        await ws.recv()
+        peer = Peer(Stuck())
+        server._peers.add(peer)
+        peer.enqueue((1001, "x"))
         stopping = asyncio.create_task(server.stop())
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        assert not stopping.done()
         with pytest.raises(OSError):
             await asyncio.open_connection("127.0.0.1", port)
         await asyncio.wait_for(stopping, 5)
+    asyncio.run(scenario())
+
+
+def test_a_handshake_finishing_after_stop_began_is_closed_1001(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "SHUTDOWN_GRACE", 0.5)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        server = RelayServer(make_config(tmp_path))
+        real = server._process_request
+        started = []
+
+        def process_request(conn, req):
+            if not started and req.path.startswith("/v1/"):
+                # stop()'s first step runs in the iteration that completes this handshake
+                started.append(asyncio.Task(server.stop(), loop=loop, eager_start=True))
+            return real(conn, req)
+
+        server._process_request = process_request
+        port = await server.start()
+        ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{new_group()}/ws")
+        with pytest.raises(ConnectionClosed) as closed:
+            await asyncio.wait_for(ws.recv(), 5)
+        assert (closed.value.rcvd.code, closed.value.rcvd.reason) == (1001, "relay shutting down")
+        await asyncio.wait_for(started[0], 5)
+        assert server.relay.groups == {} and not server._peers
     asyncio.run(scenario())
 
 
@@ -339,6 +371,7 @@ def test_a_failing_connect_leaks_no_writer(tmp_path, monkeypatch):
                 await asyncio.wait_for(ws.recv(), 5)
             await asyncio.sleep(0.1)
             assert len(made) == 1 and made[0].writer.done()
+            assert not server._peers
         finally:
             await server.stop()
     asyncio.run(scenario())

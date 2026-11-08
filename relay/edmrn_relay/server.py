@@ -123,6 +123,7 @@ class RelayServer:
         self.port = 0
         self._server: Any = None
         self._peers: set[Peer] = set()
+        self._stopping = False
 
     # -- HTTP ----------------------------------------------------------------------------
 
@@ -148,6 +149,9 @@ class RelayServer:
                 peer.enqueue((action.code, action.reason))
 
     async def _handler(self, ws: Any) -> None:
+        if self._stopping:  # a handshake that finished after stop() began
+            await ws.close(engine.CLOSE_GOING_AWAY, "relay shutting down")
+            return
         peer = Peer(ws)
         self._peers.add(peer)
         session = timer = None
@@ -186,7 +190,9 @@ class RelayServer:
         return self.port
 
     async def stop(self) -> None:
+        self._stopping = True
         self._server.close(close_connections=False)  # no new sessions after the shutdown
+        await asyncio.sleep(0)  # lets websockets' close task stop the listener
         self.dispatch(self.relay.shutdown())
         peers = list(self._peers)
         if peers:
