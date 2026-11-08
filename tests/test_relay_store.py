@@ -117,3 +117,77 @@ def test_status_upsert(seeded):
     seeded.save_status(G1, A, b"e1", b"s1")
     seeded.save_status(G1, A, b"e2", b"s2")
     assert seeded.statuses(G1) == [(A, b"e2", b"s2")]
+
+
+def test_failed_commit_leaves_no_transaction_and_no_writes(seeded):
+    db = seeded.db
+    db.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    db.execute("CREATE TABLE child (p INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)")
+    db.execute("PRAGMA foreign_keys = ON")
+    db.execute("CREATE TRIGGER dangle AFTER INSERT ON quota BEGIN INSERT INTO child VALUES (99); END")
+    with pytest.raises(sqlite3.IntegrityError):
+        seeded.apply_frame(G1, 5, [row(A, 2)], [], {A: 2}, {A: 1})
+    assert not db.in_transaction
+    assert seeded.log_after(G1, A, 1, 9, 9) == []
+    assert seeded.load_group(G1).heads == {}
+    db.execute("DROP TRIGGER dangle")
+    seeded.save_status(G1, A, b"e", b"s")
+    assert seeded.statuses(G1) == [(A, b"e", b"s")]
+
+
+def test_self_rolled_back_transaction_reports_the_original_error(seeded):
+    seeded.db.execute(
+        "CREATE TRIGGER rb BEFORE INSERT ON quota BEGIN SELECT RAISE(ROLLBACK, 'rb'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="rb"):
+        seeded.apply_frame(G1, 5, [row(A, 2)], [], {A: 2}, {A: 1})
+    assert not seeded.db.in_transaction
+    assert seeded.log_after(G1, A, 1, 9, 9) == []
+
+
+def test_null_bytes_raise_and_roll_back_the_frame(seeded):
+    with pytest.raises(sqlite3.IntegrityError):
+        seeded.apply_frame(G1, 5, [LogRow(A, 2, None, bytes(64))], [], {A: 2}, {})
+    assert seeded.load_group(G1).heads == {}
+
+
+def test_log_after_rejects_a_non_positive_limit(seeded):
+    for limit in (0, -1):
+        with pytest.raises(ValueError):
+            seeded.log_after(G1, A, 0, 10, limit)
+
+
+def test_refused_newer_database_is_not_modified(tmp_path):
+    path = tmp_path / "relay.db"
+    raw = sqlite3.connect(path)
+    raw.execute("PRAGMA user_version = 2")
+    raw.close()
+    with pytest.raises(RelayStoreError, match="newer"):
+        RelayStore(path)
+    raw = sqlite3.connect(path)
+    try:
+        assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        raw.close()
+
+
+def test_add_roster_envelope_inserts_once(seeded):
+    seeded.add_roster_envelope(G1, row(B, 1))
+    seeded.add_roster_envelope(G1, LogRow(B, 1, b"other", bytes(64)))
+    assert seeded.roster_bytes(G1) == [b"e1", b"e1"]
+    assert seeded.db.execute("SELECT COUNT(*) FROM roster WHERE group_id = ?", (G1,)).fetchone()[0] == 2
+
+
+def test_heads_quota_and_status_are_isolated_per_group(store):
+    store.create_group(G1, A, 100, row(A, 1))
+    store.create_group(G2, A, 100, row(A, 1))
+    store.apply_frame(G1, 5, [row(A, 2)], [], {A: 2}, {A: 3})
+    store.save_status(G1, A, b"e", b"s")
+    assert store.load_group(G2).heads == {}
+    assert store.quota_used(G2, 5, A) == 0
+    assert store.group_quota_used(G2, 5) == 0
+    assert store.statuses(G2) == []
+    store.apply_frame(G2, 5, [], [], {A: 9}, {A: 1})
+    assert store.load_group(G1).heads == {A: 2}
+    assert store.quota_used(G1, 5, A) == 3
+    assert store.take_past_quota(G2, 6) == [(5, 1)]
+    assert store.quota_used(G1, 5, A) == 3

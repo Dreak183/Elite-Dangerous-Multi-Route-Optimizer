@@ -5,12 +5,15 @@ envelopes; it keeps the bytes the engine hands it.
 """
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 SCHEMA_VERSION = 1
+
+log = logging.getLogger("edmrn_relay")
 
 _SCHEMA = (
     "CREATE TABLE groups (group_id TEXT PRIMARY KEY, leader TEXT NOT NULL,"
@@ -53,7 +56,16 @@ class _Tx:
         self.db.execute("BEGIN IMMEDIATE")
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        self.db.execute("ROLLBACK" if exc_type else "COMMIT")
+        if exc_type is None:
+            try:
+                self.db.execute("COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+                raise
+        elif self.db.in_transaction:
+            # SQLite may already have rolled back by itself (FULL, IOERR, RAISE(ROLLBACK)).
+            self.db.execute("ROLLBACK")
         return False
 
 
@@ -62,12 +74,14 @@ class RelayStore:
         # isolation_level=None: transactions are explicit (see _Tx).
         self.db = sqlite3.connect(path, isolation_level=None)
         try:
-            self.db.execute("PRAGMA journal_mode=WAL")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
             if version > SCHEMA_VERSION:
                 raise RelayStoreError(
                     f"database schema version {version} is newer than this relay "
                     f"supports ({SCHEMA_VERSION})")
+            mode = self.db.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                log.warning("database journal mode is %s, not wal", mode)
             if version == 0:
                 with _Tx(self.db):
                     for stmt in _SCHEMA:
@@ -127,20 +141,24 @@ class RelayStore:
 
     def _insert_log(self, group_id: str, rows: Sequence[LogRow]) -> None:
         self.db.executemany(
-            "INSERT OR IGNORE INTO log (group_id, author, seq, e, s) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO log (group_id, author, seq, e, s) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (group_id, author, seq) DO NOTHING",
             [(group_id, r.author, r.seq, r.e, r.s) for r in rows])
 
     def _insert_roster(self, group_id: str, rows: Sequence[LogRow]) -> bool:
         new = False
         for r in rows:
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO roster (group_id, author, seq, e) VALUES (?, ?, ?, ?)",
+                "INSERT INTO roster (group_id, author, seq, e) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (group_id, author, seq) DO NOTHING",
                 (group_id, r.author, r.seq, r.e))
             new = new or cur.rowcount > 0
         return new
 
     def log_after(self, group_id: str, author: str, after: int, until: int,
                   limit: int) -> list[LogRow]:
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         return [LogRow(*r) for r in self.db.execute(
             "SELECT author, seq, e, s FROM log WHERE group_id = ? AND author = ? "
             "AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?",
