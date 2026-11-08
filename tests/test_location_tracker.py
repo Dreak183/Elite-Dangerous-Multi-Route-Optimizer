@@ -286,7 +286,7 @@ def test_cold_start_survives_file_vanishing_before_getmtime(tmp_path, monkeypatc
             raise FileNotFoundError(path)
         return real(path)
 
-    monkeypatch.setattr("edmrn.ext.location.os.path.getmtime", flaky)
+    monkeypatch.setattr("edmrn.ext.journal_replay.os.path.getmtime", flaky)
     tracker = LocationTracker()
 
     cold_start(str(tmp_path), tracker)

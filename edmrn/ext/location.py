@@ -6,7 +6,6 @@ Event field shapes: knowledge/reference-data.md section 6 in the EDProjects hub.
 from __future__ import annotations
 
 import math
-import os  # noqa: F401  (tests patch os.path through this module)
 import threading
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional

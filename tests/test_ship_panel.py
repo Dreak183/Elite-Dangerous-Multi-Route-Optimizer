@@ -266,3 +266,77 @@ def test_add_range_panel_logs_instead_of_raising(_tk_root, monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="EDMRN.ShipPanel"):
         add_range_panel(SimpleNamespace(root=_tk_root, jump_range=FakeVar()), frame)
     assert any("pack failed" in r.getMessage() for r in caplog.records)
+
+
+class TracingVar(FakeVar):
+    """Like a Tk StringVar with upstream's write trace: every set(), even a same-value one, fires."""
+
+    def __init__(self, value="", on_write=None):
+        super().__init__(value)
+        self.on_write = on_write
+
+    def set(self, value):
+        super().set(value)
+        if self.on_write:
+            self.on_write(value)
+
+
+def test_reticking_auto_overwrites_a_typed_neutron_field():
+    neutron = FakeVar("")
+    route = TracingVar("", on_write=neutron.set)   # upstream's _sync_neutron_jump_range
+    app = SimpleNamespace(jump_range=route, neutron_range_var=neutron)
+    binding = RangeBinding(app)
+    binding.on_state(state())
+    assert neutron.get() == "87.1"
+    neutron.set("60")
+    key_handler(binding, app, "neutron_range_var")()
+    assert binding.auto is False
+    binding.set_auto(True)
+    assert neutron.get() == "87.1"
+
+
+def test_by_hand_boost_survives_reticking_auto_and_status_updates():
+    boost = FakeVar()
+    binding = RangeBinding(make_app(neutron_boost_var=boost))
+    binding.on_state(replace(state(), drive=MK2))
+    assert boost.get() == "x6 (Caspian)"
+    boost.set("x4 (Normal)")                 # picked by hand
+    binding.set_auto(False)
+    binding.on_state(replace(state(), drive=MK2, max_jump_range=50.0))   # a Loadout while Auto is off
+    binding.set_auto(True)
+    assert boost.get() == "x4 (Normal)"
+    binding.on_state(replace(state(), drive=MK2, max_jump_range=50.0, cargo=3.0))   # status-only change, same loadout
+    binding.on_state(replace(state(), drive=MK2, max_jump_range=50.0, cargo=3.0, fuel_main=10.0))
+    assert boost.get() == "x4 (Normal)"
+
+
+def test_each_range_entry_is_bound_to_its_own_variable(_tk_root):
+    route_frame, neutron_frame = ctk.CTkFrame(_tk_root), ctk.CTkFrame(_tk_root)
+    route_var, neutron_var = ctk.StringVar(value="75"), ctk.StringVar(value="75")
+    route_entry = ctk.CTkEntry(route_frame, textvariable=route_var)
+    neutron_entry = ctk.CTkEntry(neutron_frame, textvariable=neutron_var)
+    route_entry.pack()
+    neutron_entry.pack()
+    app = SimpleNamespace(root=_tk_root, jump_range=route_var, neutron_range_var=neutron_var,
+                          range_entry=route_entry, neutron_range_entry=neutron_entry)
+    add_range_panel(app, route_frame)
+    add_range_panel(app, neutron_frame)
+
+
+def test_each_range_entry_is_bound_to_its_own_variable(_tk_root, monkeypatch):
+    from edmrn.ext import ship_panel
+    route_frame, neutron_frame = ctk.CTkFrame(_tk_root), ctk.CTkFrame(_tk_root)
+    route_var, neutron_var = ctk.StringVar(value="75"), ctk.StringVar(value="75")
+    route_entry = ctk.CTkEntry(route_frame, textvariable=route_var)
+    neutron_entry = ctk.CTkEntry(neutron_frame, textvariable=neutron_var)
+    route_entry.pack()
+    neutron_entry.pack()
+    bound = {"route": [], "neutron": []}
+    route_entry.bind = lambda seq, fn, add=None: bound["route"].append(fn)
+    neutron_entry.bind = lambda seq, fn, add=None: bound["neutron"].append(fn)
+    monkeypatch.setattr(ship_panel, "key_handler", lambda binding, app, name: name)
+    app = SimpleNamespace(root=_tk_root, jump_range=route_var, neutron_range_var=neutron_var,
+                          range_entry=route_entry, neutron_range_entry=neutron_entry)
+    add_range_panel(app, route_frame)
+    add_range_panel(app, neutron_frame)
+    assert bound == {"route": ["jump_range"], "neutron": ["neutron_range_var"]}

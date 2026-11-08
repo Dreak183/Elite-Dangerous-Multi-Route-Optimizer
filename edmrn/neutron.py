@@ -55,11 +55,9 @@ class NeutronRouter:
             result_data = self._wait_for_result(job_id, progress_callback)
             if not result_data["success"]:
                 return result_data
-            boost_note = None
-            raw_data = result_data["data"]
-            raw_data, boost_note = optimize_start(
-                raw_data, jump_range, start_boost if used_from == from_system else None, supercharge_multiplier)
-            route_data = self._process_route_data(raw_data, from_system, to_system)
+            data, boost_note = optimize_start(
+                result_data["data"], jump_range, start_boost if used_from == from_system else None, supercharge_multiplier)
+            route_data = self._process_route_data(data, from_system, to_system)
             self.last_request = {"from": used_from, "to": to_system, "range": jump_range, "boost": fsd_boost}
             self.last_route = route_data["waypoints"]
             self.current_waypoint_index = 0

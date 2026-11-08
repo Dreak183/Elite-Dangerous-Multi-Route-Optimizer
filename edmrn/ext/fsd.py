@@ -74,6 +74,9 @@ BOOSTERS: dict[str, float] = {
 _warned: set[str] = set()
 
 
+MAX_RANGE = 1000.0   # LY; the longest real jump range is below 100, larger values are hostile
+
+
 @dataclass(frozen=True)
 class Drive:
     item: str
@@ -129,7 +132,7 @@ def _drive_from_loadout(loadout: Any) -> Optional[Drive]:
     fuel_cap = loadout.get("FuelCapacity")
     capacity = _num(fuel_cap.get("Main")) if isinstance(fuel_cap, dict) else None
     max_range = _num(loadout.get("MaxJumpRange"))
-    if mass is None or capacity is None or max_range is None:
+    if mass is None or capacity is None or max_range is None or max_range > MAX_RANGE:
         return None
 
     fsd: Optional[dict] = None

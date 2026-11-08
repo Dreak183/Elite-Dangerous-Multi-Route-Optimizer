@@ -24,8 +24,9 @@ def fsd_log(caplog):
 
 
 @pytest.mark.parametrize("loadout", ALL)
-def test_max_jump_range_is_reproduced(loadout):
+def test_max_jump_range_is_reproduced(loadout, fsd_log):
     d = drive_from_loadout(loadout)
+    assert [r for r in fsd_log.records if r.levelno == logging.WARNING] == []   # the table rows are right
     assert jump_range(d, 0, d.max_fuel) == pytest.approx(loadout["MaxJumpRange"], abs=1e-6)
 
 
@@ -109,3 +110,24 @@ def test_string_modifier_value_is_ignored():
     d = drive_from_loadout(loadout)
     assert d is not None
     assert jump_range(d, 0, d.max_fuel) == pytest.approx(ASP["MaxJumpRange"], abs=1e-6)
+
+
+def test_max_fuel_is_capped_by_the_tank():
+    cap = 2.0
+    loadout = _with(FuelCapacity={"Main": cap})
+    optmass, maxfuel, fuelmul, fuelpower = fsd.FSD_TABLE["int_hyperdrive_size5_class1"]
+    assert maxfuel > cap
+    max_range = (cap / fuelmul) ** (1 / fuelpower) * optmass / (404.0 + cap)
+    d = drive_from_loadout({**loadout, "MaxJumpRange": max_range})
+    assert d.max_fuel == cap
+    assert jump_range(d, 0, cap) == pytest.approx(max_range, abs=1e-6)
+
+
+def test_switched_off_booster_never_counts(fsd_log):
+    loadout = {**MANDALAY_BOOSTER_OFF, "MaxJumpRange": 120.0}   # matches neither candidate
+    assert drive_from_loadout(loadout).boost == 0.0
+
+
+def test_absurd_max_jump_range_is_rejected():
+    assert drive_from_loadout(_with(MaxJumpRange=1e300)) is None
+    assert drive_from_loadout(_with(MaxJumpRange=1001.0)) is None

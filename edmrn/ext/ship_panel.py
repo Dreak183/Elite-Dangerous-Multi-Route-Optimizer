@@ -91,11 +91,13 @@ class RangeBinding:
         except Exception as e:
             logger.error(f"Range update failed: {e}")
 
-    def _apply_auto(self, state: ShipState, boost_too: bool = True) -> None:
+    def _apply_auto(self, state: ShipState, boost_too: bool = True, force: bool = False) -> None:
         value = _field_value(state)
         if value is not None:
             var = self.app.jump_range
-            if var.get() != value:
+            # force: a Tk write trace fires on a same-value set, and upstream's trace copies this
+            # field into the Neutron field, which the user may have typed over.
+            if force or var.get() != value:
                 var.set(value)
             self._written = value
         loadout = (state.drive, state.max_jump_range)
@@ -115,7 +117,7 @@ class RangeBinding:
                 except Exception as e:
                     logger.debug(f"Auto checkbox not updated: {e}")
             if self.auto:
-                self._apply_auto(self.state, boost_too=False)  # J4: only a Loadout sets the boost
+                self._apply_auto(self.state, boost_too=False, force=True)  # J4: only a Loadout sets the boost
         except Exception as e:
             logger.error(f"Auto switch failed: {e}")
 

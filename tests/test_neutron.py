@@ -109,3 +109,13 @@ def test_journal_boost_dropped_when_start_substituted(router, monkeypatch):
     result = router.calculate_route("Eol Prou WN-T d3-2412", "Colonia", 75.0, start_boost=6.0)
     assert result["success"] and len(result["waypoints"]) == 3
     assert result["note"] == "SUBST"
+
+
+def test_substituted_start_falls_back_to_the_spansh_flag_with_the_request_multiplier(router, monkeypatch):
+    monkeypatch.setattr(neutron, "submit_route_job",
+                        fake_submit(FakeResponse(202, {"job": "j1"}), "SUBST", "Near Sys"))
+    monkeypatch.setattr(neutron, "poll_route_result",
+                        lambda job_id, *, max_wait, on_progress=None: _eol_prou(first_neutron=True))
+    result = router.calculate_route("Eol Prou WN-T d3-2412", "Colonia", 75.0, fsd_boost="x6", start_boost=1.0)
+    assert result["success"] and len(result["waypoints"]) == 2
+    assert "(×6)" in result["note"]

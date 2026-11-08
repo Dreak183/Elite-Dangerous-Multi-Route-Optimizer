@@ -79,3 +79,36 @@ def test_malformed_results_pass_through(data):
 def test_bad_range_passes_through(rng):
     out, note = optimize_start(GRIA, rng, None, 4)
     assert out is GRIA and note is None
+
+
+def test_journal_boost_of_one_is_final_no_spansh_fallback():
+    out, note = optimize_start(EOL_PROU, 75.0, 1.0, 4)   # neutron_star True, but the journal says 1.0
+    assert out is EOL_PROU and note is None
+
+
+def test_waypoint_exactly_at_reach_is_reached():
+    data = {"result": {"system_jumps": [
+        _entry(), _entry(x=40.0), _entry(x=300.0, jumps=1), _entry(x=900.0)]}}
+    out, note = optimize_start(data, 75.0, 4.0, 4)   # reach = 4 * 75 = 300
+    assert names(out) == ["A", "A", "A"] and out["result"]["system_jumps"][1]["x"] == 300.0
+    assert "skipped 1 waypoint," in note
+
+
+def test_reached_waypoint_is_rewritten_to_one_jump():
+    data = {"result": {"system_jumps": [
+        _entry(), _entry(x=40.0), _entry(x=200.0, jumps=3), _entry(x=900.0)]}}
+    out, _note = optimize_start(data, 75.0, 4.0, 4)
+    assert data["result"]["system_jumps"][2]["jumps"] == 3
+    assert out["result"]["system_jumps"][1]["jumps"] == 1
+
+
+def test_unexpected_failure_is_logged_and_passes_through(caplog):
+    class Hostile(dict):
+        def __getitem__(self, key):
+            raise RuntimeError("boom")
+
+    data = Hostile()
+    with caplog.at_level("WARNING", logger="EDMRN.NeutronStart"):
+        out, note = optimize_start(data, 75.0, 4.0, 4)
+    assert out is data and note is None
+    assert any("Supercharged start skipped" in r.getMessage() for r in caplog.records)

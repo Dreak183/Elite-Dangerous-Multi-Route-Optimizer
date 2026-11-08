@@ -210,8 +210,8 @@ def test_start_boost_only_for_current_system():
     assert start_boost(app_with(ShipState(**base, star_class="N")), "Sol") == 4.0
     assert start_boost(app_with(ShipState(**base, star_class="DA")), "Sol") == 1.5
     assert start_boost(app_with(ShipState(**{**base, "drive": mk2}, star_class="DA")), "Sol") == 3.0
-    assert start_boost(app_with(ShipState(**base, star_class="K")), "Sol") is None
-    assert start_boost(app_with(ShipState(**base, supercharge=0.5)), "Sol") is None
+    assert start_boost(app_with(ShipState(**base, star_class="K")), "Sol") == 1.0
+    assert start_boost(app_with(ShipState(**base)), "Sol") is None   # journal knows nothing
     assert start_boost(SimpleNamespace(), "Sol") is None
     assert start_boost(charged, None) is None
 
@@ -373,3 +373,14 @@ def test_replay_newest_is_newest_first_and_honours_max_files(tmp_path):
     assert replay_newest(str(tmp_path), ShipTracker, only_older, max_files=1) is None
     assert replay_newest(str(tmp_path), ShipTracker, only_older, max_files=2).state.max_jump_range == 40.0
     assert replay_newest(str(tmp_path / "nope"), ShipTracker, wanted) is None
+
+
+@pytest.mark.parametrize("bad", [1e308, 10.5, 1.0, 0.5])
+def test_jet_cone_boost_outside_one_to_ten_is_ignored(bad):
+    assert loaded(event("JetConeBoost", BoostValue=bad)).supercharge is None
+    assert loaded(event("JetConeBoost", BoostValue=10.0)).supercharge == 10.0
+
+
+def test_absurd_loadout_max_jump_range_is_not_stored():
+    state = loaded(event("Loadout", **{**MANDALAY_BOOSTED, "MaxJumpRange": 1e300}))
+    assert state.drive is None and state.max_jump_range is None

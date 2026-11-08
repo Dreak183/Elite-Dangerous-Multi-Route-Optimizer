@@ -9,6 +9,10 @@ import copy
 import math
 from typing import Any, Optional
 
+from edmrn.logger import get_logger
+
+logger = get_logger('NeutronStart')
+
 
 def _num(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -22,8 +26,8 @@ def _point(entry) -> Optional[tuple]:
 
 
 def _boost(start_boost, multiplier, first) -> Optional[float]:
-    if _num(start_boost) and start_boost > 1:
-        return float(start_boost)
+    if _num(start_boost):
+        return float(start_boost) if start_boost > 1 else None   # the journal knows: no fallback
     if first.get("neutron_star") is True and _num(multiplier) and multiplier > 1:
         return float(multiplier)
     return None
@@ -60,4 +64,5 @@ def optimize_start(data: Any, range_ly: float, start_boost: Optional[float],
                 return out, note
         return data, None
     except Exception:
+        logger.warning("Supercharged start skipped: unexpected route data", exc_info=True)
         return data, None

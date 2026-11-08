@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 from edmrn.ext.crew_events import bounded_number
-from edmrn.ext.fsd import Drive, drive_from_loadout, jump_range, supercharge_multiplier
+from edmrn.ext.fsd import MAX_RANGE, Drive, drive_from_loadout, jump_range, supercharge_multiplier
 from edmrn.ext.crew_status import IN_MAIN_SHIP
 from edmrn.ext.journal_replay import replay_newest
 from edmrn.ext.location import journal_dir_for
@@ -79,6 +79,9 @@ def _tons(value: Any) -> Optional[float]:
     return bounded_number(value, MAX_TONS)
 
 
+MAX_BOOST = 10.0   # game supercharge multipliers are 1.5 ... 6; anything beyond 10 is not a boost
+
+
 def _positive(value: Any) -> Optional[float]:
     return float(value) if _is_finite(value) and value > 0 else None
 
@@ -93,8 +96,10 @@ def _apply_rules(state: ShipState, event: dict) -> ShipState:
             return ShipState(commander=commander)
         return replace(state, commander=commander)
     if name == 'Loadout':
-        return replace(state, drive=drive_from_loadout(event),
-                       max_jump_range=_positive(event.get('MaxJumpRange')))
+        max_range = _positive(event.get('MaxJumpRange'))
+        if max_range is not None and max_range > MAX_RANGE:
+            max_range = None
+        return replace(state, drive=drive_from_loadout(event), max_jump_range=max_range)
     if name == 'StartJump':
         system, star = _str(event.get('StarSystem')), _str(event.get('StarClass'))
         if event.get('JumpType') != 'Hyperspace' or system is None or star is None:
@@ -130,6 +135,8 @@ def _apply_rules(state: ShipState, event: dict) -> ShipState:
         return replace(state, star_class=star)
     if name == 'JetConeBoost':
         boost = _positive(event.get('BoostValue'))
+        if boost is not None and not 1 < boost <= MAX_BOOST:
+            boost = None
         return state if boost is None else replace(state, supercharge=boost)
     if name == 'Cargo':
         count = _tons(event.get('Count'))
@@ -251,8 +258,9 @@ def cold_start(journal_dir: Optional[str], tracker: ShipTracker,
 def start_boost(app, from_system: str) -> Optional[float]:
     """Range multiplier of the first jump from ``from_system`` known from the journal, or None.
 
-    Order: the pending jet cone boost, then the arrival star's neutron or white dwarf multiplier.
-    Only valid when ``from_system`` is the tracked current system. Never raises.
+    Order: the pending jet cone boost, then the arrival star's multiplier (1.0 for a star that does
+    not supercharge). None only when the journal knows neither a pending boost nor the arrival star,
+    or ``from_system`` is not the tracked current system. Never raises.
     """
     try:
         state = app.ship_tracker.state
@@ -262,8 +270,10 @@ def start_boost(app, from_system: str) -> Optional[float]:
             return None
         boost = state.supercharge
         if boost is None:
+            if state.star_class is None:
+                return None
             boost = supercharge_multiplier(state.drive, state.star_class)
-        return float(boost) if boost > 1 else None
+        return float(boost)
     except Exception:
         return None
 
