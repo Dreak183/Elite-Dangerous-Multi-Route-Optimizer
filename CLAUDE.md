@@ -32,9 +32,8 @@ declared in upstream's `requirements.txt`; ours (`cryptography` for signatures, 
 crew relay connection) go in `requirements-edmrn.txt`. The crew relay is a Python asyncio service
 in `relay/` on the `websockets` server and `sqlite3`, importing the client's protocol modules
 (ADR-0009); the TypeScript Worker in `crew-relay/` is its behaviour reference until the port
-removes it. Locally, uv
-runs the environment without a packaging rewrite (`docs/how-to/run.md`). Tests: pytest under `tests/`
-(upstream ships none).
+removes it. Locally, uv runs the environment without a packaging rewrite (`docs/how-to/run.md`).
+Tests: pytest under `tests/` (upstream ships none).
 
 ## Hard rules
 
