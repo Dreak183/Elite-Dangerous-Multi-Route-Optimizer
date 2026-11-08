@@ -46,6 +46,8 @@ ours. "Upstream PR" marks changes meant to be offered upstream.
 | `edmrn/custom_route.py` (location) | `detect_current_system` asks `edmrn.ext.location.tracked_system` before reading `cmdr_location` | The header text is compound (`Sol · Station`), so as a fallback it yielded a station name as a system name (location spec) | no |
 | `edmrn/app.py` (startup monitor) | The first `JournalMonitor(...)` in `EDMRN_App.__init__` passes `manual_journal_path=self.config.journal_path or None` | The startup monitor and the cold start ignored a configured journal folder (location spec R2) | yes |
 | `edmrn/app.py` (location fallback) | Three lines in the jump handler: `tracked_system(self)` is asked before `cmdr_location.get()` when `last_known_system` is empty | Same reason: the compound header text is not a system name (location spec) | no |
+| `edmrn/app.py` (ship range) | Two lines directly after `install_edmrn_crew(self)` in `EDMRN_App.__init__`: `edmrn.ext.ship.install(self)` | Wires the ship range tracker: journal and `Status.json` listeners, the cold start (ship range spec) | no |
+| `edmrn/app.py` (`_journal_callback`) | The `Loadout` branch fills `jump_range` with `MaxJumpRange` only when `ship_tracker` is absent | `MaxJumpRange` assumes no cargo and one jump of fuel; the laden range replaces it (ship range spec J2) | yes |
 
 ## Neutron route persistence (neutron resume spec, ADR-0004)
 
@@ -80,6 +82,26 @@ whenever the tracker knows a system.
 
 Invariant: `edmrn/ext/` code never tails journals. Live data comes only through
 `JournalMonitor.event_listeners` (ADR-0001).
+
+## Ship range data flow (ship range spec)
+
+1. Each journal line reaches `ShipTracker.feed` through `JournalMonitor.event_listeners`; each
+   `Status.json` read reaches `ShipTracker.feed_status` through `FuelTracker.status_listeners`.
+2. The tracker computes an immutable `ShipState` (drive from the last `Loadout`, cargo and main-tank
+   fuel from `Status.json` while the commander is in the main ship, the arrival star class and the
+   pending supercharge from jump events). `Status.json` values never change `journal_at`.
+3. At startup `cold_start` replays the newest journals in the `edmrn-ship-cold-start` thread and
+   hands the result to `adopt`, which refuses when the tracker already holds newer journal data and
+   keeps the live fuel and cargo.
+4. Observers run on the monitor, fuel-tracker or cold-start thread and reach Tk through
+   `root.after`; the range binding is one of them.
+
+`ShipState.max_jump_range` set while `drive` is `None` means the drive is not in EDMRN's table; both
+`None` means no ship data. Fuel and cargo are validated (real, finite, `0 … 10,000` t) because the
+range model does not validate its inputs.
+
+Invariant: only the range binding writes `app.jump_range` from ship data; upstream's `Loadout`
+fill yields to the tracker.
 
 ## Crew capture data flow (crew capture spec, ADR-0005, ADR-0006, ADR-0007)
 

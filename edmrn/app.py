@@ -87,7 +87,7 @@ class EDMRN_App:
             if event == 'Loadout':
                 max_jump_range = event_data.get('MaxJumpRange')
                 fuel_capacity = event_data.get('FuelCapacity', 0)
-                if max_jump_range:
+                if max_jump_range and getattr(self, 'ship_tracker', None) is None:
                     def _update_jump():
                         try:
                             self.jump_range.set(f"{max_jump_range:.1f}")
@@ -405,6 +405,8 @@ class EDMRN_App:
         install_edmrn_location(self)
         from edmrn.ext.crew import install as install_edmrn_crew
         install_edmrn_crew(self)
+        from edmrn.ext.ship import install as install_edmrn_ship
+        install_edmrn_ship(self)
         t17 = time.perf_counter(); print(f"[Startup] JournalMonitor: {t17-t16:.3f}s")
         print(f"[Startup] TOTAL __init__: {t17-t0:.3f}s")
         self.journal_monitor.start()
