@@ -131,6 +131,8 @@ class UIComponents:
         self.app.jump_range.trace_add('write', lambda *args: self.app._save_jump_range())
         self.app.jump_range.trace_add('write', lambda *args: self.app._sync_neutron_jump_range())
         self.app.range_entry.pack(anchor="w", fill="x")
+        from edmrn.ext.ship_panel import add_range_panel
+        add_range_panel(self.app, jump_input_frame)
         jump_btn_frame = ctk.CTkFrame(top_frame, fg_color="transparent", height=30)
         jump_btn_frame.grid(row=2, column=1, sticky="w", pady=(0, 10), padx=(15, 10))
         jump_btn_frame.grid_propagate(False)
@@ -275,6 +277,8 @@ class UIComponents:
         self.app.neutron_range_var = ctk.StringVar(value=self.app.jump_range.get())
         self.app.neutron_range_entry = ctk.CTkEntry(range_frame, textvariable=self.app.neutron_range_var)
         self.app.neutron_range_entry.pack(fill="x", padx=10, pady=(0, 10))
+        from edmrn.ext.ship_panel import add_range_panel
+        add_range_panel(self.app, range_frame)
         boost_frame = ctk.CTkFrame(settings_frame, fg_color=colors['frame'])
         boost_frame.grid(row=0, column=1, sticky="ew", padx=(10, 0))
         ctk.CTkLabel(boost_frame, text="FSD Boost:",

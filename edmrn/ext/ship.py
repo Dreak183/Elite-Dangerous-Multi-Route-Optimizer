@@ -278,25 +278,22 @@ def install(app) -> ShipTracker:
     JournalMonitor.event_listeners.append(tracker.feed)
     FuelTracker.status_listeners.append(tracker.feed_status)
 
-    try:
-        from edmrn.ext.ship_panel import binding_for  # Task 3 removes this guard
-    except ImportError:
-        binding_for = None
-    if binding_for is not None:
-        def apply_on_tk() -> None:
-            # Read the tracker here, not at notify time: a stale snapshot must never win.
-            try:
-                binding_for(app).on_state(tracker.state)
-            except Exception as e:
-                logger.error(f"Range update failed: {e}")
+    from edmrn.ext.ship_panel import binding_for
 
-        def on_change(_state: ShipState) -> None:
-            try:
-                app.root.after(0, apply_on_tk)
-            except Exception as e:
-                logger.debug(f"Range update skipped: {e}")
+    def apply_on_tk() -> None:
+        # Read the tracker here, not at notify time: a stale snapshot must never win.
+        try:
+            binding_for(app).on_state(tracker.state)
+        except Exception as e:
+            logger.error(f"Range update failed: {e}")
 
-        tracker.subscribe(on_change)
+    def on_change(_state: ShipState) -> None:
+        try:
+            app.root.after(0, apply_on_tk)
+        except Exception as e:
+            logger.debug(f"Range update skipped: {e}")
+
+    tracker.subscribe(on_change)
 
     threading.Thread(target=cold_start, args=(journal_dir_for(app), tracker),
                      name='edmrn-ship-cold-start', daemon=True).start()
