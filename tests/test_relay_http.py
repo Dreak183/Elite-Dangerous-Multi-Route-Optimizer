@@ -92,3 +92,9 @@ def test_config_numbers_are_checked(args):
 def test_main_refuses_bad_configuration(capsys):
     assert main(["--leaders", "nope"]) == 2
     assert "nope" in capsys.readouterr().err
+
+
+def test_empty_environment_variables_count_as_unset():
+    env = {f"EDMRN_RELAY_{n}": "" for n in
+           ("HOST", "PORT", "DB", "LEADERS", "SOURCE_URL", "MEMBER_QUOTA", "GROUP_QUOTA")}
+    assert load_config([], env) == RelayConfig()

@@ -62,9 +62,9 @@ After the run, `$H/EDMRN_Route_Data/crew_keys/` holds one key file and the `crew
 ```
 
 From the repository root. `tests/conftest.py` redirects every home variable, so tests are safe
-against real data (`../architecture/patterns.md`). No default test touches the network (tests marked `loopback` reach 127.0.0.1
-only; the opt-in `relay_e2e` test below talks to `wrangler dev` on localhost). Monitor tests start real
-threads and poll for up to 5 s each.
+against real data (`../architecture/patterns.md`). No default test touches the network (tests
+marked `loopback` reach 127.0.0.1 only; the opt-in `relay_e2e` test below talks to `wrangler dev`
+on localhost). Monitor tests start real threads and poll for up to 5 s each.
 
 ## Crew relay
 

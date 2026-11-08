@@ -5,10 +5,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
+import websockets.exceptions
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from edmrn_relay import engine
+from edmrn_relay import engine, server as server_module
 from edmrn_relay.__main__ import run
 from edmrn_relay.config import RelayConfig
 from edmrn_relay.engine import Send
@@ -224,6 +225,7 @@ def test_run_stops_on_the_event_and_persists_statuses(tmp_path):
         with pytest.raises(ConnectionClosed) as closed:
             await asyncio.wait_for(ws.recv(), 5)
         assert closed.value.rcvd.code == 1001
+        assert closed.value.rcvd.reason == "relay shutting down"
         await asyncio.wait_for(task, 10)
         return g, leader.author
 
@@ -233,3 +235,110 @@ def test_run_stops_on_the_event_and_persists_statuses(tmp_path):
         assert [a for a, _, _ in store.statuses(g)] == [author]
     finally:
         store.close()
+
+
+def test_stop_refuses_new_connections_during_the_grace(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "SHUTDOWN_GRACE", 0.5)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        ws, _ = await open_group(port, new_group(), key_for("leader"))
+        await ws.recv()
+        stopping = asyncio.create_task(server.stop())
+        await asyncio.sleep(0.05)
+        with pytest.raises(OSError):
+            await asyncio.open_connection("127.0.0.1", port)
+        await asyncio.wait_for(stopping, 5)
+    asyncio.run(scenario())
+
+
+def test_stop_returns_when_a_peer_never_takes_its_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "SHUTDOWN_GRACE", 0.3)
+
+    class Stuck:
+        aborted = False
+        transport = SimpleNamespace(abort=lambda: setattr(Stuck, "aborted", True))
+
+        async def close(self, code, reason):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        await server.start()
+        peer = Peer(Stuck())
+        server._peers.add(peer)
+        peer.enqueue((1001, "x"))
+        await asyncio.wait_for(server.stop(), 5)
+        await asyncio.wait([peer.writer], timeout=1)
+        assert Stuck.aborted and peer.writer.done()
+    asyncio.run(scenario())
+
+
+def test_a_send_over_the_write_timeout_aborts_the_connection(monkeypatch):
+    monkeypatch.setattr(server_module, "WRITE_TIMEOUT", 0.1)
+
+    class Stuck:
+        aborted = False
+        transport = SimpleNamespace(abort=lambda: setattr(Stuck, "aborted", True))
+
+        async def send(self, text):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        peer = Peer(Stuck())
+        peer.enqueue("x")
+        await asyncio.wait_for(peer.writer, 2)
+        assert Stuck.aborted
+    asyncio.run(scenario())
+
+
+def test_two_upgrade_headers_are_a_plain_get_not_a_500(tmp_path):
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        try:
+            status, _, body = await http(port, f"GET /v1/groups/{V7}/ws HTTP/1.1",
+                                         (*UPGRADE, "Upgrade: websocket"))
+            assert (status, body) == (426, b"expected a WebSocket upgrade\n")
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_no_server_header(tmp_path):
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        try:
+            _, plain, _ = await http(port, "GET / HTTP/1.1")
+            ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{V7}/ws")
+            assert "server" not in plain
+            assert "Server" not in ws.response.headers
+            await ws.close()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_failing_connect_leaks_no_writer(tmp_path, monkeypatch):
+    made = []
+    real_peer = server_module.Peer
+    monkeypatch.setattr(server_module, "Peer", lambda ws: made.append(real_peer(ws)) or made[-1])
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+
+        def boom(*args):
+            raise RuntimeError("connect failed")
+        monkeypatch.setattr(server.relay, "connect", boom)
+        try:
+            ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{V7}/ws")
+            with pytest.raises(websockets.exceptions.ConnectionClosed):
+                await asyncio.wait_for(ws.recv(), 5)
+            await asyncio.sleep(0.1)
+            assert len(made) == 1 and made[0].writer.done()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())

@@ -25,6 +25,25 @@ def no_network(request, monkeypatch):
     def refuse(*args, **kwargs):
         raise RuntimeError("network access in tests is forbidden")
 
+    import asyncio.selector_events
+
+    loops = [asyncio.selector_events.BaseSelectorEventLoop]
+    try:
+        import asyncio.proactor_events
+        loops.append(asyncio.proactor_events.BaseProactorEventLoop)
+    except ImportError:  # not on this platform
+        pass
+
+    def guard_sock_connect(loop_class, allowed):
+        # Windows' Proactor connects with ConnectEx and never calls socket.connect
+        real_sock_connect = loop_class.sock_connect
+
+        async def sock_connect(self, sock, address):
+            if not allowed(address):
+                refuse()
+            return await real_sock_connect(self, sock, address)
+        monkeypatch.setattr(loop_class, "sock_connect", sock_connect)
+
     if request.node.get_closest_marker("loopback"):
         # asyncio on Windows connects a loopback socket pair per event loop; relay tests talk to 127.0.0.1
         real = {name: getattr(socket.socket, name) for name in ("connect", "connect_ex")}
@@ -49,12 +68,16 @@ def no_network(request, monkeypatch):
             only_loopback(address)
             return real_create(address, *args, **kwargs)
 
+        for loop_class in loops:
+            guard_sock_connect(loop_class, lambda a: isinstance(a, tuple) and a[:1] == ("127.0.0.1",))
         for name in real:
             monkeypatch.setattr(socket.socket, name, guarded_method(name))
         monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
         monkeypatch.setattr(socket, "create_connection", guarded_create)
         return
 
+    for loop_class in loops:
+        guard_sock_connect(loop_class, lambda a: False)
     for name in ("connect", "connect_ex"):
         monkeypatch.setattr(socket.socket, name, refuse)
     monkeypatch.setattr(socket, "getaddrinfo", refuse)

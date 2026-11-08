@@ -6,6 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from edmrn.ext.crew_identity import _raw32  # the client's own author check (R2)
+
 DEFAULT_PORT = 8765
 DEFAULT_MEMBER_QUOTA = 5000
 DEFAULT_GROUP_QUOTA = 80000
@@ -27,7 +29,6 @@ class ConfigError(ValueError):
 
 
 def _leaders(text: str) -> frozenset[str]:
-    from edmrn.ext.crew_identity import _raw32  # the client's own author check (R2)
     entries = text.replace(",", " ").split()
     for entry in entries:
         try:
@@ -63,7 +64,7 @@ def load_config(argv: Sequence[str] | None, environ: Mapping[str, str]) -> Relay
     )
     for dest, flag, default, help_text in options:
         env_name = "EDMRN_RELAY_" + dest.upper()
-        parser.add_argument(flag, dest=dest, default=environ.get(env_name, default), type=str,
+        parser.add_argument(flag, dest=dest, default=environ.get(env_name) or default, type=str,
                             help=f"{help_text} (env {env_name})")
     args = parser.parse_args(argv)
     return RelayConfig(

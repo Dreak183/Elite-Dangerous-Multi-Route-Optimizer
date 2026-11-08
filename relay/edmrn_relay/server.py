@@ -33,6 +33,7 @@ MAX_WIRE_BYTES = 2 * proto.MAX_FRAME_BYTES
 _TEXT = (("Content-Type", "text/plain; charset=utf-8"),)
 _PREFIX, _SUFFIX = "/v1/groups/", "/ws"
 SHUTDOWN_GRACE = 15.0  # seconds to let queued closes reach the peers
+WRITE_TIMEOUT = 60.0  # a peer that does not take a frame in this time is dropped
 
 
 @dataclass(frozen=True)
@@ -86,11 +87,20 @@ class Peer:
             while True:
                 item = await self.queue.get()
                 if isinstance(item, tuple):
-                    await self.ws.close(*item)
+                    await asyncio.wait_for(self.ws.close(*item), WRITE_TIMEOUT)
                     return
-                await self.ws.send(item)
+                await asyncio.wait_for(self.ws.send(item), WRITE_TIMEOUT)
         except ConnectionClosed:
             return
+        except TimeoutError:
+            log.info("write timeout, dropping the connection")
+            self.abort()
+
+    def abort(self) -> None:
+        """Drop the connection without a closing handshake."""
+        transport = getattr(self.ws, "transport", None)
+        if transport is not None:
+            transport.abort()
 
     async def finish(self, closing: bool) -> None:
         """closing: wait for the queued close to go out; otherwise cancel the writer."""
@@ -117,8 +127,9 @@ class RelayServer:
     # -- HTTP ----------------------------------------------------------------------------
 
     def _process_request(self, connection: Any, request: Any):
+        upgrades = request.headers.get_all("Upgrade")  # two Upgrade headers are no upgrade
         reply = route(getattr(request, "method", "GET"), request.path,
-                      request.headers.get("Upgrade", "").lower() == "websocket",
+                      len(upgrades) == 1 and upgrades[0].lower() == "websocket",
                       self.config.source_url)
         if reply is None:
             return None
@@ -139,9 +150,9 @@ class RelayServer:
     async def _handler(self, ws: Any) -> None:
         peer = Peer(ws)
         self._peers.add(peer)
-        session, actions = self.relay.connect(group_of(ws.request.path), peer)
-        timer = None
+        session = timer = None
         try:
+            session, actions = self.relay.connect(group_of(ws.request.path), peer)
             self.dispatch(actions)
             timer = asyncio.get_running_loop().call_later(
                 engine.AUTH_TIMEOUT, lambda: self.dispatch(self.relay.expire_auth(session)))
@@ -155,8 +166,9 @@ class RelayServer:
         finally:
             if timer is not None:
                 timer.cancel()
-            self.relay.disconnect(session)
-            await peer.finish(session.closing)
+            if session is not None:
+                self.relay.disconnect(session)
+            await peer.finish(session is not None and session.closing)
             self._peers.discard(peer)
 
     # -- lifecycle -----------------------------------------------------------------------
@@ -167,17 +179,21 @@ class RelayServer:
         self.relay = Relay(self.store, self.config, now=self._now, **kwargs)
         self._server = await serve(self._handler, self.config.host, self.config.port,
                                    process_request=self._process_request,
-                                   max_size=MAX_WIRE_BYTES)
+                                   max_size=MAX_WIRE_BYTES, server_header=None)
         self.port = self._server.sockets[0].getsockname()[1]
         log.info("listening host=%s port=%d db=%s leaders=%d", self.config.host, self.port,
                  self.config.db, len(self.config.leaders))
         return self.port
 
     async def stop(self) -> None:
+        self._server.close(close_connections=False)  # no new sessions after the shutdown
         self.dispatch(self.relay.shutdown())
-        writers = [p.writer for p in self._peers]
-        if writers:
-            await asyncio.wait(writers, timeout=SHUTDOWN_GRACE)
-        self._server.close(close_connections=False)
+        peers = list(self._peers)
+        if peers:
+            await asyncio.wait([p.writer for p in peers], timeout=SHUTDOWN_GRACE)
+        for peer in peers:
+            if not peer.writer.done():  # a peer that does not drain
+                peer.writer.cancel()
+                peer.abort()
         await self._server.wait_closed()
         self.store.close()

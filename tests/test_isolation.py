@@ -46,3 +46,24 @@ def test_unmarked_tests_cannot_reach_loopback():
         listener.listen()
         with pytest.raises(RuntimeError):
             socket.create_connection(("127.0.0.1", listener.getsockname()[1]))
+
+
+@pytest.mark.loopback
+def test_asyncio_connections_are_loopback_only():
+    import asyncio
+
+    async def scenario():
+        async def serve(reader, writer):
+            writer.close()
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            for host in ("127.0.0.2", "::1"):
+                with pytest.raises(RuntimeError):
+                    await asyncio.open_connection(host, port)
+            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+    asyncio.run(scenario())
