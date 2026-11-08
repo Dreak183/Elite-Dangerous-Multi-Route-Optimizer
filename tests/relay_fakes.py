@@ -171,7 +171,13 @@ class Harness:
         assert conn.session is not None
         return conn.session
 
+    def shutdown(self) -> None:
+        self._apply(self.relay.shutdown())
+
     # -- building frames ------------------------------------------------------------------
+
+    def status(self, key, hull: float, author: str | None = None, **fields) -> dict:
+        return status_frame(key, hull, at=self.stamp(), author=author, **fields)
 
     def stamp(self, offset: float = 0.0) -> str:
         return stamp_at(self.clock.now + offset)

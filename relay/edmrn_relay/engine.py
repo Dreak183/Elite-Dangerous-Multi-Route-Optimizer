@@ -220,6 +220,7 @@ class Relay:
     def disconnect(self, session: Session) -> None:
         if session.state == "closed":
             return
+        self._persist_status(session)
         session.state = "closed"
         group = self.groups.get(session.group_id)
         if group is None:
@@ -228,6 +229,32 @@ class Relay:
             group.sessions.remove(session)
         if not group.sessions and group.leader is None:
             del self.groups[session.group_id]
+
+    def _persist_status(self, session: Session) -> None:
+        """Write a member's latest status to the store and forget it in memory (B1 S8). A failing
+        write is logged and keeps the status in memory for the next attempt."""
+        if session.status is None or session.author is None:
+            return
+        try:
+            self.store.save_status(session.group_id, session.author, *session.status)
+        except Exception:
+            log.exception("status save failed group=%s author=%s", session.group_id,
+                          _short(session.author))
+            return
+        session.status = None
+
+    def shutdown(self) -> list[Action]:
+        """Persist every status, then close every session with 1001."""
+        actions: list[Action] = []
+        for group in list(self.groups.values()):
+            for session in list(group.sessions):
+                if session.state == "closed":
+                    continue
+                self._persist_status(session)
+                session.closing = True
+                actions.append(Close(session, CLOSE_GOING_AWAY, "relay shutting down"))
+        log.info("shutdown sessions=%d", len(actions))
+        return actions
 
     def _close(self, session: Session, code: int, reason: str) -> list[Action]:
         session.closing = True
@@ -263,12 +290,72 @@ class Relay:
         return self._member_frame(session, frame)
 
     def _member_frame(self, session: Session, frame: dict) -> list[Action]:
-        # Task 5 adds `st`; any other type is ignored.
+        if frame["t"] == "st":
+            return self._status(session, frame)
         if frame["t"] == "have":
             return self._have(session, frame)
         if frame["t"] == "evs":
             return self._evs(session, frame)
         return []
+
+    # -- statuses -------------------------------------------------------------------------
+
+    def _status(self, session: Session, frame: dict) -> list[Action]:
+        """B1 S8. The content is the clients' business: the relay checks author, signature and
+        size only (ruling 3)."""
+        group = self.group(session.group_id)
+        author = session.author
+        now = self._now()
+        if now - group.status_at.get(author, float("-inf")) < STATUS_INTERVAL:  # T1
+            return [Send(session, _err("rate"))]
+        e, s = frame.get("e"), frame.get("s")
+        if not isinstance(e, str) or not isinstance(s, str):  # T2
+            return [Send(session, _err("bad_frame"))]
+        if len(e) > MAX_STATUS_CHARS:  # T3
+            return [Send(session, _err("too_big"))]
+        try:  # T4
+            data = proto.unb64(e, proto.MAX_STATUS_BYTES)
+            sig = proto.unb64(s, proto.SIGNATURE_BYTES)
+        except proto.FrameError:
+            return [Send(session, _err("bad_frame"))]
+        if len(sig) != proto.SIGNATURE_BYTES:
+            return [Send(session, _err("bad_frame"))]
+        try:  # T5
+            doc = ev.load_json(data, proto.MAX_STATUS_BYTES, "status")
+        except ev.EnvelopeError:
+            return [Send(session, _err("bad_frame"))]
+        if (not isinstance(doc, dict) or doc.get("author") != author
+                or not isinstance(doc.get("at"), str) or not isinstance(doc.get("status"), dict)):
+            return [Send(session, _err("bad_frame"))]
+        if not verify(author, sig, data):  # T6
+            return [Send(session, _err("bad_sig"))]
+        session.status = (data, sig)  # T7
+        group.status_at[author] = now
+        text = proto.encode(proto.status_frame(data, sig))
+        return [Send(o, text) for o in group.sessions
+                if o is not session and o.state == "member" and not o.closing]
+
+    def _statuses_at_auth(self, session: Session, group: Group) -> list[Action]:
+        """B1 S7.5: the statuses of the members present, then the stored ones of those absent."""
+        members = group.roster.members
+
+        def active(author: str | None) -> bool:
+            m = members.get(author)
+            return m is not None and m.last_seq is None
+
+        actions: list[Action] = []
+        live: set[str] = set()
+        for other in group.sessions:
+            if (other is session or other.state != "member" or other.closing
+                    or other.author == session.author or not active(other.author)):
+                continue
+            live.add(other.author)
+            if other.status is not None:
+                actions.append(Send(session, proto.encode(proto.status_frame(*other.status))))
+        for author, e, s in self.store.statuses(group.group_id):
+            if author != session.author and author not in live and active(author):
+                actions.append(Send(session, proto.encode(proto.status_frame(e, s))))
+        return actions
 
     # -- catch-up -------------------------------------------------------------------------
 
@@ -432,6 +519,7 @@ class Relay:
             del self.groups[group.group_id]
         actions: list[Action] = []
         for other in list(group.sessions):
+            self._persist_status(other)  # the dropped group's memory is the only copy
             if other.state != "closed" and not other.closing:
                 actions += self._close(other, CLOSE_INTERNAL, "internal error")
         return actions
@@ -508,8 +596,7 @@ class Relay:
         session.author = author
         text = proto.encode(proto.have_frame(self._listed_heads(group)))
         actions.append(Send(session, text))
-        # Task 5: statuses.
-        return actions
+        return actions + self._statuses_at_auth(session, group)
 
     def _admit_join(self, session: Session, group: Group, raw: Any, author: str) -> bool:
         """U4: a join at auth must pass the envelope checks, name a live invite on the relay clock

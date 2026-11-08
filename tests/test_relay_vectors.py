@@ -75,3 +75,12 @@ def test_roster_cases_through_the_relays_store(tmp_path):
                     for a, m in roster.members.items()} == case["member_details"], case["name"]
         finally:
             store.close()
+
+
+def test_status_vectors(h):
+    g, leader, alice, lc, ac = h.two_members()
+    bad = v["status_negative"][0]
+    h.send(ac, {"t": "st", "e": bad["e"], "s": bad["s"]})
+    assert ac.next_of("err")["code"] == "bad_sig"
+    h.send(ac, {"t": "st", "e": v["status"]["e"], "s": v["status"]["s"]})
+    assert lc.next_of("st") == {"t": "st", "e": v["status"]["e"], "s": v["status"]["s"]}
