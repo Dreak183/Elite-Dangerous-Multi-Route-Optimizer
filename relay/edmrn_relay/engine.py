@@ -131,6 +131,32 @@ def _err(code: str, author: str | None = None, seq: int | None = None) -> str:
     return proto.encode(frame)
 
 
+@dataclass(eq=False)
+class _Batch:
+    """The state of one `evs` frame between its checks and its single commit."""
+    session: Session
+    group: Group
+    now: float
+    day: int
+    roster: Roster  # working roster: grows with the joins this frame admits
+    group_left: int
+    refused: dict[str, tuple[int, int]]
+    pending: list[RosterEnvelope] = field(default_factory=list)
+    errs: list[Action] = field(default_factory=list)
+    advanced: dict[str, int] = field(default_factory=dict)
+    counts: dict[str, int] = field(default_factory=dict)
+    used: dict[str, int] = field(default_factory=dict)
+    log_rows: list[LogRow] = field(default_factory=list)
+    roster_rows: list[LogRow] = field(default_factory=list)
+    forwarded: list[tuple[bytes, bytes]] = field(default_factory=list)
+
+    def refuse(self, author: str, seq: int, code: str, daily: bool = False) -> None:
+        self.errs.append(Send(self.session, _err(code, author, seq)))
+        existing = self.refused.get(author)
+        if existing is None or existing[0] > seq:
+            self.refused[author] = (seq, self.day if daily else 0)
+
+
 class Relay:
     def __init__(self, store: RelayStore, config: RelayConfig, *,
                  now: Callable[[], float] = time.time,
@@ -157,17 +183,22 @@ class Relay:
         self.groups[group_id] = group
         return group
 
-    def reload_roster(self, group: Group) -> None:
-        self._set_roster(group, self.store.roster_bytes(group.group_id))
+    def reload_roster(self, group: Group, leader: str | None = None) -> None:
+        self._set_roster(group, self.store.roster_bytes(group.group_id), leader)
 
-    def _set_roster(self, group: Group, raws: list[bytes]) -> None:
-        if group.leader is None:
+    def _set_roster(self, group: Group, raws: list[bytes], leader: str | None = None) -> None:
+        """Memory changes only once the whole roster is computed; `leader` is for a group whose
+        leader is not in memory yet."""
+        leader = leader or group.leader
+        if leader is None:
             group.roster_entries, group.roster = [], None
             return
         when = datetime.fromtimestamp(self._now(), timezone.utc)
         entries = [parse_roster_envelope(raw, frozenset(), when) for raw in raws]
-        group.roster_entries = [e for e in entries if e is not None]
-        group.roster = compute_roster(group.roster_entries, group.group_id, group.leader)
+        kept = [e for e in entries if e is not None]
+        group.roster = compute_roster(kept, group.group_id, leader)
+        group.roster_entries = kept
+        group.leader = leader
 
     # -- sessions -------------------------------------------------------------------------
 
@@ -280,8 +311,8 @@ class Relay:
                 session, proto.CLOSE_POLICY, "too_big")
         group = self.group(session.group_id)
         g = group.group_id
-        roster = group.roster
         # E3
+        members_before = set(group.roster.members)
         now = self._now()
         day = utc_day(now)
         if group.cleaned_day != day:
@@ -291,90 +322,126 @@ class Relay:
                     "event": "crew-daily-total", "group": g,
                     "day": datetime.fromtimestamp(past * 86400, timezone.utc).strftime("%Y-%m-%d"),
                     "envelopes": n}, separators=(",", ":")))
-        group_left = self.config.group_quota - self.store.group_quota_used(g, day)
-        refused = {a: r for a, r in session.refused.items() if r[1] in (0, day)}
-        errs: list[Action] = []
+        b = _Batch(session, group, now, day, group.roster,
+                   self.config.group_quota - self.store.group_quota_used(g, day),
+                   {a: r for a, r in session.refused.items() if r[1] in (0, day)})
         close_after: str | None = None
-        advanced: dict[str, int] = {}
-        counts: dict[str, int] = {}
-        used: dict[str, int] = {}
-        log_rows: list[LogRow] = []
-        roster_rows: list[LogRow] = []
-        forwarded: list[tuple[bytes, bytes]] = []
-
-        def refuse(author: str, seq: int, code: str, daily: bool = False) -> None:
-            errs.append(Send(session, _err(code, author, seq)))
-            existing = refused.get(author)
-            if existing is None or existing[0] > seq:
-                refused[author] = (seq, day if daily else 0)
-
         # E4
         for item in items:
             c = decode_item(item)
             if c == "oversize":
-                errs.append(Send(session, _err("too_big")))
+                b.errs.append(Send(session, _err("too_big")))
                 close_after = "too_big"
                 break
             if c == "undecodable":
-                errs.append(Send(session, _err("bad_frame")))
+                b.errs.append(Send(session, _err("bad_frame")))
                 close_after = "bad item"
                 break
             if isinstance(c, BadSig):
-                refuse(c.author, c.seq, "bad_sig")
+                b.refuse(c.author, c.seq, "bad_sig")
                 continue
-            author, seq = c.env["author"], c.env["seq"]
-            block = refused.get(author)
-            if block is not None and seq >= block[0]:
-                continue
-            # Task 4: a join by a non-member is judged here.
-            if author not in roster.members:
-                refuse(author, seq, "not_member")
-                continue
-            if not roster.admits(author, seq):
-                refuse(author, seq, "removed")
-                continue
-            if seq <= advanced.get(author, group.heads.get(author, 0)):
-                continue
-            if not verify(author, c.s, c.e):
-                refuse(author, seq, "bad_sig")
-                continue
-            entry = roster_entry(c, now) if c.env["kind"] in ev.ROSTER_KINDS else None
-            exempt = entry is not None and author == group.leader
-            if not exempt:
-                if author not in used:
-                    used[author] = self.store.quota_used(g, day, author)
-                if used[author] + counts.get(author, 0) >= self.config.member_quota:
-                    refuse(author, seq, "quota", daily=True)
-                    continue
-                if group_left <= 0:
-                    refuse(author, seq, "group_quota", daily=True)
-                    continue
-                counts[author] = counts.get(author, 0) + 1
-                group_left -= 1
-            advanced[author] = seq
-            log_rows.append(LogRow(author, seq, c.e, c.s))
-            forwarded.append((c.e, c.s))
-            if exempt and entry.kind != "join":
-                roster_rows.append(LogRow(author, seq, c.e, c.s))
+            self._judge(b, c)
         # E5, E6: the commit comes first, memory follows.
-        roster_changed = self.store.apply_frame(g, day, log_rows, roster_rows, advanced, counts)
-        group.heads.update(advanced)
-        session.refused = refused
-        if roster_changed:
-            self.reload_roster(group)
-        if len(refused) > MAX_REFUSALS:  # E7
-            close_after = close_after or "too many refusals"
-        actions = errs
-        if forwarded:  # E8
+        roster_changed = self.store.apply_frame(g, day, b.log_rows, b.roster_rows, b.advanced,
+                                                b.counts)
+        group.heads.update(b.advanced)
+        session.refused = b.refused
+        # E8, built before the reload (the Worker forwards first): a failing reload cannot lose them.
+        forwards = [proto.encode(out) for out in proto.evs_frames(b.forwarded)]
+        actions = b.errs
+        if forwards:
             for other in group.sessions:
-                if other is session or other.state != "member" or other.closing:
-                    continue
-                for out in proto.evs_frames(forwarded):
-                    actions.append(Send(other, proto.encode(out)))
-        # Task 4: E9, the roster consequences.
-        if close_after:  # E10
+                if other is not session and other.state == "member" and not other.closing:
+                    actions += [Send(other, text) for text in forwards]
+        if roster_changed:
+            try:
+                self.reload_roster(group)
+            except Exception:
+                log.exception("roster reload failed author=%s", _short(session.author))
+                return actions + self._close(session, CLOSE_INTERNAL, "internal error")
+            actions += self._roster_consequences(group, members_before)  # E9
+        if len(b.refused) > MAX_REFUSALS:  # E7
+            close_after = close_after or "too many refusals"
+        if close_after and not session.closing:  # E10
             actions += self._close(session, proto.CLOSE_POLICY, close_after)
         return actions
+
+    def _judge(self, b: _Batch, c: Checked) -> None:
+        """E4 for one decoded item: refuse it, skip it, admit a join, or accept it."""
+        group = b.group
+        g, roster = group.group_id, b.roster
+        author, seq = c.env["author"], c.env["seq"]
+        block = b.refused.get(author)
+        if block is not None and seq >= block[0]:
+            return
+        if author not in roster.members and c.env["kind"] == "join":  # E4d, B1 S7
+            # A re-seed: the join is stored and changes the roster, but moves no head and is not
+            # forwarded: the member's earlier envelopes, with lower seq, still have to arrive first.
+            # The invite's expiry on the relay clock is an auth-time rule only.
+            if not verify(author, c.s, c.e):
+                b.refuse(author, seq, "bad_sig")
+                return
+            entry = roster_entry(c, b.now)
+            if entry is not None:
+                candidate = compute_roster(group.roster_entries + b.pending + [entry], g,
+                                           roster.leader)
+                if author in candidate.members:
+                    b.roster = candidate
+                    b.pending.append(entry)
+                    b.log_rows.append(LogRow(author, seq, c.e, c.s))
+                    b.roster_rows.append(LogRow(author, seq, c.e, c.s))
+                    return
+        if author not in roster.members:
+            b.refuse(author, seq, "not_member")
+            return
+        if not roster.admits(author, seq):
+            b.refuse(author, seq, "removed")
+            return
+        if seq <= b.advanced.get(author, group.heads.get(author, 0)):
+            return
+        if not verify(author, c.s, c.e):
+            b.refuse(author, seq, "bad_sig")
+            return
+        entry = roster_entry(c, b.now) if c.env["kind"] in ev.ROSTER_KINDS else None
+        exempt = entry is not None and author == group.leader
+        if not exempt:
+            if author not in b.used:
+                b.used[author] = self.store.quota_used(g, b.day, author)
+            if b.used[author] + b.counts.get(author, 0) >= self.config.member_quota:
+                b.refuse(author, seq, "quota", daily=True)
+                return
+            if b.group_left <= 0:
+                b.refuse(author, seq, "group_quota", daily=True)
+                return
+            b.counts[author] = b.counts.get(author, 0) + 1
+            b.group_left -= 1
+        b.advanced[author] = seq
+        b.log_rows.append(LogRow(author, seq, c.e, c.s))
+        b.forwarded.append((c.e, c.s))
+        if exempt and entry.kind != "join":
+            b.roster_rows.append(LogRow(author, seq, c.e, c.s))
+
+    def _roster_consequences(self, group: Group, members_before: set[str]) -> list[Action]:
+        """E9: close the sessions of removed members; tell the rest about new members."""
+        roster = group.roster
+        actions: list[Action] = []
+        for other in list(group.sessions):
+            if other.state != "member" or other.closing:
+                continue
+            m = roster.members.get(other.author)
+            if m is None or m.last_seq is not None:
+                actions += self._close(other, proto.CLOSE_FORBIDDEN, "removed")
+        if any(a not in members_before for a in roster.members):
+            text = proto.encode(proto.have_frame(self._listed_heads(group)))
+            actions += [Send(o, text) for o in group.sessions
+                        if o.state == "member" and not o.closing]
+        return actions
+
+    def _listed_heads(self, group: Group) -> dict[str, int]:
+        """The stored head of every member, 0 for one the relay holds nothing of (B1 S7). Uncapped:
+        a client holding a removed member's envelopes above last_seq would otherwise upload them on
+        every connection; catch-up still serves only up to the cap."""
+        return {a: group.heads.get(a, 0) for a in group.roster.members}
 
     # -- auth -----------------------------------------------------------------------------
 
@@ -390,7 +457,11 @@ class Relay:
         if (len(sig) != proto.SIGNATURE_BYTES
                 or not verify(author, sig, proto.auth_message(session.group_id, session.nonce))):
             return self._close(session, proto.CLOSE_BAD_AUTH, "bad signature")
-        if group.leader is None:
+        stored = self.store.load_group(group.group_id) if group.leader is None else None
+        if stored is not None:  # a creation committed but its reload failed: adopt it
+            group.heads = dict(stored.heads)
+            self._set_roster(group, stored.roster, stored.leader)
+        elif group.leader is None:
             genesis = None
             if author in self.config.leaders:
                 genesis = self._check_auth_envelope(session, frame.get("genesis"), author, "group")
@@ -399,11 +470,13 @@ class Relay:
             checked, _ = genesis
             self.store.create_group(session.group_id, author, int(self._now()),
                                     LogRow(author, checked.env["seq"], checked.e, checked.s))
-            group.leader = author
-            self.reload_roster(group)
+            self.reload_roster(group, author)
             log.info("group created %s leader=%s", session.group_id, _short(author))
-        # Task 4: join at auth.
-        member = group.roster.members.get(author) if group.roster else None
+        joined = False
+        if (frame.get("join") is not None and author != group.leader
+                and author not in group.roster.members):  # U4
+            joined = self._admit_join(session, group, frame["join"], author)
+        member = group.roster.members.get(author)
         if member is None:
             return self._close(session, proto.CLOSE_FORBIDDEN, "not_member")
         if member.last_seq is not None:
@@ -415,11 +488,33 @@ class Relay:
                 actions += self._close(other, proto.CLOSE_REPLACED, "replaced")
         session.state = "member"
         session.author = author
-        # Task 4: a `have` to every other member session on admission.
-        heads = {a: group.heads.get(a, 0) for a in group.roster.members}
-        actions.append(Send(session, proto.encode(proto.have_frame(heads))))
+        text = proto.encode(proto.have_frame(self._listed_heads(group)))
+        if joined:  # U7: the other members learn the new member's head
+            actions += [Send(o, text) for o in group.sessions
+                        if o is not session and o.state == "member" and not o.closing]
+        actions.append(Send(session, text))
         # Task 5: statuses.
         return actions
+
+    def _admit_join(self, session: Session, group: Group, raw: Any, author: str) -> bool:
+        """U4: a join at auth must pass the envelope checks, name a live invite on the relay clock
+        and admit its author under the roster rules (B1 S7). A refusal is quiet: U5 closes."""
+        checked = self._check_auth_envelope(session, raw, author, "join")
+        if checked is None:
+            return False
+        c, entry = checked
+        invite = group.roster.invites.get(entry.payload["invite_id"])
+        expires = ev.parse_stamp(invite.expires_at) if invite else None
+        if expires is None or self._now() > expires.timestamp():
+            return False
+        candidate = compute_roster(group.roster_entries + [entry], group.group_id, group.leader)
+        if author not in candidate.members:
+            return False
+        row = LogRow(author, c.env["seq"], c.e, c.s)  # log and roster in one commit, no head
+        self.store.apply_frame(group.group_id, utc_day(self._now()), [row], [row], {}, {})
+        self.reload_roster(group)
+        log.info("member admitted %s author=%s", group.group_id, _short(author))
+        return True
 
     def _check_auth_envelope(self, session: Session, raw: Any, author: str,
                              kind: str) -> tuple[Checked, RosterEnvelope] | None:

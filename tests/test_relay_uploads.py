@@ -352,24 +352,6 @@ def test_writes_of_a_frame_are_one_transaction(h, caplog):
     assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
 
 
-def test_forwarding_reaches_other_members_in_order_and_not_the_sender(h):
-    g, c = setup(h)
-    invite_id = h.invite(c, g, leader, 2)
-    bob = key_for("bob")
-    join = h.envelope(bob, 1, "join", {"group_id": g, "invite_id": invite_id, "token": TOKEN,
-                                       "commander": "Bob"})
-    h.store.add_roster_envelope(g, LogRow(bob.author, 1, proto.unb64(join["e"], 1 << 20),
-                                          proto.unb64(join["s"], 64)))
-    h.relay.reload_roster(h.relay.groups[g])
-    b = h.authed(g, bob)
-    assert b.closed is None
-    b.take()
-    c.take()
-    evs(h, c, h.visit(leader, 3), h.visit(leader, 4))
-    assert [decode(i)["seq"] for i in items_of(b.take())] == [3, 4]
-    assert items_of(c.take()) == []
-
-
 def add_member(h, c, g, name):
     invite_id = h.invite(c, g, leader, h.head(g, L) + 1)
     key = key_for(name)
@@ -379,6 +361,17 @@ def add_member(h, c, g, name):
                                           proto.unb64(join["s"], 64)))
     h.relay.reload_roster(h.relay.groups[g])
     return key
+
+
+def test_forwarding_reaches_other_members_in_order_and_not_the_sender(h):
+    g, c = setup(h)
+    b = h.authed(g, add_member(h, c, g, "bob"))
+    assert b.closed is None
+    b.take()
+    c.take()
+    evs(h, c, h.visit(leader, 3), h.visit(leader, 4))
+    assert [decode(i)["seq"] for i in items_of(b.take())] == [3, 4]
+    assert items_of(c.take()) == []
 
 
 def test_only_the_leaders_roster_envelopes_are_exempt(h):
@@ -431,3 +424,70 @@ def test_a_later_bad_signature_keeps_the_first_refused_seq(h):
     evs(h, c, h.visit(leader, 4))
     assert c.take() == []
     assert h.session(c).refused[L][0] == 3
+
+
+def test_a_leaders_join_is_exempt_and_never_enters_the_roster_table(h):
+    g, c = setup(h)
+    invite_id = h.invite(c, g, leader, 2)
+    evs(h, c, h.join_envelope(leader, g, invite_id, 3))
+    assert c.take("err") == []
+    assert h.log_seqs(g, L) == [1, 2, 3]
+    assert h.roster_seqs(g, L) == [1, 2]
+    assert h.store.quota_used(g, utc_day(h.clock.now), L) == 0
+
+
+def _junk(sizes):
+    """Undecodable items whose counted sizes (as the client batches them) are `sizes`."""
+    return [{"e": "A" * (n - 86 - proto._ITEM_OVERHEAD), "s": "A" * 86} for n in sizes]
+
+
+def test_the_evs_size_limit_is_inclusive(h):
+    g, c = setup(h)
+    sizes = [20102] * 24 + [20920] * 2
+    assert sum(sizes) == proto.MAX_EVS_BYTES
+    evs(h, c, *_junk(sizes))
+    assert c.closed == (4008, "bad item")
+    g, c = setup(h)
+    sizes[-1] += 1
+    evs(h, c, *_junk(sizes))
+    assert c.closed == (4008, "too_big")
+
+
+def test_forwards_survive_a_failing_roster_reload(h):
+    g, _, _, lc, ac = h.two_members()
+    original = h.relay.reload_roster
+    calls = []
+
+    def flaky(group, leader=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return original(group, leader)
+
+    h.relay.reload_roster = flaky
+    h.invite(lc, g, leader, 3)
+    assert [decode(i)["seq"] for i in items_of(ac.take())] == [3]
+    assert lc.closed == (1011, "internal error")
+    assert h.log_seqs(g, L) == [1, 2, 3]
+
+
+def test_a_failing_roster_reload_at_group_creation_leaves_memory_unchanged(h):
+    g = new_group()
+    original = h.relay.reload_roster
+    calls = []
+
+    def flaky(group, leader=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return original(group, leader)
+
+    h.relay.reload_roster = flaky
+    bystander = h.open(g)  # keeps the group in memory, as a concurrent connection would
+    c = h.create_group(g, leader)
+    assert c.closed == (1011, "internal error")
+    assert h.relay.groups[g].leader is None
+    c2 = h.authed(g, leader)
+    assert c2.closed is None
+    assert c2.next_of("have")["heads"] == {L: 0}
+    assert h.relay.groups[g].leader == L

@@ -3,7 +3,10 @@ import json
 
 import pytest
 
-from edmrn_relay.engine import BadSig, Checked, decode_item, roster_entry
+from edmrn.ext import crew_events as ev
+from edmrn_relay.config import RelayConfig
+from edmrn_relay.engine import BadSig, Checked, Relay, decode_item, roster_entry
+from edmrn_relay.store import LogRow, RelayStore
 from relay_fakes import Clock, Harness
 from test_crew_vectors import VECTORS, now as vectors_now, raw
 
@@ -52,3 +55,23 @@ def test_decode_item_classes():
     assert decode_item({"e": good["e"], "s": "A"}) == BadSig(env["author"], env["seq"])
     assert decode_item({"e": good["e"], "s": "AA"}) == BadSig(env["author"], env["seq"])
     assert isinstance(decode_item({"e": good["e"], "s": good["s"], "x": 1}), Checked)
+
+
+def test_roster_cases_through_the_relays_store(tmp_path):
+    for i, case in enumerate(v["roster_cases"]):
+        store = RelayStore(tmp_path / f"c{i}.db")
+        try:
+            store.db.execute("INSERT INTO groups VALUES (?, ?, 0)", (v["group_id"], case["leader"]))
+            for name in case["envelopes"]:
+                e = raw(v["envelopes"][name]["e"])
+                env = ev.parse_envelope(e)
+                store.add_roster_envelope(v["group_id"],
+                                          LogRow(env["author"], env["seq"], e, bytes(64)))
+            relay = Relay(store, RelayConfig(), now=lambda: vectors_now(v).timestamp())
+            roster = relay.group(v["group_id"]).roster
+            assert {a: m.last_seq for a, m in roster.members.items()} == case["members"], case["name"]
+            assert roster.name == case["name_of_group"], case["name"]
+            assert {a: {"commander": m.commander, "leader": m.leader}
+                    for a, m in roster.members.items()} == case["member_details"], case["name"]
+        finally:
+            store.close()

@@ -15,7 +15,7 @@ from edmrn.ext import crew_events as ev
 from edmrn.ext import crew_protocol as proto
 from edmrn.ext import crew_roster
 from edmrn_relay.config import RelayConfig
-from edmrn_relay.engine import Action, Close, Relay, Send, Session
+from edmrn_relay.engine import Action, Close, Relay, Send, Session, utc_day
 from edmrn_relay.store import RelayStore
 
 TOKEN = "11" * 32
@@ -215,8 +215,30 @@ class Harness:
         self.send(conn, {"t": "evs", "items": [item]})
         return invite_id
 
+    def join_envelope(self, key, group_id: str, invite_id: str, seq: int, token: str = TOKEN,
+                      created_at: str | None = None) -> dict:
+        return self.envelope(key, seq, "join", {"group_id": group_id, "invite_id": invite_id,
+                                                "token": token, "commander": "Alice"}, created_at)
+
+    def group_with_invite(self, group_id: str) -> tuple:
+        """(leader, alice, leader_conn, invite_id): the group created, one invite at seq 2."""
+        leader, alice = key_for("leader"), key_for("alice")
+        lc = self.create_group_and_upload(group_id, leader)
+        invite_id = self.invite(lc, group_id, leader, 2)
+        lc.take()
+        return leader, alice, lc, invite_id
+
+    def two_members(self) -> tuple:
+        """(group_id, leader, alice, leader_conn, alice_conn), alice admitted by a join at auth."""
+        g = new_group()
+        leader, alice, lc, invite_id = self.group_with_invite(g)
+        ac = self.authed(g, alice, join=self.join_envelope(alice, g, invite_id, 1))
+        lc.take()
+        ac.take()
+        return g, leader, alice, lc, ac
+
     def set_quota(self, group_id: str, author: str, count: int, day: int | None = None) -> None:
-        day = int(self.clock.now // 86400) if day is None else day
+        day = utc_day(self.clock.now) if day is None else day
         self.store.db.execute(
             "INSERT INTO quota (group_id, day, author, count) VALUES (?, ?, ?, ?) "
             "ON CONFLICT (group_id, day, author) DO UPDATE SET count = excluded.count",
