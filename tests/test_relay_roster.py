@@ -4,6 +4,7 @@ import logging
 import pytest
 
 from edmrn.ext import crew_roster
+from edmrn_relay.engine import utc_day
 from relay_fakes import Harness, decode, items_of, key_for, new_group
 
 INVITE_ID = "01920000-0000-7000-8000-00000000beef"
@@ -20,6 +21,7 @@ leader = key_for("leader")
 L = leader.author
 alice = key_for("alice")
 A = alice.author
+B = key_for("bob").author
 
 
 def evs(h, c, *items):
@@ -140,7 +142,6 @@ def test_removal_closes_the_member_and_caps_what_is_served(h):
 
 
 def test_removed_member_cannot_upload_above_the_cap(h):
-    g, lc, ac = None, None, None
     g, w = _removed(h, 1)
     w.take()
     evs(h, w, h.visit(alice, 2))
@@ -172,3 +173,71 @@ def test_a_members_own_join_is_not_stored_in_the_roster_again(h):
     evs(h, ac, h.join_envelope(alice, g, inv, 9))
     assert h.log_seqs(g, A) == [1, 9]
     assert h.roster_seqs(g, A) == [1]
+
+
+def _fail_next_reload(h):
+    original = h.relay.reload_roster
+    calls = []
+
+    def flaky(group, leader=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return original(group, leader)
+
+    h.relay.reload_roster = flaky
+
+
+def test_a_failed_reload_after_a_removal_closes_every_session_and_reloads_from_the_store(h):
+    g, _, _, lc, ac = h.two_members()
+    _fail_next_reload(h)
+    evs(h, lc, remove(h, g, 3, 1))
+    assert lc.closed == (1011, "internal error")
+    assert ac.closed == (1011, "internal error")
+    assert g not in h.relay.groups
+    evs(h, ac, h.visit(alice, 3))
+    assert h.head(g, A) is None
+    assert h.authed(g, alice).closed == (4003, "removed")
+    assert h.log_seqs(g, A) == [1]
+
+
+def test_a_failed_reload_after_a_join_at_auth_does_not_lock_the_member_out(h):
+    g = new_group()
+    _, _, lc, inv = h.group_with_invite(g)
+    _fail_next_reload(h)
+    ac = h.authed(g, alice, join=h.join_envelope(alice, g, inv, 1))
+    assert ac.closed == (1011, "internal error")
+    assert lc.closed == (1011, "internal error")
+    h.clock.advance(7200)  # the invite has expired: only the committed join can admit alice now
+    ac2 = h.authed(g, alice)
+    assert ac2.closed is None
+    assert ac2.next_of("have")["heads"][A] == 0
+
+
+def test_a_join_at_auth_that_displaces_a_member_closes_that_session(h):
+    g, _, _, lc, ac = h.two_members()
+    inv = next(iter(h.relay.groups[g].roster.invites))
+    bob = key_for("bob")
+    bc = h.authed(g, bob, join=h.join_envelope(bob, g, inv, 1, created_at=h.stamp(-120)))
+    assert bc.closed is None
+    assert ac.closed == (4003, "removed")
+    assert B in lc.next_of("have")["heads"]
+    assert B in bc.next_of("have")["heads"]
+
+
+def test_an_admitting_join_in_evs_is_headless_and_free(h):
+    g, _, _, lc, ac = h.two_members()
+    inv2 = h.invite(lc, g, leader, 3)
+    ac.take()
+    lc.take()
+    bob = key_for("bob")
+    evs(h, lc, h.join_envelope(bob, g, inv2, 1))
+    assert [f["t"] for f in ac.take()] == ["have"]
+    assert h.log_seqs(g, B) == [1]
+    assert h.head(g, B) is None
+    assert h.store.quota_used(g, utc_day(h.clock.now), B) == 0
+
+
+def test_a_join_at_auth_costs_no_quota(h):
+    g, *_ = h.two_members()
+    assert h.store.quota_used(g, utc_day(h.clock.now), A) == 0

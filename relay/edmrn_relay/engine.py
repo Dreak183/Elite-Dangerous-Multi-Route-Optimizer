@@ -354,11 +354,9 @@ class Relay:
                 if other is not session and other.state == "member" and not other.closing:
                     actions += [Send(other, text) for text in forwards]
         if roster_changed:
-            try:
-                self.reload_roster(group)
-            except Exception:
-                log.exception("roster reload failed author=%s", _short(session.author))
-                return actions + self._close(session, CLOSE_INTERNAL, "internal error")
+            failed = self._reload_or_drop(group)
+            if failed is not None:
+                return actions + failed
             actions += self._roster_consequences(group, members_before)  # E9
         if len(b.refused) > MAX_REFUSALS:  # E7
             close_after = close_after or "too many refusals"
@@ -421,6 +419,23 @@ class Relay:
         if exempt and entry.kind != "join":
             b.roster_rows.append(LogRow(author, seq, c.e, c.s))
 
+    def _reload_or_drop(self, group: Group, leader: str | None = None) -> list[Action] | None:
+        """Reload the roster after a commit. When that fails memory no longer matches the store,
+        so every session of the group is closed and the group forgotten: the next connection
+        loads everything from the store."""
+        try:
+            self.reload_roster(group, leader)
+            return None
+        except Exception:
+            log.exception("roster reload failed group=%s", group.group_id)
+        if self.groups.get(group.group_id) is group:
+            del self.groups[group.group_id]
+        actions: list[Action] = []
+        for other in list(group.sessions):
+            if other.state != "closed" and not other.closing:
+                actions += self._close(other, CLOSE_INTERNAL, "internal error")
+        return actions
+
     def _roster_consequences(self, group: Group, members_before: set[str]) -> list[Action]:
         """E9: close the sessions of removed members; tell the rest about new members."""
         roster = group.roster
@@ -457,11 +472,7 @@ class Relay:
         if (len(sig) != proto.SIGNATURE_BYTES
                 or not verify(author, sig, proto.auth_message(session.group_id, session.nonce))):
             return self._close(session, proto.CLOSE_BAD_AUTH, "bad signature")
-        stored = self.store.load_group(group.group_id) if group.leader is None else None
-        if stored is not None:  # a creation committed but its reload failed: adopt it
-            group.heads = dict(stored.heads)
-            self._set_roster(group, stored.roster, stored.leader)
-        elif group.leader is None:
+        if group.leader is None:
             genesis = None
             if author in self.config.leaders:
                 genesis = self._check_auth_envelope(session, frame.get("genesis"), author, "group")
@@ -470,18 +481,25 @@ class Relay:
             checked, _ = genesis
             self.store.create_group(session.group_id, author, int(self._now()),
                                     LogRow(author, checked.env["seq"], checked.e, checked.s))
-            self.reload_roster(group, author)
+            failed = self._reload_or_drop(group, author)
+            if failed is not None:
+                return failed
             log.info("group created %s leader=%s", session.group_id, _short(author))
-        joined = False
+        actions: list[Action] = []
         if (frame.get("join") is not None and author != group.leader
                 and author not in group.roster.members):  # U4
-            joined = self._admit_join(session, group, frame["join"], author)
+            members_before = set(group.roster.members)
+            if self._admit_join(session, group, frame["join"], author):
+                failed = self._reload_or_drop(group)
+                if failed is not None:
+                    return failed
+                log.info("member admitted %s author=%s", group.group_id, _short(author))
+                actions += self._roster_consequences(group, members_before)  # E9, as in the evs path
         member = group.roster.members.get(author)
         if member is None:
             return self._close(session, proto.CLOSE_FORBIDDEN, "not_member")
         if member.last_seq is not None:
             return self._close(session, proto.CLOSE_FORBIDDEN, "removed")
-        actions: list[Action] = []
         for other in list(group.sessions):
             if (other is not session and other.state == "member" and other.author == author
                     and not other.closing):
@@ -489,16 +507,14 @@ class Relay:
         session.state = "member"
         session.author = author
         text = proto.encode(proto.have_frame(self._listed_heads(group)))
-        if joined:  # U7: the other members learn the new member's head
-            actions += [Send(o, text) for o in group.sessions
-                        if o is not session and o.state == "member" and not o.closing]
         actions.append(Send(session, text))
         # Task 5: statuses.
         return actions
 
     def _admit_join(self, session: Session, group: Group, raw: Any, author: str) -> bool:
         """U4: a join at auth must pass the envelope checks, name a live invite on the relay clock
-        and admit its author under the roster rules (B1 S7). A refusal is quiet: U5 closes."""
+        and admit its author under the roster rules (B1 S7). True when the join is committed (the
+        caller reloads). A refusal is quiet: U5 closes."""
         checked = self._check_auth_envelope(session, raw, author, "join")
         if checked is None:
             return False
@@ -512,8 +528,6 @@ class Relay:
             return False
         row = LogRow(author, c.env["seq"], c.e, c.s)  # log and roster in one commit, no head
         self.store.apply_frame(group.group_id, utc_day(self._now()), [row], [row], {}, {})
-        self.reload_roster(group)
-        log.info("member admitted %s author=%s", group.group_id, _short(author))
         return True
 
     def _check_auth_envelope(self, session: Session, raw: Any, author: str,
