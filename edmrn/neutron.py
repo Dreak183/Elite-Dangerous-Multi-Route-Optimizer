@@ -7,6 +7,7 @@ from edmrn.logger import get_logger
 from edmrn.icons import Icons
 from edmrn.ext.spansh import submit_route_job, poll_route_result
 from edmrn.ext.api import ApiError
+from edmrn.ext.neutron_start import optimize_start
 
 logger = get_logger('Neutron')
 
@@ -21,7 +22,8 @@ class NeutronRouter:
         self.is_calculating = False
         self.current_waypoint_index = 0
     def calculate_route(self, from_system: str, to_system: str, jump_range: float,
-                       fsd_boost: str = "x4", progress_callback: Callable = None, start_coords=None) -> Dict:
+                       fsd_boost: str = "x4", progress_callback: Callable = None, start_coords=None,
+                       start_boost: Optional[float] = None) -> Dict:
         if self.is_calculating:
             return {"success": False, "error": "Route calculation already in progress"}
         if from_system.strip().lower() == to_system.strip().lower():
@@ -53,7 +55,11 @@ class NeutronRouter:
             result_data = self._wait_for_result(job_id, progress_callback)
             if not result_data["success"]:
                 return result_data
-            route_data = self._process_route_data(result_data["data"], from_system, to_system)
+            boost_note = None
+            raw_data = result_data["data"]
+            raw_data, boost_note = optimize_start(
+                raw_data, jump_range, start_boost if used_from == from_system else None, supercharge_multiplier)
+            route_data = self._process_route_data(raw_data, from_system, to_system)
             self.last_request = {"from": used_from, "to": to_system, "range": jump_range, "boost": fsd_boost}
             self.last_route = route_data["waypoints"]
             self.current_waypoint_index = 0
@@ -64,7 +70,7 @@ class NeutronRouter:
                 "total_jumps": route_data["total_jumps"],
                 "neutron_jumps": route_data["neutron_jumps"],
                 "normal_jumps": route_data["normal_jumps"],
-                "note": start_note,
+                "note": "\n".join(n for n in (start_note, boost_note) if n) or None,
                 "start_system": used_from
             }
         except ApiError as e:
@@ -200,9 +206,10 @@ class NeutronRouter:
             logger.error(f"Failed to load neutron route: {e}")
             return False
     def calculate_route_async(self, from_system: str, to_system: str, jump_range: float,
-                            fsd_boost: str, callback: Callable, progress_callback: Callable = None, start_coords=None):
+                            fsd_boost: str, callback: Callable, progress_callback: Callable = None, start_coords=None,
+                            start_boost: Optional[float] = None):
         def worker():
-            result = self.calculate_route(from_system, to_system, jump_range, fsd_boost, progress_callback, start_coords)
+            result = self.calculate_route(from_system, to_system, jump_range, fsd_boost, progress_callback, start_coords, start_boost)
             callback(result)
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()

@@ -127,3 +127,18 @@ def test_calculation_done_runs_on_the_tk_loop(errors, monkeypatch):
     assert app.neutron_calculate_btn.text == "🚀 Calculate Neutron Route"
     assert app.neutron_info_label.text == "❌ Error: Spansh is overloaded (HTTP 502). Try again in a minute."
     assert errors == ["Failed to calculate route:\nSpansh is overloaded (HTTP 502). Try again in a minute."]
+
+
+def test_start_boost_is_passed_to_the_router(errors, monkeypatch):
+    monkeypatch.setattr(nm, "start_boost", lambda app, name: 6.0)
+    app, _ = make_app()
+    nm.NeutronManager(app).calculate_neutron_route()
+    assert app.neutron_router.calls[0][1]["start_boost"] == 6.0
+
+    def boom(app, name):
+        raise RuntimeError("x")
+    monkeypatch.setattr(nm, "start_boost", boom)
+    app, _ = make_app(from_system="HERE", journal=Journal("Here", (1.0, 2.0, 3.0)))
+    nm.NeutronManager(app).calculate_neutron_route()
+    kwargs = app.neutron_router.calls[0][1]
+    assert kwargs["start_boost"] is None and kwargs["start_coords"] == (1.0, 2.0, 3.0)

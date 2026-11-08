@@ -3,6 +3,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 from edmrn.logger import get_logger
 from edmrn.gui import ErrorDialog, InfoDialog, WarningDialog
+from edmrn.ext.ship import start_boost
 logger = get_logger('NeutronManager')
 class NeutronManager:
     def __init__(self, app):
@@ -101,9 +102,14 @@ class NeutronManager:
                 start_coords = self.app.journal_monitor.get_current_coordinates()
         except Exception:
             start_coords = None
+        try:
+            boost = start_boost(self.app, from_system)
+        except Exception:
+            boost = None
         self.app.neutron_router.calculate_route_async(
             from_system, to_system, jump_range, fsd_boost,
-            lambda result: self.app.root.after(0, lambda: calculation_done(result)), progress_update, start_coords=start_coords
+            lambda result: self.app.root.after(0, lambda: calculation_done(result)), progress_update, start_coords=start_coords,
+            start_boost=boost
         )
     def neutron_prev_waypoint(self):
         if self.app.neutron_router.prev_waypoint():

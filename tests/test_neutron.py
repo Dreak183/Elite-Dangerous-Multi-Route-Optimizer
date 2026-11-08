@@ -82,3 +82,30 @@ def test_bug_in_processing_is_not_shown_raw(router, monkeypatch):
     monkeypatch.setattr(neutron, "submit_route_job", fake_submit(FakeResponse(202, {"job": "j1"})))
     monkeypatch.setattr(neutron, "poll_route_result", lambda job_id, **k: {"result": {"system_jumps": [None]}})
     assert router.calculate_route("A", "B", 40.0)["error"] == "Unexpected error talking to Spansh."
+
+
+def _eol_prou(first_neutron=True):
+    from test_neutron_start import EOL_PROU
+    import copy
+    data = copy.deepcopy(EOL_PROU)
+    data["result"]["system_jumps"][0]["neutron_star"] = first_neutron
+    return data
+
+
+def test_start_boost_applies_after_poll(router, monkeypatch):
+    monkeypatch.setattr(neutron, "submit_route_job",
+                        fake_submit(FakeResponse(202, {"job": "j1"}), None, "Eol Prou WN-T d3-2412"))
+    monkeypatch.setattr(neutron, "poll_route_result", lambda job_id, *, max_wait, on_progress=None: _eol_prou())
+    result = router.calculate_route("Eol Prou WN-T d3-2412", "Colonia", 75.0, start_boost=6.0)
+    assert result["success"] and len(result["waypoints"]) == 2
+    assert "Supercharged start (×6)" in result["note"]
+
+
+def test_journal_boost_dropped_when_start_substituted(router, monkeypatch):
+    monkeypatch.setattr(neutron, "submit_route_job",
+                        fake_submit(FakeResponse(202, {"job": "j1"}), "SUBST", "Near Sys"))
+    monkeypatch.setattr(neutron, "poll_route_result",
+                        lambda job_id, *, max_wait, on_progress=None: _eol_prou(first_neutron=False))
+    result = router.calculate_route("Eol Prou WN-T d3-2412", "Colonia", 75.0, start_boost=6.0)
+    assert result["success"] and len(result["waypoints"]) == 3
+    assert result["note"] == "SUBST"
