@@ -9,6 +9,7 @@ Layers, data flow and invariants of the system, each derived from a spec section
 | `edmrn/` (except `ext/`), `main.py`, `run.py`, `setup.py`, `edmrn.spec`, `requirements.txt`, `assets/`, `sounds/` | upstream — hook points only |
 | `edmrn/ext/`, `requirements-edmrn.txt`, `tests/` | EDMRN |
 | `crew-relay/` | EDMRN (TypeScript relay, AGPL-3.0) |
+| `relay/` | EDMRN (Python crew relay, AGPL-3.0; ADR-0009) |
 | `CLAUDE.md`, `docs/`, `.claude/` | EDMRN project documentation |
 
 ## Invariants
