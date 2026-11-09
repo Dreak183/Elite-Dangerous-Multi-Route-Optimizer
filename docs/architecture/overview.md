@@ -198,7 +198,10 @@ Invariants:
   the high-water mark, so a peer that reads nothing is pushed back by TCP, and drops one whose queue
   passes the hard cap. Without it any peer, authenticated or not, could make the relay hold
   unbounded memory. The cap exceeds the high-water mark by more than the largest single step
-  (`OUTBOX_HIGH_WATER`, `OUTBOX_HARD_CAP` in `relay/edmrn_relay/server.py`).
+  (`OUTBOX_HIGH_WATER`, `OUTBOX_HARD_CAP` in `relay/edmrn_relay/server.py`). The inbound side is
+  bounded too: while the handler is paused, `websockets` buffers at most `MAX_INBOUND_QUEUE` frames
+  before it stops reading the socket, so a paused connection pins a few frames, not the library's
+  default of 16 frames of up to `MAX_WIRE_BYTES`.
 - Catch-up is built one page of at most 100 envelopes at a time, only while the peer's queue has
   room, and a second `have` replaces the one in flight. While a session catches up, live forwards
   to it are withheld: its pages read the store when they are built and the store already holds

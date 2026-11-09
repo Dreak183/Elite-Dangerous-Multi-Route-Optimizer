@@ -42,6 +42,9 @@ WRITE_TIMEOUT = 60.0  # a peer that does not take a frame in this time is droppe
 # (about 2.2 MB), and a page is built only while the queue is below the high-water mark.
 OUTBOX_HIGH_WATER = 1 << 20
 OUTBOX_HARD_CAP = 8 << 20
+# websockets keeps reading frames into its own buffer while the handler is paused; (high, low) frames
+# bound that buffer, else one non-reading peer pins max_queue x MAX_WIRE_BYTES (36 MiB at the default 16).
+MAX_INBOUND_QUEUE = (2, 1)
 
 
 @dataclass(frozen=True)
@@ -246,7 +249,8 @@ class RelayServer:
         self.relay = Relay(self.store, self.config, now=self._now, **kwargs)
         self._server = await serve(self._handler, self.config.host, self.config.port,
                                    process_request=self._process_request,
-                                   max_size=MAX_WIRE_BYTES, server_header=None)
+                                   max_size=MAX_WIRE_BYTES, max_queue=MAX_INBOUND_QUEUE,
+                                   server_header=None)
         self.port = self._server.sockets[0].getsockname()[1]
         log.info("listening host=%s port=%d db=%s leaders=%d", self.config.host, self.port,
                  self.config.db, len(self.config.leaders))

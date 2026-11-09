@@ -680,3 +680,84 @@ def test_a_disconnect_mid_catch_up_leaves_no_task_behind(tmp_path, monkeypatch):
         finally:
             await server.stop()
     asyncio.run(scenario())
+
+
+def test_a_paused_connection_buffers_only_a_bounded_number_of_inbound_frames(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 1)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        try:
+            ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{new_group()}/ws",
+                               max_size=None, compression=None)
+            await ws.recv()  # hello
+            peer = peers_of(server)[0]
+            never = asyncio.Event()
+
+            async def stalled(_text):  # the peer takes nothing: its outbox stays full
+                await never.wait()
+            peer.ws.send = stalled
+            await ws.send("x")  # answered with an err frame that the writer cannot deliver
+            await eventually(lambda: not peer.room.is_set())
+            big = "y" * (MAX_WIRE_BYTES - 10)
+            sender = asyncio.gather(*[ws.send(big) for _ in range(10)])
+            # reading stops at the transport once the library's inbound buffer is over its bound
+            await eventually(lambda: not peer.ws.transport.is_reading())
+            await asyncio.sleep(0.2)  # in-flight bytes the kernel already delivered
+            frames = peer.ws.recv_messages.frames.queue
+            assert len(frames) <= server_module.MAX_INBOUND_QUEUE[0] + 1
+            assert sum(len(f.data) for f in frames) <= (len(frames) + 1) * MAX_WIRE_BYTES
+            assert not peer.room.is_set()  # the handler was paused throughout
+            sender.cancel()
+            ws.transport.abort()
+            peer.abort()
+            never.set()  # the writer takes the err frame, the handler wakes and sees the close
+            await eventually(lambda: not server._peers)
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_catch_up_larger_than_the_hard_cap_waits_for_room_and_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 64 * 1024)
+    monkeypatch.setattr(server_module, "OUTBOX_HARD_CAP", 1024 * 1024)
+    total = 400  # about 1.7 MB of envelopes: more than the hard cap
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        leader, g = key_for("leader"), new_group()
+        try:
+            first = await seeded_group(port, g, leader, total)
+            await eventually(lambda: server.relay.groups[g].heads.get(leader.author) == total + 1)
+            first.transport.abort()
+            await eventually(lambda: not server._peers)
+            ws = await authed_ws(port, g, leader)
+            await ws.recv()  # have
+            peer = peers_of(server)[0]
+            real_send, go = peer.ws.send, asyncio.Event()
+
+            async def stalled(text):  # the member takes nothing until `go`
+                await go.wait()
+                await real_send(text)
+            peer.ws.send = stalled
+            await ws.send(proto.encode({"t": "have", "heads": {}}))
+            await eventually(lambda: peer.queued_bytes >= server_module.OUTBOX_HIGH_WATER)
+            await asyncio.sleep(0.3)  # a pump that ignores the room would queue the rest now
+            page = 500 * 1024  # a page of this test's items is about 430 KB
+            assert not peer.closing and peer.ws.close_code is None
+            assert server_module.OUTBOX_HIGH_WATER <= peer.queued_bytes
+            assert peer.queued_bytes <= server_module.OUTBOX_HIGH_WATER + page
+            go.set()
+            seqs = []
+            while True:
+                frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                if frame["t"] == "synced":
+                    break
+                seqs += [json.loads(proto.unb64(i["e"], 1 << 20))["seq"] for i in frame["items"]]
+            assert seqs == list(range(1, total + 2))
+            ws.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
