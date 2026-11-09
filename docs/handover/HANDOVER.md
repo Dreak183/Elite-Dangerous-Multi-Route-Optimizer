@@ -5,16 +5,22 @@
 - `main` holds API hardening, neutron save/resume, journal location, Spec A crew capture, Spec B1
   crew sync core, and the laden jump range with the supercharged neutron start (spec
   `../superpowers/specs/2026-11-08-ship-range-and-neutron-start-design.md`, merged 2026-11-08).
-  - `.venv/Scripts/python.exe -m pytest -q`: `1086 passed, 2 skipped` (2026-11-08). One skip is the
-    opt-in end-to-end test `tests/test_relay_e2e.py` (`EDMRN_RELAY_E2E=1`, against `wrangler dev`);
-    Tk tests sometimes skip with "can't find usable init.tcl" (environment, intermittent). No
-    Python linter is configured.
   - The supercharged start was checked live against Spansh: `Eol Prou WN-T d3-2412` → `Colonia` at
     75 LY/×4 now plots 1 jump instead of 2.
-- **Crew relay: decision changed (2026-11-08).** The commander has a dedicated server; ADR-0009 (on
-  branch `feature/self-hosted-relay`, see Start here) replaces the never-deployed Cloudflare Worker
-  in `crew-relay/` (76 vitest tests, TypeScript) with a Python relay on that server and drops the
-  peer-to-peer plan. The client protocol is unchanged.
+- **Branch `feature/self-hosted-relay` (25 commits ahead of `main`, not merged, not pushed) holds
+  the finished self-hosted crew relay** (ADR-0009, spec
+  `../superpowers/specs/2026-11-08-self-hosted-relay-design.md`): the Python relay in `relay/`, its
+  deployment files, a loopback test with two real clients (`tests/test_relay_loopback.py`), and the
+  removal of the Cloudflare Worker (`crew-relay/` is gone; its vectors are
+  `tests/vectors/crew_vectors.json`). The client protocol is unchanged.
+  - On the branch, `.venv/Scripts/python.exe -m pytest -q`: `1278 passed, 1 skipped`
+    (2026-11-10; other runs the same day gave `1279 passed`). The skip is a Tk test that
+    intermittently fails to find "init.tcl" (environment). No Python linter is configured.
+  - Reviewed per task and as a whole branch, with probes against the real server on 127.0.0.1
+    (flooding, large catch-up, hostile frames) and mutation checks.
+  - **Never executed:** `docker build`, `docker compose up`, Caddy, the systemd unit and Option B's
+    uv commands (no Docker and no Linux on the development machine). The first run is the deploy
+    session.
 - **No human has looked at the window** since the location, neutron, B1 crew dialog and range
   features: header location, Neutron "Saved routes", a plot from an unknown start, Settings >
   Crew..., and the range label with its Auto switch under both range fields (the label is one line
@@ -27,19 +33,18 @@
 
 1. Read `../../CLAUDE.md`, the ADRs (`../architecture/decisions/`), `../architecture/overview.md`
    and `../knowledge/upstream-baseline.md`.
-2. **Self-hosted relay (Phase 2), in progress on branch `feature/self-hosted-relay`:** ADR-0009, the
-   spec `../superpowers/specs/2026-11-08-self-hosted-relay-design.md` and the 9-task plan
-   `../superpowers/plans/2026-11-08-self-hosted-relay.md` are committed; execution runs with
-   `superpowers:subagent-driven-development`. Its ledger (completed tasks, rulings, deferred minors)
-   is `../../.superpowers/sdd/2026-11-08-self-hosted-relay/progress.md` — git-ignored, local to this
-   machine; if it is missing, `git log` on the branch shows which tasks landed (`feat(relay): …`).
-   Rulings so far: exact version pins in `relay/requirements.txt` (amends spec R7); the client's
-   missing status resend after `err rate` goes to Spec B2. Docker is not installed on the
-   development machine, so the image is first built in the deploy session.
-3. **Deploy session with the commander** (needs the commander): server OS, Docker or not, an
-   existing reverse proxy on 443, the DNS record for `galroute.the-hub.cloud`, and the leader key
-   from Settings > Crew....
-4. **Then Specs B2 and C (crew window).** Notes for B2 and C from Specs A and B1:
+2. **Merge `feature/self-hosted-relay` into `main`** once the commander agrees (Open decisions);
+   `superpowers:finishing-a-development-branch`.
+3. **Deploy session with the commander** (needs the commander), following
+   `../how-to/deploy-relay.md`: server OS, Docker or not, an existing reverse proxy on 443, the DNS
+   record for `galroute.the-hub.cloud`, and the leader key from Settings > Crew.... Decide there
+   whether the reverse proxy limits connections per address (the relay has no connection cap, see
+   the relay follow-ups).
+4. **Then Specs B2 and C (crew window).** Notes for B2 and C from Specs A and B1 and the relay:
+   - After an `err rate` refusal the client does not resend its status; a refused status shows up
+     only at the next value change (B2).
+   - B1 S2's earliest-join rule lets a leaked token of a still-live, already-redeemed invite with a
+     backdated `created_at` displace the member who redeemed it (B2 or C, spec level).
    - The manual API and group actions run on the Tk thread only and flush the writer queue (about
      1.8 s at 10,000 drafts).
    - During a lock, an edit right after a report raises `KeyError`.
@@ -62,6 +67,8 @@ The B1 requirements (group, invites, status, pause) are in the B1 spec.
 
 ## Open decisions
 
+- **Merge of `feature/self-hosted-relay` into `main`.** Recommendation: merge locally (fast-forward,
+  as with the earlier phases); nothing is deployed by it.
 - **Own GitHub fork as `origin`.** The remote named `upstream` points at the commander's fork
   `Dreak183/Elite-Dangerous-Multi-Route-Optimizer` (it carries `feature/crew-sync-core`), while
   ADR-0002 expects `upstream` = NinurtaKalhu's original and the fork as `origin`. Recommendation:
@@ -82,6 +89,36 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 - strict `route_id` types;
 - a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
   the process (ADR-0005's `event_id` is that identity).
+
+## Follow-ups from the relay reviews (deferred, none blocking the merge)
+
+- **Resource limits (`relay/edmrn_relay/server.py`, `engine.py`):**
+  - No cap on concurrent connections; each unauthenticated socket holds a file descriptor and an
+    empty in-memory group until its auth timeout.
+  - Statuses at auth are sent in one step; about 760 members each holding a maximal status would
+    exceed the 8 MiB outbox cap at connect.
+  - A closing session waits up to the 60 s write timeout for a peer that reads nothing.
+  - One connection's buffered backlog can hold the event loop for about 1 s (the handler does not
+    yield between buffered frames).
+  - A link slower than about 25 KB/s under sustained traffic loses the keepalive and is closed with
+    1011 (independent of the backpressure).
+- **Ordering:**
+  - A member's own uploads made during its own catch-up are served back to it (harmless, costs
+    bandwidth).
+  - An upload by another member between a session's auth and its first `have` is forwarded at once
+    and can leave a per-author hole until the catch-up fills it (the client sends both back to
+    back).
+  - `_judge` accepts a `seq` above head + 1 without a contiguity check; compare with Spec B1
+    before relying on gap-free logs.
+- **Logging:** an internal error logs a multi-line traceback, deviating from the spec's one line
+  per event (kept on purpose); every unauthenticated timeout logs an info line.
+- **Tests:** nothing pins the yield between catch-up pages or the queue being dropped on overflow;
+  the non-WAL warning branch of the store is untested; the loopback test's roster assertion could
+  pass without the relay (its status assertion covers the path).
+- **Deploy how-to:** Options A and B are unexecuted (see Where things stand).
+- **Plan text:** `../superpowers/plans/2026-11-08-self-hosted-relay.md` predates the review rulings
+  (30 s stop timeouts, uv interpreter directory, backpressure, paged catch-up); the spec,
+  `../architecture/overview.md`, `../how-to/deploy-relay.md` and the code are authoritative.
 
 ## Follow-ups from the ship range reviews (deferred, none blocking)
 
@@ -127,7 +164,7 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
   - Calling `CrewSync.stop()` from the sync thread itself raises `RuntimeError` on `Thread.join`
     (caught/logged; guard `threading.current_thread()`).
   - `websockets` 17.2 emits a `DeprecationWarning` when `websockets.sync.client.connect()` is
-    called without a `with` block or `legacy=True` (seen in `test_relay_e2e.py`).
+    called without a `with` block or `legacy=True` (seen in `tests/test_relay_loopback.py`).
   - A raising status source logs both `logger.exception` and a `log_once` warning on the first
     failure; minor import order in `crew_sync.py:12`.
   - `retries=1` in `api.call` can double-post a Discord webhook message if the first attempt
@@ -146,8 +183,7 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
     `tests/test_crew_vectors.py:96`; `make_crew_vectors.py` sanity guard compares raw cases only
     against `group` bytes.
 - **Plan text:** `../superpowers/plans/2026-10-13-crew-sync-core.md` predates the review rulings
-  (for example line 6780 still says Node 20 while Wrangler 4 requires Node 22); the spec,
-  `../how-to/deploy-relay.md` and the code are authoritative.
+  and describes the removed Cloudflare Worker; the spec, ADR-0009 and the code are authoritative.
 
 ## Follow-ups from the crew capture reviews (deferred, none blocking)
 
