@@ -47,6 +47,15 @@ def test_relay_requirements_pin_the_clients_packages_exactly() -> None:
               if ln.startswith(("cryptography", "websockets"))]
     assert len(client) == 2
     assert sorted(ln.split("==")[0] for ln in relay) == sorted(ln.split(">=")[0] for ln in client)
+    pins = dict(ln.split("==") for ln in relay)
+    bounds = dict(ln.split(">=") for ln in client)
+    assert sorted(pins) == sorted(bounds)
+
+    def version(text: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in text.split("."))
+
+    for name, pin in pins.items():
+        assert version(pin) >= version(bounds[name]), f"{name}=={pin} is below the client's >={bounds[name]}"
 
 
 def test_image_layout_imports_only_the_shared_modules(tmp_path: Path) -> None:

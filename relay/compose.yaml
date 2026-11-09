@@ -7,8 +7,7 @@ services:
       EDMRN_RELAY_LEADERS: ${EDMRN_RELAY_LEADERS:?set EDMRN_RELAY_LEADERS in relay/.env}
       EDMRN_RELAY_SOURCE_URL: ${EDMRN_RELAY_SOURCE_URL:-}
     volumes: [relay-data:/data]
-    # A stop waits up to 15 s (SHUTDOWN_GRACE) for queued closes plus websockets' close handshake
-    # (10 s); a shorter period would kill the relay before it has persisted the statuses.
+    # longer than the relay's own 15 s close wait, see docs/how-to/deploy-relay.md
     stop_grace_period: 30s
   caddy:
     image: caddy:2

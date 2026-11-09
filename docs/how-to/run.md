@@ -89,10 +89,10 @@ Run the relay locally, in PowerShell from the repository root (pass your author 
 Settings > Crew...), then point "Create group" at `ws://127.0.0.1:8765`:
 
 ```
-$env:PYTHONPATH='.;relay'; .venv/Scripts/python.exe -m edmrn_relay --port 8765 --db "$env:TEMPelay.db" --leaders <your-author-key>
+$env:PYTHONPATH='.;relay'; .venv/Scripts/python.exe -m edmrn_relay --port 8765 --db "$env:TEMP\relay.db" --leaders <your-author-key>
 ```
 
-The relay's tests are `tests/test_relay_*.py`, in the default run. `tests/test_relay_loopback.py` runs two EDMRN crew clients against the real relay on 127.0.0.1 in the default run.
+The relay's tests are `tests/test_relay_*.py`, part of the default run; `tests/test_relay_loopback.py` runs two EDMRN crew clients against the real relay on 127.0.0.1.
 
 For manual local tries (pass your author key from Settings > Crew...):
 

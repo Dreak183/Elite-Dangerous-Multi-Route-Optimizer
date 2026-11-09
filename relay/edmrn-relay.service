@@ -13,8 +13,7 @@ ExecStart=/opt/edmrn/.venv-relay/bin/python -m edmrn_relay --db /var/lib/edmrn-r
 StateDirectory=edmrn-relay
 Restart=on-failure
 KillSignal=SIGTERM
-# A stop waits up to 15 s (SHUTDOWN_GRACE) for queued closes plus websockets' close handshake (10 s);
-# a shorter timeout would SIGKILL the relay before it has persisted the statuses.
+# longer than the relay's own 15 s close wait, see docs/how-to/deploy-relay.md
 TimeoutStopSec=30
 NoNewPrivileges=true
 ProtectSystem=strict
