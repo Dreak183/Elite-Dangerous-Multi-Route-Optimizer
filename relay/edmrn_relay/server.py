@@ -83,8 +83,13 @@ class Peer:
         self.queued_bytes = 0  # frames queued or being sent; frames are ASCII, so chars are bytes
         self.room = asyncio.Event()  # set while queued_bytes is below the high-water mark
         self.room.set()
+        self.wake = asyncio.Event()  # set when the session may have a catch-up to pump
         self._closing = False
         self.writer = asyncio.get_running_loop().create_task(self._write())
+
+    @property
+    def closing(self) -> bool:
+        return self._closing or self.writer.done()
 
     def enqueue(self, item: str | tuple[int, str]) -> None:
         if self._closing:
@@ -185,6 +190,19 @@ class RelayServer:
             elif isinstance(action, Close):
                 peer.enqueue((action.code, action.reason))
 
+    async def _pump(self, session: Any, peer: Peer) -> None:
+        """Build the session's catch-up one page at a time, only while the peer's outbox has room,
+        and give the event loop back after every page."""
+        while True:
+            await peer.wake.wait()
+            peer.wake.clear()
+            while session.catchup is not None:
+                await peer.room.wait()
+                if peer.closing:
+                    return
+                self.dispatch(self.relay.pump(session))
+                await asyncio.sleep(0)
+
     async def _handler(self, ws: Any) -> None:
         if self._stopping:  # a handshake that finished after stop() began
             await ws.close(engine.CLOSE_GOING_AWAY, engine.SHUTDOWN_REASON)
@@ -192,10 +210,11 @@ class RelayServer:
         peer = Peer(ws)
         self._peers.add(peer)
         try:
-            session = timer = None
+            session = timer = pumping = None
             try:
                 session, actions = self.relay.connect(group_of(ws.request.path), peer)
                 self.dispatch(actions)
+                pumping = asyncio.get_running_loop().create_task(self._pump(session, peer))
                 timer = asyncio.get_running_loop().call_later(
                     engine.AUTH_TIMEOUT, lambda: self.dispatch(self.relay.expire_auth(session)))
                 try:
@@ -203,12 +222,16 @@ class RelayServer:
                         self.dispatch(self.relay.receive(session, message))
                         if session.closing:
                             break
+                        peer.wake.set()
                         await peer.room.wait()  # read the next frame only once the peer drained
                 except ConnectionClosed:
                     pass
             finally:
                 if timer is not None:
                     timer.cancel()
+                if pumping is not None:
+                    pumping.cancel()
+                    await asyncio.wait([pumping])
                 if session is not None:
                     self.relay.disconnect(session)
                 await peer.finish(session is not None and session.closing)

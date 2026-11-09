@@ -194,6 +194,16 @@ Invariants:
 - A `genesis` or `join` presented with `auth`, or a `join` that admits a non-member through `evs`,
   never moves the relay's head; a refused envelope blocks that author for the rest of the connection
   so the head never passes a hole.
+- A relay connection's outbound queue is bounded: the relay stops reading a peer whose queue is over
+  the high-water mark, so a peer that reads nothing is pushed back by TCP, and drops one whose queue
+  passes the hard cap. Without it any peer, authenticated or not, could make the relay hold
+  unbounded memory. The cap exceeds the high-water mark by more than the largest single step
+  (`OUTBOX_HIGH_WATER`, `OUTBOX_HARD_CAP` in `relay/edmrn_relay/server.py`).
+- Catch-up is built one page of at most 100 envelopes at a time, only while the peer's queue has
+  room, and a second `have` replaces the one in flight. While a session catches up, live forwards
+  to it are withheld: its pages read the store when they are built and the store already holds
+  every forwarded envelope, so the receiver's highest stored `seq` per author never passes an
+  envelope it lacks (Spec B1, S7 heads).
 - Only roster envelopes that can affect membership (the leader's `group`, `invite`, `remove` and
   `join` that pass the roster checks) are exempt from the daily quotas.
 - The webhook URL never leaves the leader's `group.json` except in the request to Discord.

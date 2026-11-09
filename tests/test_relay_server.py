@@ -438,6 +438,7 @@ def test_a_non_reading_member_flooding_have_stays_bounded(tmp_path):
             have = proto.encode({"t": "have", "heads": {}})
             for _ in range(600):
                 await flood.send(have)
+                await asyncio.sleep(0.001)  # a have that is not replaced has its page built
             peer = peers_of(server)[0]
             await eventually(lambda: peer.queued_bytes >= server_module.OUTBOX_HIGH_WATER)
             await asyncio.sleep(0.3)  # the server must not go on queueing
@@ -564,14 +565,16 @@ def test_a_slow_reader_below_the_cap_is_not_dropped(tmp_path, monkeypatch):
             await eventually(lambda: not server._peers)
             ws = await authed_ws(port, g, leader)
             await ws.recv()
-            for _ in range(5):
-                await ws.send(proto.encode({"t": "have", "heads": {}}))
             synced = items = 0
             while synced < 5:
-                frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
-                synced += frame["t"] == "synced"
-                items += len(frame["items"]) if frame["t"] == "evs" else 0
-                await asyncio.sleep(0.002)
+                await ws.send(proto.encode({"t": "have", "heads": {}}))
+                while True:
+                    frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                    items += len(frame["items"]) if frame["t"] == "evs" else 0
+                    await asyncio.sleep(0.002)
+                    if frame["t"] == "synced":
+                        synced += 1
+                        break
             assert items == 5 * 101
             ws.transport.abort()
         finally:
@@ -619,6 +622,61 @@ def test_no_frame_is_dispatched_after_a_policy_close(tmp_path):
             await server._handler(ws)
             assert calls == [b"binary"]
             assert ws.closed == [4008]
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_large_catch_up_is_paged_by_the_outbox_and_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 64 * 1024)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        leader, g = key_for("leader"), new_group()
+        try:
+            first = await seeded_group(port, g, leader, 300)
+            await eventually(lambda: server.relay.groups[g].heads.get(leader.author) == 301)
+            first.transport.abort()
+            await eventually(lambda: not server._peers)
+            ws = await authed_ws(port, g, leader)
+            await ws.recv()
+            await ws.send(proto.encode({"t": "have", "heads": {}}))
+            seqs = []
+            while True:
+                frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                if frame["t"] == "synced":
+                    break
+                seqs += [json.loads(proto.unb64(i["e"], 1 << 20))["seq"] for i in frame["items"]]
+            assert seqs == list(range(1, 302))
+            ws.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_disconnect_mid_catch_up_leaves_no_task_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 16 * 1024)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        leader, g = key_for("leader"), new_group()
+        try:
+            first = await seeded_group(port, g, leader, 300)
+            await eventually(lambda: server.relay.groups[g].heads.get(leader.author) == 301)
+            first.transport.abort()
+            await eventually(lambda: not server._peers)
+            baseline = len(asyncio.all_tasks())
+            ws = await authed_ws(port, g, leader)
+            await ws.recv()
+            await ws.send(proto.encode({"t": "have", "heads": {}}))
+            await ws.recv()  # the first page; the rest waits for room
+            session = server.relay.groups[g].sessions[0]
+            assert session.catchup is not None
+            ws.transport.abort()
+            await eventually(lambda: not server._peers and session.catchup is None)
+            await eventually(lambda: len(asyncio.all_tasks()) <= baseline)
         finally:
             await server.stop()
     asyncio.run(scenario())

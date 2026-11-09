@@ -492,3 +492,202 @@ def test_a_failing_roster_reload_at_group_creation_drops_the_group(h):
     assert c2.closed is None
     assert c2.next_of("have")["heads"] == {L: 0}
     assert h.relay.groups[g].leader == L
+
+
+# -- paged catch-up ----------------------------------------------------------------------------
+
+T2 = "22" * 32
+BULK = 250  # envelopes per author; more than two pages
+_BULK_ROWS = {}
+
+
+def bulk_group(h, n=BULK):
+    """(g, lc, alice, bob, bc): leader, alice and bob in one group, every author's log stored up
+    to seq `n` (the leader's first three are genesis and two invites, the others' first is a join)."""
+    g = new_group()
+    alice, bob = key_for("alice"), key_for("bob")
+    lc = h.create_group_and_upload(g, leader)
+    first = h.invite(lc, g, leader, 2)
+    second = h.invite(lc, g, leader, 3, token=T2)
+    h.authed(g, alice, join=h.join_envelope(alice, g, first, 1))
+    bc = h.authed(g, bob, join=h.join_envelope(bob, g, second, 1, token=T2))
+    for key, start in ((leader, 4), (alice, 2), (bob, 2)):
+        rows = []
+        for seq in range(start, n + 1):
+            if (key.author, seq) not in _BULK_ROWS:  # signing 750 envelopes per test is slow
+                item = h.visit(key, seq)
+                _BULK_ROWS[key.author, seq] = (proto.unb64(item["e"], 1 << 20),
+                                               proto.unb64(item["s"], 64))
+            rows.append((g, key.author, seq, *_BULK_ROWS[key.author, seq]))
+        h.store.db.executemany("INSERT INTO log (group_id, author, seq, e, s) VALUES (?,?,?,?,?)",
+                               rows)
+        h.store.db.execute("INSERT OR REPLACE INTO heads (group_id, author, seq) VALUES (?,?,?)",
+                           (g, key.author, n))
+        h.relay.groups[g].heads[key.author] = n
+    lc.take()
+    bc.take()
+    return g, lc, alice, bob, bc
+
+
+def seqs_by_author(frames):
+    got = {}
+    for item in items_of(frames):
+        env = decode(item)
+        got.setdefault(env["author"], []).append(env["seq"])
+    return got
+
+
+def test_a_catch_up_is_served_one_page_per_step(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+    assert ac.take() == []  # nothing is built until the server pumps
+    per_step = []
+    while h.pump(ac):
+        per_step.append(sum(len(f["items"]) for f in ac.take() if f["t"] == "evs"))
+    assert per_step[:3] == [100, 100, 50] and sum(per_step) == 3 * BULK - 0
+    assert [f["t"] for f in ac.take()] == ["synced"]
+    assert ac.session.catchup is None
+
+
+def test_an_upload_during_a_paged_catch_up_reaches_the_receiver_without_a_gap(h):
+    """B1 S7: the receiver's highest stored seq per author must never pass an envelope it lacks.
+    Forwards are withheld while the catch-up runs and the cursor reads them from the store."""
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+    received = []
+    top = {leader.author: BULK, bob.author: BULK}
+    uploaders = {leader.author: (leader, lc), bob.author: (bob, bc)}
+    steps = 0
+    while True:
+        more = h.pump(ac)
+        received += ac.take()
+        steps += 1
+        if more and steps <= 4:  # live uploads by two authors while the catch-up is under way
+            for author, (key, conn) in uploaders.items():
+                top[author] += 1
+                evs(h, conn, h.visit(key, top[author]))
+            assert ac.take() == []  # withheld, not sent ahead of the pages
+        if not more:
+            break
+    assert received[-1]["t"] == "synced"
+    got = seqs_by_author(received)
+    assert got[leader.author] == list(range(1, top[leader.author] + 1))
+    assert got[bob.author] == list(range(1, top[bob.author] + 1))
+    assert got[alice.author] == list(range(1, BULK + 1))
+    assert top[leader.author] == BULK + 4 and top[bob.author] == BULK + 4
+    # after synced the session is live: an upload is forwarded at once
+    evs(h, lc, h.visit(leader, BULK + 5))
+    assert [decode(i)["seq"] for i in items_of(ac.take())] == [BULK + 5]
+
+
+def test_closing_mid_catch_up_drops_the_cursor(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+    assert h.pump(ac)
+    ac.take()
+    h.close(ac)
+    assert ac.session.catchup is None
+    assert h.relay.pump(ac.session) == []
+    assert ac.take() == []
+
+
+def test_replacing_a_session_mid_catch_up_drops_its_cursor(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    old = h.authed(g, alice)
+    old.take()
+    have(h, old, {})
+    assert h.pump(old)
+    old.take()
+    new = h.authed(g, alice)
+    assert old.closed == (4000, "replaced") and old.session.catchup is None
+    assert h.relay.pump(old.session) == []
+    assert old.take() == []
+    assert new.session.catchup is None and h.pump(new) is False
+
+
+def test_a_second_have_replaces_the_catch_up_in_flight(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+    assert h.pump(ac)
+    ac.take()
+    have(h, ac, {leader.author: BULK, alice.author: BULK, bob.author: BULK - 3})
+    while h.pump(ac):
+        pass
+    frames = ac.take()
+    assert [f["t"] for f in frames].count("synced") == 1
+    assert sum(len(f["items"]) for f in frames if f["t"] == "evs") == 3
+    assert ac.session.catchup is None
+
+
+def test_the_group_dropped_by_a_failed_reload_ends_the_catch_up(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+    assert h.pump(ac)
+    ac.take()
+    original = h.relay.reload_roster
+
+    def broken(group, leader=None):
+        raise RuntimeError("boom")
+
+    h.relay.reload_roster = broken
+    h.invite(lc, g, leader, BULK + 1)
+    h.relay.reload_roster = original
+    assert ac.closed == (1011, "internal error") and ac.session.catchup is None
+    assert h.relay.pump(ac.session) == []
+    assert ac.take() == []
+
+
+def test_a_failing_page_read_closes_the_session_with_1011(h):
+    g, lc, alice, bob, bc = bulk_group(h)
+    h.auto_pump = False
+    ac = h.authed(g, alice)
+    ac.take()
+    have(h, ac, {})
+
+    def boom(*args):
+        raise RuntimeError("disk")
+
+    h.store.log_after = boom
+    h.pump(ac)
+    assert ac.closed == (1011, "internal error") and ac.session.catchup is None
+
+
+def test_a_failing_cleanup_is_retried_with_the_next_batch(h, caplog):
+    caplog.set_level(logging.INFO, logger="edmrn_relay")
+    g, c = setup(h)
+    D = utc_day(h.clock.now)
+    h.set_quota(g, L, 7, D - 1)
+    h.clock.next_utc_day()
+    original = h.store.take_past_quota
+    failures = []
+
+    def once(*a):
+        if not failures:
+            failures.append(a)
+            raise RuntimeError("busy")
+        return original(*a)
+
+    h.store.take_past_quota = once
+    evs(h, c, h.visit(leader, 2))
+    assert c.closed == (1011, "internal error")
+    c2 = h.authed(g, leader)
+    evs(h, c2, h.visit(leader, 2))
+    assert sum("crew-daily-total" in r.getMessage() for r in caplog.records) == 1
+    assert h.store.db.execute("SELECT COUNT(*) FROM quota WHERE group_id = ? AND day < ?",
+                              (g, D + 1)).fetchone()[0] == 0

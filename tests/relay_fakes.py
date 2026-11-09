@@ -134,6 +134,7 @@ class Harness:
         self.leaders = frozenset([key_for("leader").author] if leaders is None else leaders)
         self.member_quota, self.group_quota, self.source_url = member_quota, group_quota, source_url
         self._token = token
+        self.auto_pump = True  # False: a test calls `pump` itself, page by page
         self.store = RelayStore(self.db_path)
         self.relay = self._make_relay()
 
@@ -146,6 +147,11 @@ class Harness:
     # -- driving the engine ---------------------------------------------------------------
 
     def _apply(self, actions: list[Action]) -> None:
+        self._deliver(actions)
+        if self.auto_pump:
+            self.drain_catchups()
+
+    def _deliver(self, actions: list[Action]) -> None:
         for action in actions:
             target = action.session.conn
             if isinstance(action, Send):
@@ -153,6 +159,23 @@ class Harness:
             elif isinstance(action, Close):
                 target.closed = (action.code, action.reason)
                 self.relay.disconnect(action.session)
+
+    def pump(self, conn: FakeConn) -> bool:
+        """One catch-up step for the connection, as the server does when the outbox has room.
+        True while the session still has a catch-up afterwards."""
+        session = self.session(conn)
+        self._deliver(self.relay.pump(session))
+        return session.catchup is not None
+
+    def drain_catchups(self) -> None:
+        """Run every catch-up in flight to its end, as an idle server would."""
+        for group in list(self.relay.groups.values()):
+            for session in list(group.sessions):
+                steps = 0
+                while session.catchup is not None:
+                    self._deliver(self.relay.pump(session))
+                    steps += 1
+                    assert steps < 100000, "a catch-up that does not end"
 
     def open(self, group_id: str) -> FakeConn:
         conn = FakeConn()

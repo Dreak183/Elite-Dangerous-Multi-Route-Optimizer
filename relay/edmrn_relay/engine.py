@@ -44,6 +44,14 @@ def _short(author: str | None) -> str:
 
 
 @dataclass(eq=False)
+class CatchUp:
+    """A catch-up in progress: `after[author]` is the last seq the receiver holds or was sent.
+    Everything else is read from the store when a page is built."""
+    group: Group
+    after: dict[str, int]
+
+
+@dataclass(eq=False)
 class Session:
     group_id: str
     conn: Any
@@ -54,6 +62,7 @@ class Session:
     status: tuple[bytes, bytes] | None = None
     refused: dict[str, tuple[int, int]] = field(default_factory=dict)
     closing: bool = False
+    catchup: CatchUp | None = None  # the `have` being answered, page by page (`Relay.pump`)
 
 
 @dataclass(eq=False)
@@ -223,6 +232,7 @@ class Relay:
             return
         self._persist_status(session)
         session.state = "closed"
+        session.catchup = None
         group = self.groups.get(session.group_id)
         if group is None:
             return
@@ -260,6 +270,7 @@ class Relay:
 
     def _close(self, session: Session, code: int, reason: str) -> list[Action]:
         session.closing = True
+        session.catchup = None
         log.info("close %d %s author=%s", code, reason, _short(session.author))
         return [Close(session, code, reason)]
 
@@ -366,25 +377,55 @@ class Relay:
             heads = proto.parse_have(frame)
         except proto.FrameError:
             return [Send(session, _err("bad_frame"))]
-        group = self.group(session.group_id)
+        # A second `have` replaces the catch-up in flight: the receiver's heads are authoritative.
+        session.catchup = CatchUp(self.group(session.group_id), dict(heads))
+        return []
+
+    def pump(self, session: Session) -> list[Action]:
+        """The next page of the session's catch-up (at most 100 envelopes, in `evs` frames), or
+        `synced` once nothing is left; nothing when there is no catch-up. The server calls this
+        while the peer's outbox has room, so a large log is never built at once.
+
+        Ordering, B1 S7: a page reads the store when it is built, `until` is the group's head at
+        that moment, and the authors are walked in ascending order from the first one with
+        envelopes left. Forwards are withheld from a session while its catch-up is in flight,
+        because the store holds every forwarded envelope before it is forwarded: a page covers it,
+        in ascending `seq`, so the receiver's highest stored `seq` per author never passes an
+        envelope it lacks. `synced` comes in the step that finds nothing left, and the catch-up
+        ends in that same step: engine calls do not interleave, so no envelope slips in between."""
+        cursor = session.catchup
+        if cursor is None:
+            return []
+        try:
+            return self._pump(session, cursor)
+        except Exception:
+            log.exception("internal error author=%s", _short(session.author))
+            return self._close(session, CLOSE_INTERNAL, "internal error")
+
+    def _pump(self, session: Session, cursor: CatchUp) -> list[Action]:
+        group = cursor.group
+        if (session.state != "member" or session.closing
+                or self.groups.get(group.group_id) is not group):
+            session.catchup = None
+            return []
         members = group.roster.members if group.roster else {}
-        actions: list[Action] = []
         for author in sorted(group.heads):
             until = group.heads[author]
             member = members.get(author)
             if member is not None and member.last_seq is not None:
                 until = min(until, member.last_seq)
-            after = heads.get(author, 0)
-            while after < until:
-                rows = self.store.log_after(group.group_id, author, after, until,
-                                            proto.MAX_EVS_ITEMS)
-                if not rows:
-                    break
-                for out in proto.evs_frames((r.e, r.s) for r in rows):
-                    actions.append(Send(session, proto.encode(out)))
-                after = rows[-1].seq
-        actions.append(Send(session, proto.encode({"t": "synced"})))
-        return actions
+            after = cursor.after.get(author, 0)
+            if after >= until:
+                continue
+            rows = self.store.log_after(group.group_id, author, after, until, proto.MAX_EVS_ITEMS)
+            if not rows:
+                cursor.after[author] = until
+                continue
+            cursor.after[author] = rows[-1].seq
+            return [Send(session, proto.encode(out))
+                    for out in proto.evs_frames((r.e, r.s) for r in rows)]
+        session.catchup = None
+        return [Send(session, proto.encode({"t": "synced"}))]
 
     # -- uploads --------------------------------------------------------------------------
 
@@ -405,12 +446,12 @@ class Relay:
         now = self._now()
         day = utc_day(now)
         if group.cleaned_day != day:
-            group.cleaned_day = day
             for past, n in self.store.take_past_quota(g, day):
                 log.info(json.dumps({
                     "event": "crew-daily-total", "group": g,
                     "day": datetime.fromtimestamp(past * 86400, timezone.utc).strftime("%Y-%m-%d"),
                     "envelopes": n}, separators=(",", ":")))
+            group.cleaned_day = day  # after the cleanup: a failing store retries on the next batch
         b = _Batch(session, group, now, day, group.roster,
                    self.config.group_quota - self.store.group_quota_used(g, day),
                    {a: r for a, r in session.refused.items() if r[1] in (0, day)})
@@ -440,7 +481,8 @@ class Relay:
         actions = b.errs
         if forwards:
             for other in group.sessions:
-                if other is not session and other.state == "member" and not other.closing:
+                if (other is not session and other.state == "member" and not other.closing
+                        and other.catchup is None):  # a catching-up session reads them from the store
                     actions += [Send(other, text) for text in forwards]
         if roster_changed:
             failed = self._reload_or_drop(group)
