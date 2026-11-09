@@ -375,3 +375,250 @@ def test_a_failing_connect_leaks_no_writer(tmp_path, monkeypatch):
         finally:
             await server.stop()
     asyncio.run(scenario())
+
+
+# -- backpressure and the outbox cap -------------------------------------------------------
+
+import logging  # noqa: E402
+
+from edmrn.ext import crew_events as ev  # noqa: E402
+from edmrn.ext import crew_protocol as proto  # noqa: E402
+from relay_fakes import Harness  # noqa: E402
+
+
+def big_visit(key, seq, size=3000):
+    return envelope_item(key, seq, "visit", {"commander": "A", "system": "Sol",
+                                             "address": "x" * size, "coords": None},
+                         stamp_at(time.time() - 60))
+
+
+async def eventually(predicate, timeout=15.0):
+    end = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < end, "condition not met in time"
+        await asyncio.sleep(0.01)
+
+
+async def authed_ws(port, g, key, **extra):
+    ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{g}/ws", max_queue=1, max_size=None)
+    hello = json.loads(await ws.recv())
+    await ws.send(proto.encode(auth_frame(key, g, hello["nonce"], **extra)))
+    return ws
+
+
+async def seeded_group(server_port, g, leader, count, size=3000):
+    """The leader creates the group over the wire and stores `count` envelopes of ~`size` bytes."""
+    ws = await authed_ws(server_port, g, leader, genesis=envelope_item(
+        leader, 1, "group", {"group_id": g, "name": "Crew", "commander": "L"},
+        stamp_at(time.time() - 60)))
+    await ws.recv()  # have
+    await ws.send(proto.encode({"t": "have", "heads": {}}))
+    assert json.loads(await ws.recv())["t"] == "synced"
+    items = [big_visit(leader, s, size) for s in range(2, count + 2)]
+    for start in range(0, len(items), 50):
+        await ws.send(proto.encode({"t": "evs", "items": items[start:start + 50]}))
+    return ws
+
+
+def peers_of(server):
+    return list(server._peers)
+
+
+def test_a_non_reading_member_flooding_have_stays_bounded(tmp_path):
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        leader, g = key_for("leader"), new_group()
+        try:
+            first = await seeded_group(port, g, leader, 100)
+            await eventually(lambda: server.relay.groups[g].heads.get(leader.author) == 101)
+            first.transport.abort()
+            await eventually(lambda: not server._peers)
+            flood = await authed_ws(port, g, leader)
+            have = proto.encode({"t": "have", "heads": {}})
+            for _ in range(600):
+                await flood.send(have)
+            peer = peers_of(server)[0]
+            await eventually(lambda: peer.queued_bytes >= server_module.OUTBOX_HIGH_WATER)
+            await asyncio.sleep(0.3)  # the server must not go on queueing
+            bound = server_module.OUTBOX_HIGH_WATER + 3 * proto.MAX_FRAME_BYTES
+            assert peer.queued_bytes <= bound
+            # still responsive to a second client
+            other_g = new_group()
+            other = await seeded_group(port, other_g, key_for("leader"), 0)
+            await eventually(lambda: other_g in server.relay.groups)
+            other.transport.abort()
+            flood.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_non_reading_unauthenticated_garbage_flood_stays_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 16 * 1024)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        try:
+            ws = await connect(f"ws://127.0.0.1:{port}/v1/groups/{new_group()}/ws",
+                               max_queue=1)
+            await ws.recv()  # hello
+            peer = peers_of(server)[0]
+            end = time.monotonic() + 60
+            while peer.queued_bytes < 16 * 1024:  # the socket buffers absorb the first MBs of errs
+                assert time.monotonic() < end, "the outbox never filled"
+                for _ in range(5000):
+                    await ws.send("x")
+            try:  # a server that goes on reading would queue all of this too
+                await asyncio.wait_for(asyncio.gather(*[ws.send("x") for _ in range(20000)]), 2)
+            except TimeoutError:
+                pass  # the server stopped reading: TCP pushed back
+            await asyncio.sleep(0.3)
+            assert peer.queued_bytes <= 16 * 1024 + 1024
+            ws.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def seeded_roster(tmp_path, names=("alice", "bob")):
+    """A stored group with the leader and the named members; no server involved."""
+    h = Harness(tmp_path / "relay.db")
+    g = new_group()
+    leader = key_for("leader")
+    lc = h.create_group_and_upload(g, leader)
+    for i, name in enumerate(names):
+        token = f"{i + 1:02x}" * 32
+        invite_id = h.invite(lc, g, leader, 2 + i, token=token)
+        lc.take()
+        h.authed(g, key_for(name), join=h.join_envelope(key_for(name), g, invite_id, 1, token=token))
+    h.store.close()
+    return g
+
+
+def test_a_member_over_the_hard_cap_is_aborted_and_the_others_are_unaffected(
+        tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 256 * 1024)
+    monkeypatch.setattr(server_module, "OUTBOX_HARD_CAP", 1024 * 1024)
+    g = seeded_roster(tmp_path)
+    leader, alice, bob = key_for("leader"), key_for("alice"), key_for("bob")
+    caplog.set_level(logging.INFO, logger="edmrn_relay")
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        try:
+            stuck = await authed_ws(port, g, alice)   # reads nothing
+            reader = await authed_ws(port, g, bob)
+            up = await authed_ws(port, g, leader)
+            await asyncio.wait_for(reader.recv(), 5)  # have
+            await eventually(lambda: len(server.relay.groups[g].sessions) == 3
+                             and all(s.state == "member" for s in server.relay.groups[g].sessions))
+            seen = 0
+
+            async def drain():
+                nonlocal seen
+                try:
+                    async for message in reader:
+                        frame = json.loads(message)
+                        if frame["t"] == "evs":
+                            seen += len(frame["items"])
+                except ConnectionClosed:
+                    pass
+            reading = asyncio.create_task(drain())
+            seq, group = 10, server.relay.groups[g]
+            alice_session = next(s for s in group.sessions if s.author == alice.author)
+            while alice_session in group.sessions and seq < 3000:
+                items = [big_visit(leader, seq + i, 5000) for i in range(50)]
+                seq += 50
+                await up.send(proto.encode({"t": "evs", "items": items}))
+                await asyncio.sleep(0.01)
+            await eventually(lambda: alice_session not in group.sessions, timeout=30)
+            assert alice_session.state == "closed"
+            assert sum("outbox over" in r.message for r in caplog.records) == 1
+            sent = seq - 10
+            await eventually(lambda: seen >= sent - 50, timeout=30)  # bob keeps receiving
+            assert up.close_code is None and reader.close_code is None
+            assert {s.author for s in group.sessions} == {leader.author, bob.author}
+            reading.cancel()
+            for ws in (stuck, reader, up):
+                ws.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_slow_reader_below_the_cap_is_not_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 64 * 1024)
+    monkeypatch.setattr(server_module, "OUTBOX_HARD_CAP", 600 * 1024)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        port = await server.start()
+        leader, g = key_for("leader"), new_group()
+        try:
+            first = await seeded_group(port, g, leader, 100)
+            await eventually(lambda: server.relay.groups[g].heads.get(leader.author) == 101)
+            first.transport.abort()
+            await eventually(lambda: not server._peers)
+            ws = await authed_ws(port, g, leader)
+            await ws.recv()
+            for _ in range(5):
+                await ws.send(proto.encode({"t": "have", "heads": {}}))
+            synced = items = 0
+            while synced < 5:
+                frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                synced += frame["t"] == "synced"
+                items += len(frame["items"]) if frame["t"] == "evs" else 0
+                await asyncio.sleep(0.002)
+            assert items == 5 * 101
+            ws.transport.abort()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_the_hard_cap_leaves_room_for_the_largest_step():
+    def b64len(n):
+        return -(-n * 4 // 3)
+    item = b64len(ev.MAX_ENVELOPE_BYTES) + b64len(proto.SIGNATURE_BYTES) + proto._ITEM_OVERHEAD
+    page = proto.MAX_EVS_ITEMS * item + 64  # a catch-up page: 100 maximal items
+    forward = proto.MAX_EVS_BYTES + item + 64  # an evs frame: its byte limit plus the item that spills
+    assert server_module.OUTBOX_HIGH_WATER + page + forward < server_module.OUTBOX_HARD_CAP
+
+
+def test_no_frame_is_dispatched_after_a_policy_close(tmp_path):
+    class Scripted:
+        request = SimpleNamespace(path=f"/v1/groups/{V7}/ws")
+
+        def __init__(self):
+            self.closed = []
+
+        def __aiter__(self):
+            async def frames():
+                yield b"binary"  # a policy close (4008)
+                yield json.dumps({"t": "have", "heads": {}})
+            return frames()
+
+        async def send(self, text):
+            pass
+
+        async def close(self, code, reason):
+            self.closed.append(code)
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        await server.start()
+        try:
+            calls = []
+            real = server.relay.receive
+            server.relay.receive = lambda session, message: calls.append(message) or real(
+                session, message)
+            ws = Scripted()
+            await server._handler(ws)
+            assert calls == [b"binary"]
+            assert ws.closed == [4008]
+        finally:
+            await server.stop()
+    asyncio.run(scenario())

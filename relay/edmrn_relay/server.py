@@ -34,6 +34,14 @@ _TEXT = (("Content-Type", "text/plain; charset=utf-8"),)
 _PREFIX, _SUFFIX = "/v1/groups/", "/ws"
 SHUTDOWN_GRACE = 15.0  # seconds to let queued closes reach the peers
 WRITE_TIMEOUT = 60.0  # a peer that does not take a frame in this time is dropped
+# A peer whose queued outbound bytes reach the high-water mark is not read from until its writer has
+# drained below it, so TCP pushes back on a sender that reads nothing. Past the hard cap (reachable
+# only through frames other members cause, such as forwards) the connection is aborted. The cap
+# exceeds the high-water mark by far more than any step can add: the largest frame is an `evs` of
+# 512 KiB (proto.MAX_EVS_BYTES) plus one maximal item, a catch-up page is at most 100 maximal items
+# (about 2.2 MB), and a page is built only while the queue is below the high-water mark.
+OUTBOX_HIGH_WATER = 1 << 20
+OUTBOX_HARD_CAP = 8 << 20
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,9 @@ class Peer:
     def __init__(self, ws: Any) -> None:
         self.ws = ws
         self.queue: asyncio.Queue[str | tuple[int, str]] = asyncio.Queue()
+        self.queued_bytes = 0  # frames queued or being sent; frames are ASCII, so chars are bytes
+        self.room = asyncio.Event()  # set while queued_bytes is below the high-water mark
+        self.room.set()
         self._closing = False
         self.writer = asyncio.get_running_loop().create_task(self._write())
 
@@ -80,7 +91,30 @@ class Peer:
             return  # a close is queued already: later items, a second close included, are no-ops
         if isinstance(item, tuple):
             self._closing = True
+        else:
+            self.queued_bytes += len(item)
+            if self.queued_bytes > OUTBOX_HARD_CAP:
+                self._overflow()
+                return
+            if self.queued_bytes >= OUTBOX_HIGH_WATER:
+                self.room.clear()
         self.queue.put_nowait(item)
+
+    def _overflow(self) -> None:
+        """The peer does not read what is queued for it: drop the queue and the connection. The
+        handler then ends the session through the normal disconnect path."""
+        log.info("outbox over %d bytes, dropping the connection", OUTBOX_HARD_CAP)
+        self._closing = True
+        while not self.queue.empty():
+            self.queue.get_nowait()
+        self.queued_bytes = 0
+        self.room.set()  # a handler waiting for room must see the connection end
+        self.abort()
+
+    def _sent(self, size: int) -> None:
+        self.queued_bytes = max(0, self.queued_bytes - size)
+        if self.queued_bytes < OUTBOX_HIGH_WATER:
+            self.room.set()
 
     async def _write(self) -> None:
         try:
@@ -90,11 +124,14 @@ class Peer:
                     await asyncio.wait_for(self.ws.close(*item), WRITE_TIMEOUT)
                     return
                 await asyncio.wait_for(self.ws.send(item), WRITE_TIMEOUT)
+                self._sent(len(item))
         except ConnectionClosed:
             return
         except TimeoutError:
             log.info("write timeout, dropping the connection")
             self.abort()
+        finally:
+            self.room.set()  # a handler waiting for room must not outlive the writer
 
     def abort(self) -> None:
         """Drop the connection without a closing handshake."""
@@ -150,29 +187,32 @@ class RelayServer:
 
     async def _handler(self, ws: Any) -> None:
         if self._stopping:  # a handshake that finished after stop() began
-            await ws.close(engine.CLOSE_GOING_AWAY, "relay shutting down")
+            await ws.close(engine.CLOSE_GOING_AWAY, engine.SHUTDOWN_REASON)
             return
         peer = Peer(ws)
         self._peers.add(peer)
-        session = timer = None
         try:
-            session, actions = self.relay.connect(group_of(ws.request.path), peer)
-            self.dispatch(actions)
-            timer = asyncio.get_running_loop().call_later(
-                engine.AUTH_TIMEOUT, lambda: self.dispatch(self.relay.expire_auth(session)))
+            session = timer = None
             try:
-                async for message in ws:
-                    self.dispatch(self.relay.receive(session, message))
-                    if session.closing:
-                        break
-            except ConnectionClosed:
-                pass
+                session, actions = self.relay.connect(group_of(ws.request.path), peer)
+                self.dispatch(actions)
+                timer = asyncio.get_running_loop().call_later(
+                    engine.AUTH_TIMEOUT, lambda: self.dispatch(self.relay.expire_auth(session)))
+                try:
+                    async for message in ws:
+                        self.dispatch(self.relay.receive(session, message))
+                        if session.closing:
+                            break
+                        await peer.room.wait()  # read the next frame only once the peer drained
+                except ConnectionClosed:
+                    pass
+            finally:
+                if timer is not None:
+                    timer.cancel()
+                if session is not None:
+                    self.relay.disconnect(session)
+                await peer.finish(session is not None and session.closing)
         finally:
-            if timer is not None:
-                timer.cancel()
-            if session is not None:
-                self.relay.disconnect(session)
-            await peer.finish(session is not None and session.closing)
             self._peers.discard(peer)
 
     # -- lifecycle -----------------------------------------------------------------------

@@ -32,6 +32,7 @@ MAX_E_CHARS = -(-ev.MAX_ENVELOPE_BYTES * 4 // 3)
 MAX_S_CHARS = -(-proto.SIGNATURE_BYTES * 4 // 3)
 MAX_STATUS_CHARS = -(-proto.MAX_STATUS_BYTES * 4 // 3)
 CLOSE_GOING_AWAY, CLOSE_INTERNAL = 1001, 1011
+SHUTDOWN_REASON = "relay shutting down"
 
 
 def utc_day(now: float) -> int:
@@ -253,7 +254,7 @@ class Relay:
                 if session.state == "closed" or session.closing:
                     continue
                 self._persist_status(session)
-                actions += self._close(session, CLOSE_GOING_AWAY, "relay shutting down")
+                actions += self._close(session, CLOSE_GOING_AWAY, SHUTDOWN_REASON)
         log.info("shutdown sessions=%d", len(actions))
         return actions
 
