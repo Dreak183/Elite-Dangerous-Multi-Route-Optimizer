@@ -1,7 +1,7 @@
 """Frames of the crew relay protocol (crew sync core spec S6-S9). Pure: no I/O.
 
 Envelopes and signatures travel as base64url of the exact signed bytes and are never re-encoded.
-The relay's side of the same protocol is crew-relay/src/group.ts.
+The relay's side of the same protocol is `relay/edmrn_relay/engine.py`, which imports this module.
 """
 from __future__ import annotations
 

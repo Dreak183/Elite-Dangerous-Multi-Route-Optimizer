@@ -1,4 +1,4 @@
-"""The relay's own paths against the shared vectors (ports of vectors.test.ts)."""
+"""The relay's own paths against the shared vectors."""
 import json
 
 import pytest

@@ -1,4 +1,4 @@
-"""The invite landing page (spec B1 S5, R1 S17), byte-identical to the Worker's `join.ts`.
+"""The invite landing page (spec B1 S5, R1 S17), a fixed page.
 
 The invite lives in the URL fragment, which browsers never send to the server; the script shows it as
 text, never as markup. The Content-Security-Policy allows exactly this script and this style by hash.

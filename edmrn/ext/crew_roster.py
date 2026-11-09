@@ -1,7 +1,7 @@
 """Group roster, invite strings and group.json (crew sync core spec S1-S5a, ADR-0008).
 
-Membership is a pure function of the roster envelopes and the leader's author. The relay computes it
-the same way (crew-relay/src/roster.ts); crew-relay/test/vectors.json pins both implementations.
+Membership is a pure function of the roster envelopes and the leader's author. The relay imports this module
+(`relay/edmrn_relay/engine.py`); `tests/vectors/crew_vectors.json` pins the shared rules.
 """
 from __future__ import annotations
 

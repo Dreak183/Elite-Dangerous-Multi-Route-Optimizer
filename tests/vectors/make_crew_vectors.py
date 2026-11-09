@@ -1,4 +1,4 @@
-"""Generate crew-relay/test/vectors.json, the cases client and relay must agree on (spec B1, Testing).
+"""Generate tests/vectors/crew_vectors.json, the cases client and relay must agree on (spec B1, Testing).
 
 Deterministic: fixed seeds, ids and times; Ed25519 signatures are deterministic (RFC 8032).
 Independent of edmrn: it builds bytes with the standard library and `cryptography` only.
@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-OUT = Path(__file__).resolve().parents[2] / 'crew-relay' / 'test' / 'vectors.json'
+OUT = Path(__file__).resolve().parent / 'crew_vectors.json'
 NOW = '2026-10-13T12:00:00Z'
 G = '01920000-0000-7000-8000-0000000000a1'
 OTHER_G = '01920000-0000-7000-8000-0000000000ff'

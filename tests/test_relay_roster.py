@@ -1,4 +1,4 @@
-"""Joins, re-seed and removal of the relay engine (ports of group.test.ts)."""
+"""Joins, re-seed and removal of the relay engine."""
 import logging
 
 import pytest

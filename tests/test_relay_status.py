@@ -1,4 +1,4 @@
-"""Statuses of the relay engine: rate, checks, hand-over at auth, persistence (ports of status.test.ts)."""
+"""Statuses of the relay engine: rate, checks, hand-over at auth, persistence."""
 import json
 import logging
 import os

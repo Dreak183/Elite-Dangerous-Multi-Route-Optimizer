@@ -1,4 +1,4 @@
-"""Hello, auth and frame checks of the relay engine (ports of group.test.ts, ADR-0009)."""
+"""Hello, auth and frame checks of the relay engine (ADR-0009)."""
 import pytest
 
 from edmrn.ext import crew_protocol as proto

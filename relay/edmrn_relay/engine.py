@@ -434,7 +434,7 @@ class Relay:
                                                 b.counts)
         group.heads.update(b.advanced)
         session.refused = b.refused
-        # E8, built before the reload (the Worker forwards first): a failing reload cannot lose them.
+        # E8, built before the reload (forwarding comes first): a failing reload cannot lose them.
         forwards = [proto.encode(out) for out in proto.evs_frames(b.forwarded)]
         actions = b.errs
         if forwards:

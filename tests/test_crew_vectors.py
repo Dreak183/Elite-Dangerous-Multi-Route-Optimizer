@@ -12,7 +12,7 @@ from edmrn.ext.crew_identity import verify
 from edmrn.ext.crew_roster import compute_roster, decode_invite, parse_roster_envelope
 
 ROOT = Path(__file__).resolve().parents[1]
-VECTORS = ROOT / "crew-relay" / "test" / "vectors.json"
+VECTORS = ROOT / "tests" / "vectors" / "crew_vectors.json"
 
 
 def _generator():

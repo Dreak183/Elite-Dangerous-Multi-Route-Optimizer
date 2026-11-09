@@ -1,4 +1,4 @@
-"""Catch-up, uploads, refusals and daily quotas of the relay engine (ports of group.test.ts)."""
+"""Catch-up, uploads, refusals and daily quotas of the relay engine."""
 import json
 import logging
 from dataclasses import replace
