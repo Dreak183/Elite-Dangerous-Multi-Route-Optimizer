@@ -21,7 +21,7 @@ def test_greeting_names_the_source_url():
     assert greeting("").endswith("Source: not yet published\n")
 
 
-def test_join_page_is_the_workers_byte_for_byte():
+def test_join_page_is_pinned_byte_for_byte():
     assert hashlib.sha256(JOIN_HTML.encode()).hexdigest() == (
         "44fd9af6fd516f2ba9cb41496354dd066d7253ac1fc5e4ef205fb941e6d6732c")
     assert len(JOIN_HTML) == 1146

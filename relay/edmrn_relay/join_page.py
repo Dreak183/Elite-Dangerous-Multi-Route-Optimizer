@@ -1,5 +1,9 @@
 """The invite landing page (spec B1 S5, R1 S17), a fixed page.
 
+The page is fixed because the relay spec's S17 amendment (R1) keeps the greeting, this page and its
+Content-Security-Policy byte-for-byte what the Worker served (Spec B1 S5, S17), so existing invite
+links keep landing on the same page; `tests/test_relay_http.py` pins its hash.
+
 The invite lives in the URL fragment, which browsers never send to the server; the script shows it as
 text, never as markup. The Content-Security-Policy allows exactly this script and this style by hash.
 """

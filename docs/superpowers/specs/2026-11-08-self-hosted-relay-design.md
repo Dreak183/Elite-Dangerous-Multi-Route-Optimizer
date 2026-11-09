@@ -52,8 +52,10 @@ an EDMRN client built for the Cloudflare relay talks to this relay unchanged.
     (`tests/conftest.py`) lets tests marked `loopback` connect to `127.0.0.1` only.
 - R6. **Removal.** `crew-relay/` is deleted in the last task. `crew-relay/test/vectors.json` moves
   to `tests/vectors/crew_vectors.json`; the generator and `tests/test_crew_vectors.py` follow it.
-- R7. **Dependencies.** `relay/requirements.txt` pins `websockets` and `cryptography` to the
-  versions in `requirements-edmrn.txt`; nothing else.
+- R7. **Dependencies.** `relay/requirements.txt` pins `websockets` and `cryptography` to exact
+  versions (`==`) and lists nothing else. The pins make server images reproducible; the client's
+  `requirements-edmrn.txt` keeps lower bounds, because it must install next to upstream's
+  packages.
 
 ## Design
 

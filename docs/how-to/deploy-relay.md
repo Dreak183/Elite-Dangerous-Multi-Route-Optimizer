@@ -54,6 +54,8 @@ list of `edmrn` files in the image, and `Dockerfile.dockerignore` admits exactly
 
 ## Option B: systemd behind an existing reverse proxy
 
+`uv` itself has to be installed on the server first: https://docs.astral.sh/uv/getting-started/installation/
+
 ```
 useradd --system edmrn-relay
 git clone <fork URL> /opt/edmrn
