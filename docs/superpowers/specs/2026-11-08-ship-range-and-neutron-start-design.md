@@ -120,9 +120,10 @@ Two defects make plotted neutron routes wrong in daily use.
 ### UI: range panel
 
 - `add_range_panel(app, parent)` adds the label (J3) and the "Auto" checkbox (J2) to `parent`. Both
-  panels share one auto flag on `app.ship_tracker`'s binding. A `<KeyRelease>` binding on
-  `app.range_entry` and `app.neutron_range_entry` switches Auto off; programmatic writes by
-  upstream (resume, sync) do not.
+  panels share one auto flag on `app.ship_tracker`'s binding. A `<KeyPress>`/`<KeyRelease>` pair on
+  `app.range_entry` and `app.neutron_range_entry` switches Auto off when a key that went down in
+  the entry changed its text; programmatic writes by upstream (resume, sync) do not, however long
+  ago the last write was.
 - When the laden range or Auto changes, the binding writes `app.jump_range`; upstream's trace then
   saves it and syncs the Neutron field.
 

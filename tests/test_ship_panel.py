@@ -8,7 +8,7 @@ from edmrn.ext import ship as ship_module
 from edmrn.ext.fsd import drive_from_loadout
 from edmrn.ext.ship import ShipState, install
 from edmrn.ext.ship_panel import (RangeBinding, add_range_panel, binding_for, key_handler,
-                                  range_text)
+                                  press_handler, range_text)
 from edmrn.fuel_tracker import FuelTracker
 from edmrn.journal import JournalMonitor
 from test_fsd import MANDALAY_BOOSTED
@@ -81,12 +81,19 @@ def test_unrecognised_drive_fills_max():
     assert app.jump_range.get() == "58.7"
 
 
+def keystroke(binding, var, text=None):
+    """A real key: the press sees the text before the key acts, the release the text after."""
+    binding.on_press(var)
+    if text is not None:
+        var.set(text)
+    binding.on_key(var)
+
+
 def test_typing_turns_auto_off_and_survives_updates():
     app = make_app()
     binding = RangeBinding(app)
     binding.on_state(state())
-    app.jump_range.set("60")
-    binding.on_key()
+    keystroke(binding, app.jump_range, "60")
     assert binding.auto is False
     binding.on_state(replace(state(), cargo=100.0))
     assert app.jump_range.get() == "60"
@@ -99,13 +106,12 @@ def test_key_without_change_keeps_auto():
     app = make_app()
     binding = RangeBinding(app)
     binding.on_state(state())
-    binding.on_key()
+    keystroke(binding, app.jump_range)
     assert binding.auto is True
     other = FakeVar("87.1")
-    binding.on_key(other)
+    keystroke(binding, other)
     assert binding.auto is True
-    other.set("5")
-    binding.on_key(other)
+    keystroke(binding, other, "5")
     assert binding.auto is False
 
 
@@ -126,8 +132,7 @@ def test_new_drive_sets_boost_label_while_auto():
 def test_edit_before_first_write_turns_auto_off():
     app = SimpleNamespace(jump_range=FakeVar("75"))
     binding = RangeBinding(app)
-    app.jump_range.set("60")
-    binding.on_key()
+    keystroke(binding, app.jump_range, "60")
     assert binding.auto is False
     binding.on_state(state())
     assert app.jump_range.get() == "60"
@@ -136,7 +141,25 @@ def test_edit_before_first_write_turns_auto_off():
 def test_unchanged_text_before_first_write_keeps_auto():
     app = SimpleNamespace(jump_range=FakeVar("75"))
     binding = RangeBinding(app)
-    binding.on_key()
+    keystroke(binding, app.jump_range)
+    assert binding.auto is True
+
+
+def test_outside_write_before_the_first_tracker_write_is_not_a_typed_edit():
+    app = SimpleNamespace(jump_range=FakeVar("75"))
+    binding = RangeBinding(app)
+    app.jump_range.set("60")                     # upstream restores a saved value, nobody typed
+    keystroke(binding, app.jump_range)           # an arrow key or Tab: the text does not change
+    assert binding.auto is True
+    keystroke(binding, app.jump_range, "61")     # a key that changes it does
+    assert binding.auto is False
+
+
+def test_a_release_without_a_press_in_the_entry_is_not_an_edit():
+    app = SimpleNamespace(jump_range=FakeVar("75"))
+    binding = RangeBinding(app)
+    app.jump_range.set("60")
+    binding.on_key(app.jump_range)               # e.g. Tab released after focus moved into the entry
     assert binding.auto is True
 
 
@@ -170,9 +193,11 @@ def test_key_handlers_use_their_own_variable():
     route, neutron = FakeVar("1"), FakeVar("1")
     app = SimpleNamespace(jump_range=route, neutron_range_var=neutron)
     binding = RangeBinding(app)
+    for name in ("neutron_range_var", "jump_range"):
+        press_handler(binding, app, name)()
     route.set("2")
     key_handler(binding, app, "neutron_range_var")()
-    assert binding.auto is True      # the neutron var still holds the baseline
+    assert binding.auto is True      # the neutron var is unchanged
     key_handler(binding, app, "jump_range")()
     assert binding.auto is False
 
@@ -246,8 +271,9 @@ def test_add_range_panel_builds_widgets(_tk_root):
     binding = app.ship_range
     binding.on_state(state())
     assert var.get() == "87.1" and labels[0].cget("text").startswith("Laden 87.1")
+    assert entry._entry.bind("<KeyRelease>") and entry._entry.bind("<KeyPress>")   # key events need a focused, mapped window
+    binding.on_press(var)
     var.set("60")
-    assert entry._entry.bind("<KeyRelease>")   # key events need a focused, mapped window
     binding.on_key(var)
     assert binding.auto is False
     binding.set_auto(True)
@@ -288,6 +314,7 @@ def test_reticking_auto_overwrites_a_typed_neutron_field():
     binding = RangeBinding(app)
     binding.on_state(state())
     assert neutron.get() == "87.1"
+    press_handler(binding, app, "neutron_range_var")()
     neutron.set("60")
     key_handler(binding, app, "neutron_range_var")()
     assert binding.auto is False
@@ -310,19 +337,6 @@ def test_by_hand_boost_survives_reticking_auto_and_status_updates():
     assert boost.get() == "x4 (Normal)"
 
 
-def test_each_range_entry_is_bound_to_its_own_variable(_tk_root):
-    route_frame, neutron_frame = ctk.CTkFrame(_tk_root), ctk.CTkFrame(_tk_root)
-    route_var, neutron_var = ctk.StringVar(value="75"), ctk.StringVar(value="75")
-    route_entry = ctk.CTkEntry(route_frame, textvariable=route_var)
-    neutron_entry = ctk.CTkEntry(neutron_frame, textvariable=neutron_var)
-    route_entry.pack()
-    neutron_entry.pack()
-    app = SimpleNamespace(root=_tk_root, jump_range=route_var, neutron_range_var=neutron_var,
-                          range_entry=route_entry, neutron_range_entry=neutron_entry)
-    add_range_panel(app, route_frame)
-    add_range_panel(app, neutron_frame)
-
-
 def test_each_range_entry_is_bound_to_its_own_variable(_tk_root, monkeypatch):
     from edmrn.ext import ship_panel
     route_frame, neutron_frame = ctk.CTkFrame(_tk_root), ctk.CTkFrame(_tk_root)
@@ -332,11 +346,13 @@ def test_each_range_entry_is_bound_to_its_own_variable(_tk_root, monkeypatch):
     route_entry.pack()
     neutron_entry.pack()
     bound = {"route": [], "neutron": []}
-    route_entry.bind = lambda seq, fn, add=None: bound["route"].append(fn)
-    neutron_entry.bind = lambda seq, fn, add=None: bound["neutron"].append(fn)
+    route_entry.bind = lambda seq, fn, add=None: bound["route"].append((seq, fn))
+    neutron_entry.bind = lambda seq, fn, add=None: bound["neutron"].append((seq, fn))
     monkeypatch.setattr(ship_panel, "key_handler", lambda binding, app, name: name)
+    monkeypatch.setattr(ship_panel, "press_handler", lambda binding, app, name: name + "!")
     app = SimpleNamespace(root=_tk_root, jump_range=route_var, neutron_range_var=neutron_var,
                           range_entry=route_entry, neutron_range_entry=neutron_entry)
     add_range_panel(app, route_frame)
     add_range_panel(app, neutron_frame)
-    assert bound == {"route": ["jump_range"], "neutron": ["neutron_range_var"]}
+    assert bound == {"route": [("<KeyPress>", "jump_range!"), ("<KeyRelease>", "jump_range")],
+                     "neutron": [("<KeyPress>", "neutron_range_var!"), ("<KeyRelease>", "neutron_range_var")]}

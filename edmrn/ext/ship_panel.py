@@ -61,11 +61,7 @@ class RangeBinding:
         self.app = app
         self.auto = True
         self.state = ShipState()
-        try:
-            # The baseline for "did the user type": a Neutron var starts as a copy of this text.
-            self._written: Optional[str] = app.jump_range.get()
-        except Exception:
-            self._written = None
+        self._before: dict[int, str] = {}   # id(var) -> text when the pending key went down
         self._last_loadout: Any = None
         self._panels: list[tuple[Any, Any]] = []
 
@@ -99,7 +95,6 @@ class RangeBinding:
             # field into the Neutron field, which the user may have typed over.
             if force or var.get() != value:
                 var.set(value)
-            self._written = value
         loadout = (state.drive, state.max_jump_range)
         if loadout != (None, None) and loadout != self._last_loadout:
             self._last_loadout = loadout
@@ -121,11 +116,24 @@ class RangeBinding:
         except Exception as e:
             logger.error(f"Auto switch failed: {e}")
 
-    def on_key(self, var=None) -> None:
-        """A key in a range entry: text that differs from what we wrote means the user typed."""
+    def on_press(self, var=None) -> None:
+        """A key goes down in a range entry: remember the text it is about to act on."""
         try:
             var = var if var is not None else self.app.jump_range
-            if self.auto and var.get() != self._written:
+            self._before[id(var)] = var.get()
+        except Exception as e:
+            logger.error(f"Range key handler failed: {e}")
+
+    def on_key(self, var=None) -> None:
+        """A key comes up: only a key that went down in this entry and changed its text is typing.
+
+        Writes from elsewhere (upstream restoring a value, the tracker) never count, however
+        long ago the last one was, and neither does a key that leaves the text alone.
+        """
+        try:
+            var = var if var is not None else self.app.jump_range
+            before = self._before.pop(id(var), None)
+            if self.auto and before is not None and var.get() != before:
                 self.set_auto(False)
         except Exception as e:
             logger.error(f"Range key handler failed: {e}")
@@ -149,6 +157,11 @@ def key_handler(binding: RangeBinding, app, var_name: str):
     return lambda _event=None: binding.on_key(getattr(app, var_name, None))
 
 
+def press_handler(binding: RangeBinding, app, var_name: str):
+    """<KeyPress> handler of one range entry: notes the text before the key acts."""
+    return lambda _event=None: binding.on_press(getattr(app, var_name, None))
+
+
 def add_range_panel(app, parent) -> None:
     """Add the range label and the Auto checkbox under the range entry in ``parent``."""
     try:
@@ -166,6 +179,7 @@ def add_range_panel(app, parent) -> None:
                                ('neutron_range_entry', 'neutron_range_var')):
             entry = getattr(app, name, None)
             if _inside(entry, parent):
+                entry.bind('<KeyPress>', press_handler(binding, app, var_name), add='+')
                 entry.bind('<KeyRelease>', key_handler(binding, app, var_name), add='+')
     except Exception as e:
         logger.error(f"Range panel not added: {e}")

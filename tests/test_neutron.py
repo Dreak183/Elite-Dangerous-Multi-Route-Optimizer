@@ -85,8 +85,9 @@ def test_bug_in_processing_is_not_shown_raw(router, monkeypatch):
 
 
 def _eol_prou(first_neutron=True):
-    from test_neutron_start import EOL_PROU
     import copy
+
+    from _neutron_helpers import EOL_PROU
     data = copy.deepcopy(EOL_PROU)
     data["result"]["system_jumps"][0]["neutron_star"] = first_neutron
     return data

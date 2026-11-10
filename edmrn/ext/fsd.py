@@ -1,7 +1,7 @@
 """Frame Shift Drive range model: jump range from a ``Loadout`` event, laden and at any fuel level.
 
 Spec: ``docs/superpowers/specs/2026-11-08-ship-range-and-neutron-start-design.md`` (Range model).
-Constants and formula: ``knowledge/fsd-jump-range.md``. Pure functions, no I/O.
+Constants and formula: the hub's shared ``../knowledge/fsd-jump-range.md`` (relative to the repo root). Pure functions, no I/O.
 
 The mass term is calibrated on the game's own ``MaxJumpRange`` so a small table error cannot bias
 the ranges; the table only decides whether the Guardian booster was counted by the game.
@@ -71,7 +71,8 @@ BOOSTERS: dict[str, float] = {
     "int_guardianfsdbooster_size5": 10.5,
 }
 
-_warned: set[str] = set()
+_warned: set[tuple] = set()
+_WARNED_LIMIT = 256   # distinct warnings remembered; the set is dropped when it fills
 
 
 MAX_RANGE = 1000.0   # LY; the longest real jump range is below 100, larger values are hostile
@@ -117,8 +118,9 @@ def drive_from_loadout(loadout: Any) -> Optional[Drive]:
     """Describe the fitted FSD of a ``Loadout`` event, or None when it cannot be modelled."""
     try:
         return _drive_from_loadout(loadout)
-    except Exception:  # hostile data must never raise into the journal thread
-        logger.debug("Loadout not modelled", exc_info=True)
+    except Exception as e:  # hostile data must never raise into the journal thread
+        _warn_once(("failure", type(e).__name__, str(e)[:200]),
+                   "Loadout not modelled: %r", e, exc_info=True)
         return None
 
 
@@ -163,11 +165,11 @@ def _drive_from_loadout(loadout: Any) -> Optional[Drive]:
         err_with = abs(predicted + on_bonus - max_range)
         if min(err_without, err_with) > _MATCH_TOLERANCE:
             boost = on_bonus
-            _warn_once(item, max_range, predicted)
+            _warn_unexplained(item, max_range, predicted, boosters=True)
         elif err_with < err_without:
             boost = on_bonus
     elif abs(predicted - max_range) > _MATCH_TOLERANCE:
-        _warn_once(item, max_range, predicted)
+        _warn_unexplained(item, max_range, predicted, boosters=False)
 
     base = max_range - boost
     if base <= 0:
@@ -177,12 +179,21 @@ def _drive_from_loadout(loadout: Any) -> Optional[Drive]:
                  max_jump_range=max_range, mk2=item == MK2_ITEM)
 
 
-def _warn_once(item: str, max_range: float, predicted: float) -> None:
-    if item in _warned:
+def _warn_once(key: tuple, message: str, *args: Any, exc_info: bool = False) -> None:
+    if key in _warned:
         return
-    _warned.add(item)
-    logger.warning("MaxJumpRange %.3f of %s is not explained by the table (%.3f); "
-                   "assuming switched-on boosters", max_range, item, predicted)
+    if len(_warned) >= _WARNED_LIMIT:
+        _warned.clear()
+    _warned.add(key)
+    logger.warning(message, *args, exc_info=exc_info)
+
+
+def _warn_unexplained(item: str, max_range: float, predicted: float, boosters: bool) -> None:
+    """MaxJumpRange matches neither candidate; one warning per item, range and booster situation."""
+    outcome = "assuming switched-on boosters" if boosters else "assuming no booster"
+    _warn_once(("range", item, round(max_range, 1), boosters),
+               "MaxJumpRange %.3f of %s is not explained by the table (%.3f); %s",
+               max_range, item, predicted, outcome)
 
 
 def jump_range(drive: Drive, cargo: float, fuel: float) -> float:

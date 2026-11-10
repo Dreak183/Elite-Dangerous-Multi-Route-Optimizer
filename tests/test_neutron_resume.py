@@ -22,6 +22,13 @@ def test_decide_resume(current, expected):
     assert decide_resume(SYSTEMS, 2, current) == expected
 
 
+def test_system_names_match_like_upstream_ignoring_spaces_hyphens_underscores():
+    systems = ["Sol", "Eol Prou WN-T d3-2412", "Colonia"]
+    assert decide_resume(systems, 2, "EOL_PROU wnt-d3 2412") == Decision("continue", 2)
+    assert decide_resume(systems, 1, "colo-nia") == Decision("advance", 2)
+    assert decide_resume(systems, 2, "Eol Prou WN-T d3-2413") == Decision("ask", 2)
+
+
 def test_decide_resume_at_start_index_zero():
     assert decide_resume(SYSTEMS, 0, "Sol") == Decision("advance", 0)
 
@@ -266,6 +273,20 @@ def test_unchanged_route_does_not_write_progress(store, monkeypatch):
     app, _ = make_app([waypoint("Sol"), waypoint("Colonia")])
     autosave = NeutronAutosave(app, store)
     autosave.check()
+    count = []
+    monkeypatch.setattr(store, "update_neutron_progress", lambda *a, **k: count.append(a))
+    for _ in range(3):
+        autosave.check()
+    assert count == []
+
+
+def test_progress_is_written_once_per_change_not_every_tick(store, monkeypatch):
+    route = [waypoint("Sol"), waypoint("A"), waypoint("Colonia")]
+    app, _ = make_app(route)
+    autosave = NeutronAutosave(app, store)
+    autosave.check()
+    route[0]["status"] = "visited"
+    autosave.check()                      # the change is written here
     count = []
     monkeypatch.setattr(store, "update_neutron_progress", lambda *a, **k: count.append(a))
     for _ in range(3):

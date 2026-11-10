@@ -20,7 +20,10 @@ class Decision:
 
 
 def _key(name: Any) -> str:
-    return name.strip().casefold() if isinstance(name, str) else ''
+    """Comparison key of a system name; the same rule as upstream's ``normalize`` in neutron_manager."""
+    if not isinstance(name, str):
+        return ''
+    return name.lower().replace(' ', '').replace('-', '').replace('_', '')
 
 
 def decide_resume(systems: list, saved_index: int, current: Optional[str]) -> Decision:

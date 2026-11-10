@@ -123,6 +123,52 @@ def test_max_fuel_is_capped_by_the_tank():
     assert jump_range(d, 0, cap) == pytest.approx(max_range, abs=1e-6)
 
 
+def _warnings(log):
+    return [r for r in log.records if r.levelno == logging.WARNING]
+
+
+def test_unexplained_range_without_booster_does_not_claim_boosters(fsd_log):
+    d = drive_from_loadout(_with(MaxJumpRange=20.0))
+    assert d.boost == 0.0
+    (record,) = _warnings(fsd_log)
+    assert "not explained by the table" in record.getMessage()
+    assert "switched-on" not in record.getMessage()
+
+
+def test_unexplained_range_with_booster_says_so(fsd_log):
+    drive_from_loadout({**MANDALAY_BOOSTED, "MaxJumpRange": 120.0})
+    (record,) = _warnings(fsd_log)
+    assert "switched-on boosters" in record.getMessage()
+
+
+def test_another_unexplained_situation_for_the_same_item_warns_again(fsd_log):
+    drive_from_loadout(_with(MaxJumpRange=20.0))
+    drive_from_loadout(_with(MaxJumpRange=20.0))
+    assert len(_warnings(fsd_log)) == 1
+    drive_from_loadout(_with(MaxJumpRange=21.0))
+    assert len(_warnings(fsd_log)) == 2
+    drive_from_loadout({**ASP, "MaxJumpRange": 21.0,
+                        "Modules": ASP["Modules"] + [{"Slot": "Slot02_Size5", "Item": "int_guardianfsdbooster_size5", "On": True}]})
+    assert len(_warnings(fsd_log)) == 3
+
+
+def test_warning_memory_is_bounded(fsd_log):
+    for i in range(1000):
+        drive_from_loadout(_with(MaxJumpRange=20.0 + i / 10))
+    assert len(fsd._warned) <= 256
+
+
+def test_unexpected_failure_warns_once_per_distinct_failure(fsd_log, monkeypatch):
+    def boom(loadout):
+        raise RuntimeError(f"boom {loadout}")
+    monkeypatch.setattr(fsd, "_drive_from_loadout", boom)
+    assert drive_from_loadout("a") is None
+    assert drive_from_loadout("a") is None
+    assert len(_warnings(fsd_log)) == 1
+    assert drive_from_loadout("b") is None
+    assert len(_warnings(fsd_log)) == 2
+
+
 def test_switched_off_booster_never_counts(fsd_log):
     loadout = {**MANDALAY_BOOSTER_OFF, "MaxJumpRange": 120.0}   # matches neither candidate
     assert drive_from_loadout(loadout).boost == 0.0
