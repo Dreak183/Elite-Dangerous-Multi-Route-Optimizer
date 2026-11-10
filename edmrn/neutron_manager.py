@@ -4,6 +4,7 @@ import customtkinter as ctk
 from edmrn.logger import get_logger
 from edmrn.gui import ErrorDialog, InfoDialog, WarningDialog
 from edmrn.ext.ship import start_boost
+from edmrn.ext.spansh import journal_start_coords
 logger = get_logger('NeutronManager')
 class NeutronManager:
     def __init__(self, app):
@@ -97,9 +98,7 @@ class NeutronManager:
                 self.app.neutron_info_label.configure(text=f"❌ Error: {error_msg}")
                 ErrorDialog(self.app, "Neutron Route Error", f"Failed to calculate route:\n{error_msg}")
         try:
-            start_coords = None
-            if self.app.journal_monitor and from_system.lower() == (self.get_current_system_from_journal() or '').lower():
-                start_coords = self.app.journal_monitor.get_current_coordinates()
+            start_coords = journal_start_coords(self.app.journal_monitor, from_system)
         except Exception:
             start_coords = None
         try:

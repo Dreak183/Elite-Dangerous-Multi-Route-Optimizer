@@ -74,6 +74,21 @@ def test_edastro_without_poi_is_silent():
     assert data["gmp"] == "" and data["notes"] == []
 
 
+@pytest.mark.parametrize("status", [400, 403, 429])
+def test_edastro_4xx_other_than_404_adds_a_note(status):
+    fake = Script(FakeResponse(200, dict(SOL)), BODIES, STATIONS, FACTIONS, FakeResponse(status, text="no"))
+    data = fetch_system_data("Sol", call=fake)
+    assert data["gmp"] == ""
+    assert data["notes"] == [f"Galactic POI data could not be loaded: EDAstro rejected the request (HTTP {status})."]
+
+
+def test_only_the_main_request_retries():
+    fake = Script(FakeResponse(200, dict(SOL)), BODIES, STATIONS, FACTIONS, GEC)
+    fetch_system_data("Sol", call=fake)
+    retries = [kwargs.get("retries", 2) for _, kwargs in fake.calls]
+    assert retries == [2, 0, 0, 0, 0]
+
+
 @pytest.mark.parametrize("id64", ["../../admin", True, None, 1.5])
 def test_non_integer_id64_never_reaches_a_url(id64):
     fake = Script(FakeResponse(200, {**SOL, "id64": id64, "id": None}), BODIES, STATIONS, FACTIONS)

@@ -17,7 +17,7 @@ fixture runs, so a fixture-only redirect lets the real Documents folder be writt
 
 Rule (API hardening spec A1–A3):
 - `edmrn.ext.api.call` is the only code that sends an HTTP request. It sets the one User-Agent and
-  an explicit timeout, and retries 502/503/504, timeouts and connection errors. The crew relay
+  an explicit timeout (seconds or a `(connect, read)` pair; `None` or anything else raises `ValueError`, because `requests` reads `None` as "wait forever"), and retries 502/503/504, timeouts and connection errors. The crew relay
   WebSocket (`edmrn.ext.crew_sync.websockets_connect`) is the one other network path (crew sync
   core spec S19).
 - Query values travel only as `params` or a `json` body, never formatted into a URL.

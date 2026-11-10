@@ -97,7 +97,7 @@ class FuelTracker:
             try:
                 listener(status)
             except Exception as e:
-                logger.error(f"Status listener error: {e}")
+                logger.exception(f"Status listener {getattr(listener, '__qualname__', listener)!r} failed")
     
     def _update_fuel(self, status: Dict):
         flags = status.get('Flags', 0)

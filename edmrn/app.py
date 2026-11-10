@@ -74,7 +74,7 @@ from edmrn.theme_editor import ThemeEditor
 from edmrn.neutron import NeutronRouter
 from edmrn.ext.spansh import journal_start_coords
 from edmrn.ext.system_info import fetch_system_data
-from edmrn.ext.api import ApiError, nearest_system
+from edmrn.ext.api import ApiError, ApiFailure, nearest_system
 logger = get_logger('App')
 
 class EDMRN_App:
@@ -398,7 +398,7 @@ class EDMRN_App:
         self._autodetect_csv(initial_run=True)
         t16 = time.perf_counter(); print(f"[Startup] CSV autodetect: {t16-t15:.3f}s")
         self.root.after(500, self._complete_startup_in_background)
-        self.journal_monitor = JournalMonitor(self._journal_callback, manual_journal_path=self.config.journal_path or None)
+        self.journal_monitor = JournalMonitor(self._journal_callback, manual_journal_path=(self.config.journal_path or '').strip() or None)
         from edmrn.ext.neutron_resume import install as install_edmrn_neutron_resume
         install_edmrn_neutron_resume(self)
         from edmrn.ext.location import install as install_edmrn_location
@@ -2432,7 +2432,7 @@ class EDMRN_App:
                     self.root.after(0, lambda: ErrorDialog(self, "API Error", message))
                 except Exception as e:
                     logger.exception(f"Nearest system search failed: {e}")
-                    self.root.after(0, lambda: ErrorDialog(self, "Error", "Unexpected error talking to Spansh."))
+                    self.root.after(0, lambda: ErrorDialog(self, "Error", str(ApiFailure("Spansh", "unexpected"))))
             
             threading.Thread(target=search_nearest, daemon=True).start()
             

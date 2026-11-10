@@ -172,3 +172,5 @@ def test_app_startup_monitor_receives_the_configured_journal_path():
     assert calls, "no JournalMonitor( call in __init__"
     keywords = {k.arg for k in calls[0].keywords}
     assert "manual_journal_path" in keywords
+    value = next(k.value for k in calls[0].keywords if k.arg == "manual_journal_path")
+    assert ".strip()" in ast.unparse(value), "the configured path is stripped like at every other start site"

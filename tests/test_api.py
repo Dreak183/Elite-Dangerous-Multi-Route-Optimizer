@@ -38,6 +38,28 @@ def test_user_agent_params_and_timeout_on_every_attempt():
         assert kwargs["timeout"] == 30
 
 
+def test_connect_read_timeout_tuple_is_passed_through_and_worded_by_the_read_part():
+    transport = Script(*[requests.exceptions.Timeout("x") for _ in range(3)])
+    error, _ = run(transport, timeout=(3.05, 27))
+    assert error.failure.kind == "timeout" and str(error.failure) == "Spansh did not answer within 27 s."
+    assert transport.calls[0][1]["timeout"] == (3.05, 27)
+
+
+@pytest.mark.parametrize("timeout", [None, (None, 5), (5, None), (1, 2, 3), (), "10", True, 0, -1,
+                                     float("nan"), float("inf"), (0, 5)])
+def test_invalid_timeout_is_a_clear_value_error_before_any_request(timeout):
+    transport = Script()
+    with pytest.raises(ValueError, match="timeout"):
+        call("GET", URL, service="Spansh", timeout=timeout, transport=transport, sleep=Sleeps())
+    assert transport.calls == []
+
+
+def test_is_number_survives_huge_integers():
+    from edmrn.ext.api import _coords, _is_number
+    assert _is_number(10 ** 400) is False and _is_number(5) is True and _is_number(1.5) is True
+    assert _coords({"x": 10 ** 400, "y": 0, "z": 0}) is None
+
+
 def test_json_body_is_passed_through():
     transport = Script(FakeResponse(200, {"results": []}))
     run(transport, json={"filters": {"name": {"value": "Sol"}}})

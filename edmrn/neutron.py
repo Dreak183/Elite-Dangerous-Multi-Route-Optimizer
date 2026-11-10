@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Callable
 from edmrn.logger import get_logger
 from edmrn.icons import Icons
 from edmrn.ext.spansh import submit_route_job, poll_route_result
-from edmrn.ext.api import ApiError
+from edmrn.ext.api import ApiError, ApiFailure
 from edmrn.ext.neutron_start import optimize_start
 
 logger = get_logger('Neutron')
@@ -75,7 +75,7 @@ class NeutronRouter:
             return {"success": False, "error": str(e.failure)}
         except Exception as e:
             logger.exception(f"Neutron route calculation error: {e}")
-            return {"success": False, "error": "Unexpected error talking to Spansh."}
+            return {"success": False, "error": str(ApiFailure("Spansh", "unexpected"))}
         finally:
             self.is_calculating = False
     def _wait_for_result(self, job_id: str, progress_callback: Callable = None) -> Dict:

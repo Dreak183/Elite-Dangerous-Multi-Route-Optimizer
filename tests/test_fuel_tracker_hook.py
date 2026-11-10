@@ -61,3 +61,17 @@ def test_listeners_run_before_upstreams_fuel_handling(tmp_path, listeners):
         tracker.is_tracking = False
         thread.join(3)
     assert capacity_at_call[0] is None
+
+
+def test_status_listener_error_logs_the_listener_name_and_traceback(listeners, caplog):
+    def broken_status_listener(status):
+        raise RuntimeError("listener failed")
+
+    listeners.extend([broken_status_listener, lambda s: None])
+    tracker = FuelTracker(SimpleNamespace())
+    with caplog.at_level("DEBUG"):
+        tracker._dispatch_status({"Flags": 0})
+
+    [record] = [r for r in caplog.records if r.exc_info]
+    assert "broken_status_listener" in record.getMessage()
+    assert record.exc_info[0] is RuntimeError

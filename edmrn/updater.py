@@ -1,4 +1,4 @@
-from edmrn.ext.api import ApiError, call, failure_from_response
+from edmrn.ext.api import ApiError, ApiFailure, call, failure_from_response
 import threading
 import time
 import webbrowser
@@ -33,6 +33,7 @@ class SimpleUpdateChecker:
                     logger.info(f"Current: {self.current_version}, Latest: {latest_tag}, Update: {self.update_available}")
                 except Exception as e:
                     logger.error(f"Version comparison error: {e}")
+                    self.last_error = f"GitHub's latest release has no usable version number ({latest_tag[:40]!r})."
                     self.update_available = False
             else:
                 logger.warning(f"GitHub API error: {response.status_code}")
@@ -44,7 +45,7 @@ class SimpleUpdateChecker:
             self.update_available = False
         except Exception as e:
             logger.error(f"Update check error: {e}")
-            self.last_error = "Unexpected error talking to GitHub."
+            self.last_error = str(ApiFailure("GitHub", "unexpected"))
             self.update_available = False
         return self.update_available
     def show_update_dialog(self, parent_window):

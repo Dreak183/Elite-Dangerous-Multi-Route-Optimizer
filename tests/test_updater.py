@@ -33,6 +33,23 @@ def test_failure_reason_is_kept(monkeypatch, item, reason):
     assert c.check_for_updates() is False and c.last_error == reason
 
 
+@pytest.mark.parametrize("tag", ["", "nightly build", "v"])
+def test_unparseable_tag_is_not_reported_as_up_to_date(monkeypatch, tag):
+    c, _ = checker(monkeypatch, FakeResponse(200, {"tag_name": tag, "html_url": "https://x"}))
+    assert c.check_for_updates() is False
+    assert c.last_error and "version" in c.last_error
+
+
+def test_unparseable_tag_manual_check_says_it_could_not_check(monkeypatch):
+    [(title, text)] = manual(monkeypatch, FakeResponse(200, {"tag_name": "nightly build", "html_url": "x"}))
+    assert text.startswith("Could not check for updates:") and "already up to date" not in text
+
+
+def test_unexpected_exception_keeps_the_standard_sentence(monkeypatch):
+    c, _ = checker(monkeypatch, RuntimeError("bug"))
+    assert c.check_for_updates() is False and c.last_error == "Unexpected error talking to GitHub."
+
+
 def manual(monkeypatch, *items):
     shown = []
     monkeypatch.setattr(updater, "InfoDialog", lambda app, title, text: shown.append((title, text)))

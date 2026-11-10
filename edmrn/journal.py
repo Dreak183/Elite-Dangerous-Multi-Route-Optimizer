@@ -45,6 +45,7 @@ class JournalMonitor(threading.Thread):
             logger.warning(f"Default journal path not found: {path}")
             return None
     def _get_latest_journal_file(self):
+        self.__dict__['_lookup_failed'] = False
         if not self.journal_path:
             return None
         try:
@@ -54,6 +55,7 @@ class JournalMonitor(threading.Thread):
                 return None
             return max(list_of_files, key=os.path.getmtime)
         except Exception as e:
+            self.__dict__['_lookup_failed'] = True
             logger.error(f"Reading journal directory {self.journal_path}: {e}")
             return None
     def _extract_commander_from_data(self, data: dict):
@@ -150,7 +152,7 @@ class JournalMonitor(threading.Thread):
             try:
                 listener(data)
             except Exception as e:
-                logger.error(f"[JournalMonitor] Event listener error: {e}")
+                logger.exception(f"[JournalMonitor] Event listener {getattr(listener, '__qualname__', listener)!r} failed")
     def _tail_file(self, filename):
         offsets = self.__dict__.setdefault('_tail_offsets', {})
         if self.current_journal_file != filename:
@@ -199,8 +201,11 @@ class JournalMonitor(threading.Thread):
                         self._stop_event.wait(0.5)
                         if time.monotonic() - last_rotation_check >= 1.0:
                             last_rotation_check = time.monotonic()
-                            dir_mtime = os.stat(self.journal_path).st_mtime_ns
-                            if dir_mtime != last_dir_mtime or last_rotation_check - last_scan >= 30.0:
+                            try:
+                                dir_mtime = os.stat(self.journal_path).st_mtime_ns
+                            except OSError:
+                                dir_mtime = None
+                            if dir_mtime is None or dir_mtime != last_dir_mtime or last_rotation_check - last_scan >= 30.0:
                                 last_dir_mtime, last_scan = dir_mtime, last_rotation_check
                                 latest_file = self._get_latest_journal_file()
                             else:
@@ -300,11 +305,12 @@ class JournalMonitor(threading.Thread):
                         logger.warning("Journal path not configured")
                     else:
                         logger.info("No journal file found")
-                    self.__dict__['_started_empty'] = True
+                    if not latest_file and not self.__dict__.get('_lookup_failed'):
+                        self.__dict__['_started_empty'] = True
                     self._stop_event.wait(5)
             except Exception as e:
                 logger.error(f"Journal monitor error: {e}")
-                time.sleep(5)
+                self._stop_event.wait(5)
     def get_current_system(self):
         try:
             latest_file = self._get_latest_journal_file()

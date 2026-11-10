@@ -90,6 +90,12 @@ def test_start_coords_passed_when_from_is_current_system(errors):
     assert app.neutron_router.calls[0][1]["start_coords"] == (1.0, 2.0, 3.0)
 
 
+def test_unusable_journal_coordinates_are_not_passed(errors):
+    app, _ = make_app(from_system="Here", journal=Journal("Here", (1.0, "x", 3.0)))
+    nm.NeutronManager(app).calculate_neutron_route()
+    assert app.neutron_router.calls[0][1]["start_coords"] is None
+
+
 def test_no_start_coords_when_from_is_another_system(errors):
     app, _ = make_app(from_system="Other", journal=Journal("Here", (1.0, 2.0, 3.0)))
     nm.NeutronManager(app).calculate_neutron_route()

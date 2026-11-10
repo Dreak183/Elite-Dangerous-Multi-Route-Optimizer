@@ -107,6 +107,16 @@ def _exc_text(exc, log_url) -> str:
     return type(exc).__name__ if log_url is not None else repr(exc)
 
 
+def _timeout_seconds(timeout) -> float:
+    """The read timeout of a `timeout` argument (a positive finite number or a (connect, read)
+    pair of them); ValueError otherwise. Spec A1: every request has an explicit timeout, so None
+    (which `requests` reads as "wait forever") is refused."""
+    parts = timeout if isinstance(timeout, tuple) and len(timeout) == 2 else (timeout,)
+    if not all(_is_number(p) and p > 0 for p in parts):
+        raise ValueError(f"timeout must be a positive number of seconds or a (connect, read) pair, got {timeout!r}")
+    return float(parts[-1])
+
+
 def call(method, url, *, service, params=None, json=None, timeout, retries=2, delays=(2.0, 5.0),
          on_retry=None, transport=requests.request, sleep=time.sleep, log_url=None):
     """Send one request; retry 502/503/504, timeouts and connection errors.
@@ -115,7 +125,9 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
     ApiError. on_retry(attempt, failure) is called before each retry. `log_url` replaces `url` in
     log lines when the URL itself is a secret (a Discord webhook, crew sync spec B1 S5a); log lines
     then carry only the exception class, because `requests` errors embed the full URL.
+    `timeout` is seconds or a (connect, read) pair; anything else raises ValueError.
     """
+    wait = _timeout_seconds(timeout)
     headers = {"User-Agent": USER_AGENT}
     shown = url if log_url is None else log_url
     attempt = 0
@@ -124,7 +136,7 @@ def call(method, url, *, service, params=None, json=None, timeout, retries=2, de
             response = transport(method, url, params=params, json=json, headers=headers, timeout=timeout)
         except requests.exceptions.Timeout as exc:
             logger.debug(f"{service} {method} {shown}: {_exc_text(exc, log_url)}")
-            failure = ApiFailure(service, "timeout", None, f"{timeout:g} s")
+            failure = ApiFailure(service, "timeout", None, f"{wait:g} s")
         except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
             logger.debug(f"{service} {method} {shown}: {_exc_text(exc, log_url)}")
             failure = ApiFailure(service, "offline")
@@ -162,7 +174,12 @@ LOOKUP_SERVICES = ("Spansh", "EDSM")
 
 
 def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an int too large for a float
+        return False
 
 
 def _coords(record) -> Optional[tuple]:
