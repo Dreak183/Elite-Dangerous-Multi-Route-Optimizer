@@ -236,8 +236,10 @@ def extract_invite(text: Any) -> str:
 def decode_invite(text: Any) -> InviteCode:
     damaged = InviteError('The invite is damaged; ask the leader for a new one.')
     raw = extract_invite(text)
-    if len(raw) > INVITE_MAX_CHARS or not raw.startswith(INVITE_PREFIX):
+    if not raw.startswith(INVITE_PREFIX):
         raise InviteError('This is not an EDMRN crew invite.')
+    if len(raw) > INVITE_MAX_CHARS:
+        raise damaged
     body = raw[len(INVITE_PREFIX):]
     if not _B64URL.fullmatch(body):
         raise damaged

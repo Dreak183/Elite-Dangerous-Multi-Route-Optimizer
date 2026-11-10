@@ -78,9 +78,11 @@ def open_dialog(app: Any) -> Optional['CrewDialog']:
                 identity.author if identity is not None else None)
 
     crew = getattr(app, 'crew', None)
-    def who_key() -> tuple:  # cheap, no key file: tells the dialog when to call `who` again
+    def who_key() -> tuple:  # tells the dialog when to call `who` again; the key ring caches a key
         crew = getattr(app, 'crew', None)
-        return (getattr(crew, 'commander', None), getattr(crew, 'commander_name', None))
+        identity = crew.identity() if crew is not None else None
+        return (getattr(crew, 'commander', None), getattr(crew, 'commander_name', None),
+                identity.author if identity is not None else None)
 
     dialog = CrewDialog(app.root, getattr(crew, 'group', None), commander=None, author=None,
                         who=who, who_key=who_key)

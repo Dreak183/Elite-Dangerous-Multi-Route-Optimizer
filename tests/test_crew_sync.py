@@ -708,3 +708,43 @@ def test_a_stopped_run_publishes_no_state_but_its_final_stopped(crew, me):
     sync.state = "waiting"
     sync._set_state("stopped", stop=stop)
     assert sync.state == "stopped"
+
+
+def test_stop_called_from_the_sync_thread_itself_does_not_join_itself(crew, me, caplog):
+    sock = BlockingSocket(relay(), [hello()])
+    sync, _ = make_sync(crew, me, sock)
+    seen = []
+
+    def observer(state, error):
+        if state == "live" and not seen:
+            seen.append(state)
+            sync.stop()  # runs on the sync thread: joining that thread would raise RuntimeError
+
+    sync.subscribe(observer)
+    with caplog.at_level("ERROR"):
+        sync.start()
+        assert wait_for(lambda: seen and not sync._thread.is_alive())
+    assert sync.state == "stopped"
+    assert not [r for r in caplog.records if "observer failed" in r.getMessage()]
+
+
+@pytest.mark.loopback
+def test_websockets_connect_does_not_use_the_deprecated_bare_connect():
+    import warnings
+    from websockets.sync.server import serve
+    from edmrn.ext.crew_sync import websockets_connect
+
+    def handler(conn):
+        conn.send("hello")
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        port = server.socket.getsockname()[1]
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            ws = websockets_connect(f"ws://127.0.0.1:{port}/")
+            try:
+                assert ws.recv(5) == "hello"
+            finally:
+                ws.close()
+                server.shutdown()

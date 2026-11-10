@@ -151,3 +151,25 @@ def test_adopt_never_mixes_two_ships():
     s = live.state
     assert (s.ship, s.ship_name, s.ship_ident) == ("anaconda", None, None)
     assert (s.fuel_capacity_main, s.fuel_capacity_reserve) == (64.0, 1.0)
+
+
+def test_the_commander_event_names_the_commander_by_its_name_key():
+    assert fed(event("Commander", Name="Jameson", FID="F1")).state.commander == "Jameson"
+    assert fed(event("Commander", Commander="Wrong", FID="F1")).state.commander is None
+
+
+def test_adopt_fills_an_empty_commander_but_keeps_a_live_hull():
+    live = fed(event("HullDamage", "2026-10-12T10:00:30Z", Health=0.61, PlayerPilot=True))
+    replayed = fed(event("LoadGame", "2026-10-12T09:59:00Z", Commander="Jameson"), LOADOUT).state
+    assert live.adopt(replayed) is True
+    assert live.state.commander == "Jameson" and live.state.hull == 0.61
+
+
+def test_adopt_fills_an_empty_hull_but_keeps_a_live_commander_and_ship():
+    live = fed(event("LoadGame", "2026-10-12T10:59:00Z", Commander="Jameson"),
+               event("Loadout", "2026-10-12T11:00:00Z", Ship="anaconda", ShipName="", ShipIdent="",
+                     FuelCapacity={"Main": 64.0, "Reserve": 1.0}))
+    assert live.state.hull is None and live.state.ship == "anaconda"
+    replayed = fed(event("LoadGame", "2026-10-12T09:59:00Z", Commander="Jameson"), LOADOUT).state
+    assert live.adopt(replayed) is True
+    assert live.state.hull == 0.87 and live.state.ship == "anaconda" and live.state.commander == "Jameson"

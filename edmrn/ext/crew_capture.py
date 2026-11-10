@@ -406,7 +406,7 @@ def _newest_journals(journal_dir: Optional[str], max_files: int) -> list[str]:
     except OSError as e:
         logger.error(f"Crew replay could not list journals: {e}")
         return []
-    return sorted(files, key=mtime, reverse=True)[:max_files]
+    return sorted(files, key=mtime, reverse=True)[:max(0, max_files)]  # a negative slice would keep all
 
 
 def replay(journal_dir: Optional[str], enqueue: Enqueue, status: Optional[CrewStatus] = None,

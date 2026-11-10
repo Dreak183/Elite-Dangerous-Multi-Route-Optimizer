@@ -41,7 +41,7 @@ def test_deterministic_id_separates_kinds_authors_and_key_boundaries():
     base = ev.deterministic_id(AUTHOR, "body", "123", 5, "full")
     assert re.fullmatch(r"[0-9a-f]{32}", base)
     assert base != ev.deterministic_id(AUTHOR, "signals", "123", 5, "full")
-    assert base != ev.deterministic_id("B" * 43, "body", "123", 5, "full")
+    assert base != ev.deterministic_id("B" * 42 + "E", "body", "123", 5, "full")
     assert base != ev.deterministic_id(AUTHOR, "body", "1235", "full")
 
 
@@ -318,7 +318,7 @@ def test_draft_resolves_a_deterministic_or_preset_id():
     t = "2026-10-12T10:00:00Z"
     d = ev.Draft("all_bodies", "F1", t, good("all_bodies"))
     assert d.resolve_id(AUTHOR) == ev.deterministic_id(AUTHOR, "all_bodies", ADDR)
-    assert d.resolve_id(AUTHOR) != d.resolve_id("B" * 43)
+    assert d.resolve_id(AUTHOR) != d.resolve_id("B" * 42 + "E")
     manual = ev.Draft("note", "F1", t, good("note"), event_id=NOTE_ID)
     assert manual.resolve_id(AUTHOR) == NOTE_ID
     with pytest.raises(ev.PayloadError):
@@ -505,3 +505,27 @@ def test_one_bounded_number_predicate_and_one_max_tons():
     assert ev.bounded_number(5, 10) == 5.0
     for bad in (True, "5", float("nan"), -1, 11, 10 ** 400):
         assert ev.bounded_number(bad, 10) is None
+
+
+def test_plausible_received_treats_a_naive_now_as_utc():
+    naive = NOW.replace(tzinfo=None)
+    assert ev.plausible_received("2026-10-13T12:00:00Z", naive) is True
+    assert ev.plausible_received("2026-10-15T12:00:00Z", naive) is False
+    assert ev.plausible_received("2026-10-13T12:00:00Z", naive) is ev.plausible_received(
+        "2026-10-13T12:00:00Z", NOW)
+
+
+def test_ascii_name_strips_before_it_cuts():
+    assert ev.ascii_name(" " * 70 + "z") == "z"
+    assert ev.ascii_name("\x01" * 3 + "z") == "???z"
+    assert ev.ascii_name("x" * 63 + " y") == "x" * 63
+    assert ev.ascii_name(" " + "x" * 70) == "x" * 64
+
+
+def test_load_json_names_a_small_limit_in_bytes_not_as_zero_kb():
+    with pytest.raises(ev.EnvelopeError) as info:
+        ev.load_json(b"x" * 20, 10, "thing")
+    assert "0 KB" not in str(info.value) and "10 bytes" in str(info.value)
+    with pytest.raises(ev.EnvelopeError) as info:
+        ev.load_json(b"x" * 3000, 2048, "thing")
+    assert "2 KB" in str(info.value)

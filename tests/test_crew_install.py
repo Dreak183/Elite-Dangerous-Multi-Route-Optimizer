@@ -664,3 +664,27 @@ def test_a_group_that_fails_after_starting_is_stopped(store, tmp_path, listeners
     monkeypatch.setattr(crew_group.CrewGroup, "stop", recording_stop)
     app, service = start(store, tmp_path)
     assert service.group is None and len(stopped) == 1 and stopped[0].inbox._running is False
+
+
+def test_the_queue_overflow_warning_repeats_every_thousand_drops(store, tmp_path, monkeypatch):
+    warnings = []
+    monkeypatch.setattr(crew_module.logger, "warning", warnings.append)
+    writer, root = writer_for(store, tmp_path)
+    writer.QUEUE_CAP = 5
+    for i in range(5 + 2001):
+        writer.enqueue(visit(at=ts(0, i % 3000), system=f"O{i}", address=str(100 + i)))
+    assert writer._dropped == 2001
+    assert len([w for w in warnings if "oldest drafts dropped" in w]) == 3  # at 1, 1001 and 2001
+
+
+def test_a_broken_key_file_is_logged_once_however_many_drafts_follow(store, tmp_path, monkeypatch):
+    errors = []
+    monkeypatch.setattr(crew_module.logger, "error", errors.append)
+    writer, root = writer_for(store, tmp_path)
+    broken = KeyRing(tmp_path / "keys").path_for("F1")
+    broken.parent.mkdir(parents=True)
+    broken.write_text("garbage", encoding="utf-8")
+    for i in range(3):
+        writer.enqueue(visit("F1", at=ts(i)))
+    writer.drain()
+    assert len([e for e in errors if "disabled for one commander" in e]) == 1

@@ -11,7 +11,7 @@ G = "01920000-0000-7000-8000-0000000000a1"
 INV = "01920000-0000-7000-8000-0000000000b1"
 INV2 = "01920000-0000-7000-8000-0000000000b2"
 TOKEN = "11" * 32
-LEADER, ALICE, BOB = "L" * 43, "A" * 43, "B" * 43
+LEADER, ALICE, BOB = "L" * 42 + "M", "A" * 43, "B" * 42 + "E"
 
 
 def rv(author, seq, kind, at, **payload):
@@ -282,3 +282,15 @@ def test_load_group_refuses_each_malformed_field(tmp_path, change):
     with pytest.raises(cr.GroupConfigError) as info:
         cr.load_group(tmp_path)
     assert "SECRETTOKEN" not in str(info.value)
+
+
+@pytest.mark.parametrize("text", ["edmrn-crew:1:" + "A" * 10000, "<edmrn-crew:1:" + "A" * 10000 + ">"],
+                         ids=["bare", "decorated"])
+def test_an_overlong_string_with_the_prefix_is_damaged_not_foreign(text):
+    with pytest.raises(cr.InviteError, match="damaged"):
+        cr.decode_invite(text)
+
+
+def test_an_overlong_string_without_the_prefix_is_still_not_an_invite():
+    with pytest.raises(cr.InviteError, match="not an EDMRN crew invite"):
+        cr.decode_invite("x" * 10000)

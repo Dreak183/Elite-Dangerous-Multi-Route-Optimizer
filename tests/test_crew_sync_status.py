@@ -344,3 +344,16 @@ def test_a_paused_client_does_not_offer_its_own_join(crew, me):
     sock = Ticking(clock, 1, ticks=2, on_send=relay(heads={}), frames=[hello()])
     _sync_with(crew, me, sock, clock, lambda: None, paused=True).connect_once()
     assert sock.sent_of("evs") == []
+
+
+def test_a_raising_status_source_is_logged_in_one_record_with_the_traceback(crew, me, caplog):
+    clock = Clock()
+
+    def source():
+        raise RuntimeError("boom")
+
+    sock = Ticking(clock, 0.25, ticks=400, on_send=relay(), frames=[hello()])
+    with caplog.at_level("DEBUG"):
+        run(crew, me, sock, clock, source)
+    failed = [r for r in caplog.records if "status source failed" in r.getMessage()]
+    assert len(failed) == 1 and failed[0].exc_info

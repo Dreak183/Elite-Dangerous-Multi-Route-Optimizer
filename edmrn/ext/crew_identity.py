@@ -89,7 +89,8 @@ def _parse_record(text: str) -> tuple[Ed25519PrivateKey, int]:
         record = json.loads(text)
     except (ValueError, RecursionError) as e:
         raise KeyFileError(f'key file is not JSON: {e}') from e
-    if not isinstance(record, dict) or set(record) != _KEY_FIELDS or record['v'] != KEY_FILE_VERSION:
+    if (not isinstance(record, dict) or set(record) != _KEY_FIELDS or type(record['v']) is not int
+            or record['v'] != KEY_FILE_VERSION):
         raise KeyFileError('unknown key file format')
     high_water = record['high_water']
     if not isinstance(high_water, int) or isinstance(high_water, bool) or not 0 <= high_water <= MAX_SAFE_INT:

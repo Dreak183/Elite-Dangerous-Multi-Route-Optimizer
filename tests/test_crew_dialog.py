@@ -514,19 +514,25 @@ def test_a_render_disarms_a_pending_confirmation(root):
     assert group.calls[-1] == ("remove", ALICE)
 
 
-def test_the_identity_is_not_read_on_every_tick(root):
-    reads = []
-
-    def identity():
-        reads.append(1)
-        return SimpleNamespace(author=LEADER)
+def test_an_unchanged_commander_and_key_do_not_rebuild_the_dialog(root):
     crew = SimpleNamespace(commander="F1", commander_name="Jameson", group=leader_group(),
-                           identity=identity)
+                           identity=lambda: SimpleNamespace(author=LEADER))
     dialog = open_dialog(SimpleNamespace(root=root, crew=crew))
-    first = len(reads)
+    before = list(dialog.body.winfo_children())
     for _ in range(5):
         dialog._tick()
-    assert len(reads) == first
+    assert list(dialog.body.winfo_children()) == before
     crew.commander, crew.commander_name = "F2", "Alt"
     dialog._tick()
-    assert len(reads) == first + 1
+    assert list(dialog.body.winfo_children()) != before
+
+
+def test_a_key_that_appears_later_replaces_the_stale_you_section(root):
+    holder = {"identity": None}
+    crew = SimpleNamespace(commander="F1", commander_name="Jameson", group=leader_group(),
+                           identity=lambda: holder["identity"])
+    dialog = open_dialog(SimpleNamespace(root=root, crew=crew))
+    assert dialog.key_entry is None
+    holder["identity"] = SimpleNamespace(author=LEADER)  # the key file now exists
+    dialog._tick()
+    assert dialog.key_entry.get() == LEADER

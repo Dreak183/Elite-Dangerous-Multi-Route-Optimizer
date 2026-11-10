@@ -10,8 +10,8 @@ import random
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -73,7 +73,7 @@ def websockets_connect(url: str) -> _WebSocketsAdapter:
     from websockets.exceptions import ConnectionClosed
     from websockets.sync.client import connect
     ws = connect(url, open_timeout=10, close_timeout=5, max_size=proto.MAX_FRAME_BYTES,
-                 ping_interval=30, ping_timeout=30, user_agent_header=USER_AGENT)
+                 ping_interval=30, ping_timeout=30, user_agent_header=USER_AGENT, legacy=True)
     return _WebSocketsAdapter(ws, ConnectionClosed)
 
 
@@ -266,10 +266,10 @@ class _Session:
     def send(self, frame: dict) -> None:
         self.ws.send(proto.encode(frame))
 
-    def log_once(self, key: str, message: str) -> None:
+    def log_once(self, key: str, message: str, exc_info: bool = False) -> None:
         if key not in self.logged:
             self.logged.add(key)
-            logger.warning(f'Crew sync: {message}')
+            logger.warning(f'Crew sync: {message}', exc_info=exc_info)
 
     def run(self) -> None:
         sync = self.sync
@@ -432,9 +432,8 @@ class _Session:
             try:
                 built = sync._status_source()
             except Exception:  # a broken source must not end the session before catch-up
-                if 'status-source' not in self.logged:
-                    logger.exception('Crew status source failed')
-                self.log_once('status-source', 'the status source failed; no status is sent')
+                self.log_once('status-source', 'the status source failed; no status is sent',
+                              exc_info=True)
                 built = None
             if built is None:  # no commander, or an alt that is not the member (Review Focus 2)
                 self.last_status_at = now
@@ -575,7 +574,7 @@ class CrewSync:
         """Ask the run to end. No closing handshake happens on the caller's thread: the session
         closes its own socket when its loop sees the event (within RECV_TIMEOUT)."""
         self._stop.set()
-        if self._thread is not None:
+        if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout)
         if self.state != 'refused':
             self._set_state('stopped')

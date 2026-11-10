@@ -552,3 +552,14 @@ def test_replay_finds_journals_in_a_folder_with_glob_characters(tmp_path):
     queued = []
     assert replay(str(journals), queued.append) is not None
     assert [d.kind for d in queued] == ["visit"]
+
+
+@pytest.mark.parametrize("max_files", [-1, -100, 0])
+def test_replay_with_a_non_positive_max_files_reads_nothing(tmp_path, max_files):
+    journals = tmp_path / "journals"
+    for i in range(3):
+        write_journal(journals, f"2026-10-0{i + 1}T100000", 1_000_000 + i * 100, LOAD,
+                      jump(system=f"S{i}", address=100 + i, ts=f"2026-10-0{i + 1}T10:00:00Z"))
+    queued = []
+    assert replay(str(journals), queued.append, max_files=max_files) is None
+    assert queued == []

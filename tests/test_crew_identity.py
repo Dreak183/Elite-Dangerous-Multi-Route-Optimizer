@@ -264,3 +264,13 @@ def test_stale_identity_never_lowers_the_on_disk_high_water(ring, tmp_path):
     a.raise_high_water(3)
     assert json.loads(a.path.read_text(encoding="utf-8"))["high_water"] == 10
     assert a.high_water == 10
+
+
+@pytest.mark.parametrize("version", [True, 1.0])
+def test_key_file_version_must_be_the_integer_one(ring, version):
+    record = json.loads(ring.for_commander("F1").export_text())
+    record["v"] = version
+    path = ring.path_for("F2")
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(KeyFileError):
+        ring.for_commander("F2")

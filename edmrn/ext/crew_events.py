@@ -178,7 +178,8 @@ def load_json(data: Any, limit: int, what: str) -> Any:
     if not isinstance(data, (bytes, bytearray)):
         raise EnvelopeError(f'{what} must be bytes')
     if len(data) > limit:
-        raise EnvelopeError(f'{what} larger than {limit // 1024} KB')
+        size = f'{limit // 1024} KB' if limit >= 1024 else f'{limit} bytes'
+        raise EnvelopeError(f'{what} larger than {size}')
     try:
         return json.loads(bytes(data).decode('utf-8'), object_pairs_hook=_no_duplicate_keys,
                           parse_constant=_reject_constant, parse_float=_finite_float)
@@ -351,6 +352,8 @@ def parse_stamp(value: Any) -> Optional[datetime]:
 
 def plausible_received(created_at: Any, now: datetime) -> bool:
     """S11: a real time, not before the game's journal existed, not more than a day ahead."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)  # a naive clock reading is UTC, as everywhere here
     moment = parse_stamp(created_at)
     return moment is not None and FLOOR <= moment <= now + FUTURE_SLACK
 
@@ -358,7 +361,7 @@ def plausible_received(created_at: Any, now: datetime) -> bool:
 def ascii_name(text: str) -> str:
     """A roster name (S1) from any commander name: non-ASCII as '?', at most 64 characters."""
     cleaned = ''.join(ch if '\x20' <= ch <= '\x7e' else '?' for ch in str(text))
-    cleaned = cleaned[:ROSTER_NAME_MAX].strip()
+    cleaned = cleaned.strip()[:ROSTER_NAME_MAX].strip()
     return cleaned or 'CMDR'
 
 
@@ -396,11 +399,16 @@ STATUS_FIELDS = ('commander', 'system', 'address', 'coords', 'ship', 'ship_name'
 EDSY_MAX = 6000
 
 
+_edsy_pattern: Optional[re.Pattern] = None
+
+
 def _edsy(value: Any, path: str) -> None:
-    # crew_status imports this module, so its prefix (C18) is read at call time, not import time.
-    from edmrn.ext.crew_status import EDSY_IMPORT_URL
-    if (not isinstance(value, str) or len(value) > EDSY_MAX
-            or not re.fullmatch(re.escape(EDSY_IMPORT_URL) + r'[A-Za-z0-9_-]+(?:%3D){0,2}', value)):
+    global _edsy_pattern
+    if _edsy_pattern is None:
+        # crew_status imports this module, so its prefix (C18) is read on first use, not at import.
+        from edmrn.ext.crew_status import EDSY_IMPORT_URL
+        _edsy_pattern = re.compile(re.escape(EDSY_IMPORT_URL) + r'[A-Za-z0-9_-]+(?:%3D){0,2}')
+    if not isinstance(value, str) or len(value) > EDSY_MAX or not _edsy_pattern.fullmatch(value):
         raise PayloadError(f'{path} must be an EDSY import link of at most {EDSY_MAX} characters')
 
 
