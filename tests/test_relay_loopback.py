@@ -1,4 +1,5 @@
 """Two EDMRN crew clients through the real relay on 127.0.0.1 (spec R5)."""
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -111,7 +112,16 @@ def test_two_clients_exchange_envelopes_and_a_status(relay_url, tmp_path):
         friend_author = friend.ring.for_commander("Friend").author
         wait_for(lambda: friend_author in leader.group.board.snapshot())
         assert leader.group.board.snapshot()[friend_author].status["hull"] == 0.75
-        assert friend_author in leader.group.roster.members
+        # the leader learns the membership only from the friend's join, which the relay admitted and
+        # stored; both ends of that path are checked
+        wait_for(lambda: friend_author in leader.group.roster.members)
+        group_id = leader.group.config.group_id
+        stored = sqlite3.connect(f"file:{tmp_path / 'relay.db'}?mode=ro", uri=True)
+        try:
+            rows = stored.execute("SELECT author FROM roster WHERE group_id = ?", (group_id,)).fetchall()
+        finally:
+            stored.close()
+        assert (friend_author,) in rows
     finally:
         leader.group.stop()
         friend.group.stop()

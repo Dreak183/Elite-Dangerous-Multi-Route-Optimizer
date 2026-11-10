@@ -483,10 +483,10 @@ def test_a_failing_roster_reload_at_group_creation_drops_the_group(h):
         return original(group, leader)
 
     h.relay.reload_roster = flaky
-    bystander = h.open(g)  # keeps the group in memory, as a concurrent connection would
+    bystander = h.open(g)  # unauthenticated: holds no group state, so the drop does not touch it
     c = h.create_group(g, leader)
     assert c.closed == (1011, "internal error")
-    assert bystander.closed == (1011, "internal error")
+    assert bystander.closed is None
     assert g not in h.relay.groups
     c2 = h.authed(g, leader)
     assert c2.closed is None

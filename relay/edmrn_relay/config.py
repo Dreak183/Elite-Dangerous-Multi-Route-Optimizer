@@ -11,6 +11,7 @@ from edmrn.ext.crew_identity import _raw32  # the client's own author check (R2)
 DEFAULT_PORT = 8765
 DEFAULT_MEMBER_QUOTA = 5000
 DEFAULT_GROUP_QUOTA = 80000
+DEFAULT_MAX_CONNECTIONS = 256
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class RelayConfig:
     source_url: str = ""
     member_quota: int = DEFAULT_MEMBER_QUOTA
     group_quota: int = DEFAULT_GROUP_QUOTA
+    max_connections: int = DEFAULT_MAX_CONNECTIONS
 
 
 class ConfigError(ValueError):
@@ -61,6 +63,8 @@ def load_config(argv: Sequence[str] | None, environ: Mapping[str, str]) -> Relay
         ("source_url", "--source-url", defaults.source_url, "where the source is published"),
         ("member_quota", "--member-quota", str(defaults.member_quota), "events per member and day"),
         ("group_quota", "--group-quota", str(defaults.group_quota), "events per group and day"),
+        ("max_connections", "--max-connections", str(defaults.max_connections),
+         "WebSocket connections open at once, authenticated or not"),
     )
     for dest, flag, default, help_text in options:
         env_name = "EDMRN_RELAY_" + dest.upper()
@@ -75,4 +79,5 @@ def load_config(argv: Sequence[str] | None, environ: Mapping[str, str]) -> Relay
         source_url=args.source_url,
         member_quota=_integer("member quota", args.member_quota, 1),
         group_quota=_integer("group quota", args.group_quota, 1),
+        max_connections=_integer("max connections", args.max_connections, 1),
     )

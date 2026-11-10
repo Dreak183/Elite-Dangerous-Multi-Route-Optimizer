@@ -10,7 +10,8 @@ import pytest
 
 from edmrn.ext import crew_protocol as proto
 from edmrn.ext import crew_roster
-from relay_fakes import TOKEN, Harness, key_for, uuid7
+from edmrn_relay import engine
+from relay_fakes import TOKEN, Harness, key_for, new_group, uuid7
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -359,3 +360,71 @@ def test_shutdown_skips_sessions_already_closing_and_logs_each_close(h, caplog):
     assert [a.session for a in actions] == [h.session(lc)]
     lines = [r.getMessage() for r in caplog.records if "close" in r.getMessage()]
     assert lines == [f"close 1001 relay shutting down author={L[:12]}"]
+
+
+def three_members(h):
+    """The leader plus alice and bob, all connected; returns (group, leader conn, {name: conn})."""
+    g = new_group()
+    lc = h.create_group_and_upload(g, leader)
+    conns = {}
+    for i, name in enumerate(("alice", "bob")):
+        token = f"{i + 1:02x}" * 32
+        invite_id = h.invite(lc, g, leader, 2 + i, token=token)
+        lc.take()
+        key = key_for(name)
+        conns[name] = h.authed(g, key, join=h.join_envelope(key, g, invite_id, 1, token=token))
+    return g, lc, conns
+
+
+def test_statuses_at_auth_come_in_pages_under_the_pump(h, monkeypatch):
+    monkeypatch.setattr(engine, "STATUS_PAGE", 1)
+    g, lc, conns = three_members(h)
+    h.send(conns["alice"], h.status(alice, 0.1))
+    h.send(conns["bob"], h.status(key_for("bob"), 0.2))
+    h.auto_pump = False
+    again = h.authed(g, leader)
+    assert [f["t"] for f in again.frames] == ["have"]  # no status in the auth step
+    session = h.session(again)
+    assert session.busy
+    h.pump(again)
+    assert len(again.take("st")) == 1 and session.busy
+    h.pump(again)
+    assert len(again.take("st")) == 1 and not session.busy
+    assert h.relay.pump(session) == []
+
+
+def test_pending_statuses_are_sent_before_the_catch_up(h, monkeypatch):
+    monkeypatch.setattr(engine, "STATUS_PAGE", 1)
+    g, lc, conns = three_members(h)
+    h.send(conns["alice"], h.status(alice, 0.1))
+    h.auto_pump = False
+    again = h.authed(g, leader)
+    h.send(again, {"t": "have", "heads": {}})
+    h.pump(again)
+    assert [f["t"] for f in again.take() if f["t"] in ("st", "evs", "synced")][:1] == ["st"]
+
+
+def test_a_newer_live_status_replaces_a_pending_one_instead_of_overtaking_it(h):
+    g, lc, conns = three_members(h)
+    h.send(conns["alice"], h.status(alice, 0.1))
+    h.auto_pump = False
+    again = h.authed(g, leader)
+    h.clock.advance(31)
+    h.send(conns["alice"], h.status(alice, 0.9))
+    assert again.take("st") == []  # held: the pending older one must not follow a newer one
+    h.pump(again)
+    got = [doc(f)["status"]["hull"] for f in again.take("st")]
+    assert got == [0.9]
+
+
+def test_a_closed_session_drops_its_pending_statuses(h, monkeypatch):
+    monkeypatch.setattr(engine, "STATUS_PAGE", 1)
+    g, lc, conns = three_members(h)
+    h.send(conns["alice"], h.status(alice, 0.1))
+    h.send(conns["bob"], h.status(key_for("bob"), 0.2))
+    h.auto_pump = False
+    again = h.authed(g, leader)
+    session = h.session(again)
+    h.close(again)
+    assert not session.busy
+    assert h.relay.pump(session) == []

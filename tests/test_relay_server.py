@@ -455,7 +455,13 @@ def test_a_non_reading_member_flooding_have_stays_bounded(tmp_path):
     asyncio.run(scenario())
 
 
+async def send_batch(ws, count):
+    for _ in range(count):
+        await ws.send("x")
+
+
 def test_a_non_reading_unauthenticated_garbage_flood_stays_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine, "AUTH_TIMEOUT", 600.0)  # the flood outlasts the 10 s auth timer
     monkeypatch.setattr(server_module, "OUTBOX_HIGH_WATER", 16 * 1024)
 
     async def scenario():
@@ -469,8 +475,10 @@ def test_a_non_reading_unauthenticated_garbage_flood_stays_bounded(tmp_path, mon
             end = time.monotonic() + 60
             while peer.queued_bytes < 16 * 1024:  # the socket buffers absorb the first MBs of errs
                 assert time.monotonic() < end, "the outbox never filled"
-                for _ in range(5000):
-                    await ws.send("x")
+                try:  # the server may stop reading while a batch is still going out
+                    await asyncio.wait_for(send_batch(ws, 5000), 5)
+                except TimeoutError:
+                    pass
             try:  # a server that goes on reading would queue all of this too
                 await asyncio.wait_for(asyncio.gather(*[ws.send("x") for _ in range(20000)]), 2)
             except TimeoutError:
@@ -761,3 +769,163 @@ def test_a_catch_up_larger_than_the_hard_cap_waits_for_room_and_completes(tmp_pa
         finally:
             await server.stop()
     asyncio.run(scenario())
+
+
+# -- limits, close wait, fairness ------------------------------------------------------------
+
+def test_connections_over_the_cap_are_refused_with_503_before_the_handshake(tmp_path):
+    async def scenario():
+        server = RelayServer(make_config(tmp_path, max_connections=2))
+        port = await server.start()
+        try:
+            url = f"ws://127.0.0.1:{port}/v1/groups/{new_group()}/ws"
+            first, second = await connect(url), await connect(url)
+            await first.recv()
+            await second.recv()
+            with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
+                await connect(url)
+            assert refused.value.response.status_code == 503
+            assert refused.value.response.headers["Retry-After"]
+            assert len(server._peers) == 2 and server.relay.groups == {}
+            assert (await http(port, "GET / HTTP/1.1"))[0] == 200  # plain HTTP is not capped
+            await first.close()
+            await eventually(lambda: len(server._peers) == 1)
+            third = await connect(url)
+            assert json.loads(await third.recv())["t"] == "hello"
+            await second.close()
+            await third.close()
+        finally:
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_a_closing_session_waits_only_close_wait_for_a_peer_that_reads_nothing(monkeypatch):
+    monkeypatch.setattr(server_module, "CLOSE_WAIT", 0.2)
+
+    class Stuck:
+        aborted = False
+        transport = SimpleNamespace(abort=lambda: setattr(Stuck, "aborted", True))
+
+        async def send(self, text):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        peer = Peer(Stuck())
+        peer.enqueue("err")
+        peer.enqueue((4001, "auth timeout"))
+        started = time.monotonic()
+        await peer.finish(True)
+        assert time.monotonic() - started < 3
+        assert Stuck.aborted and peer.writer.done()
+    asyncio.run(scenario())
+
+
+def test_the_close_wait_is_short_and_leaves_the_stop_timeouts_alone():
+    assert server_module.CLOSE_WAIT <= 10
+    assert server_module.SHUTDOWN_GRACE == 15.0 and server_module.WRITE_TIMEOUT == 60.0
+
+
+def test_the_handler_yields_to_the_loop_between_buffered_frames(tmp_path):
+    class Scripted:  # a backlog the library already buffered: reading it never awaits
+        request = SimpleNamespace(path=f"/v1/groups/{V7}/ws")
+
+        def __aiter__(self):
+            async def frames():
+                for _ in range(20):
+                    yield "x"
+            return frames()
+
+        async def send(self, text):
+            pass
+
+    async def scenario():
+        server = RelayServer(make_config(tmp_path))
+        await server.start()
+        ticks = 0
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(ticker())
+        try:
+            seen = []
+            real = server.relay.receive
+            server.relay.receive = lambda session, message: seen.append(ticks) or real(session, message)
+            await server._handler(Scripted())
+            assert len(seen) == 20
+            assert len(set(seen)) == len(seen)  # other tasks ran between every two frames
+        finally:
+            task.cancel()
+            await server.stop()
+    asyncio.run(scenario())
+
+
+def test_the_pump_yields_to_the_loop_between_pages():
+    async def scenario():
+        ticks, seen = 0, []
+        session = SimpleNamespace(busy=True)
+
+        def pump(_session):
+            seen.append(ticks)
+            if len(seen) == 6:
+                session.busy = False
+            return []
+
+        server = RelayServer.__new__(RelayServer)
+        server.relay = SimpleNamespace(pump=pump)
+
+        class Quiet:
+            async def send(self, text):
+                pass
+
+        peer = Peer(Quiet())
+
+        async def ticker():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(ticker())
+        pumping = asyncio.create_task(server._pump(session, peer))
+        peer.wake.set()
+        await eventually(lambda: len(seen) == 6)
+        assert len(set(seen)) == 6  # a page never follows another without the loop running
+        for t in (task, pumping):
+            t.cancel()
+        await peer.finish(False)
+    asyncio.run(scenario())
+
+
+def test_an_outbox_overflow_drops_the_queue_and_the_connection(monkeypatch):
+    monkeypatch.setattr(server_module, "OUTBOX_HARD_CAP", 100)
+
+    class Stuck:
+        aborted = False
+        transport = SimpleNamespace(abort=lambda: setattr(Stuck, "aborted", True))
+
+        async def send(self, text):
+            await asyncio.Event().wait()
+
+    async def scenario():
+        peer = Peer(Stuck())
+        for _ in range(4):
+            peer.enqueue("x" * 40)  # 160 bytes in total: the third frame passes the cap
+        assert peer.queue.empty() and peer.queued_bytes == 0
+        assert peer.room.is_set() and peer.closing and Stuck.aborted
+        peer.enqueue("late")  # a closing peer takes nothing more
+        assert peer.queue.empty()
+        await peer.finish(False)
+    asyncio.run(scenario())
+
+
+def test_status_pages_leave_room_under_the_hard_cap():
+    def b64len(n):
+        return -(-n * 4 // 3)
+    frame = 2 * b64len(proto.MAX_STATUS_BYTES) + 64
+    forward = proto.MAX_EVS_BYTES + 64
+    assert (server_module.OUTBOX_HIGH_WATER + engine.STATUS_PAGE * frame + forward
+            < server_module.OUTBOX_HARD_CAP)

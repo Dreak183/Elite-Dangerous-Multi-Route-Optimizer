@@ -11,7 +11,7 @@ the root of its port, pass WebSocket upgrades, and keep idle connections open lo
 client's 30 s ping interval (`edmrn/ext/crew_sync.py`).
 
 Configuration is by flag or by `EDMRN_RELAY_*` variable (HOST, PORT, DB, LEADERS, SOURCE_URL,
-MEMBER_QUOTA, GROUP_QUOTA); an empty variable counts as unset. Logs go to stdout. SIGTERM persists
+MEMBER_QUOTA, GROUP_QUOTA, MAX_CONNECTIONS); an empty variable counts as unset. Logs go to stdout. SIGTERM persists
 the statuses, then closes every socket with 1001 and the store, which takes up to the relay's own
 15 s close wait plus the close handshake. The supervisor's stop timeout must exceed that wait, or
 SIGKILL lands before the closes are sent and the store is closed; `stop_grace_period` in
@@ -108,6 +108,9 @@ The `docker compose` commands run from `relay/`.
   Members reconnect by themselves.
 - **Adding a leader:** extend `EDMRN_RELAY_LEADERS` and restart.
 - **Limits:** `EDMRN_RELAY_MEMBER_QUOTA` and `EDMRN_RELAY_GROUP_QUOTA` (defaults 5,000 and 80,000
-  per UTC day) are abuse limits.
+  per UTC day) are abuse limits. `EDMRN_RELAY_MAX_CONNECTIONS` (default 256) caps the WebSocket
+  connections open at once; over it the relay answers 503 with `Retry-After`. Behind the proxy
+  the relay sees only the proxy's address, so it has no per-address limit: limit connection rates
+  per client address in the proxy if scanners become a problem.
 - **Re-seed:** a lost database costs nothing permanent. Every member holds a full replica, so the
   next connections re-seed it (crew sync core spec S7).

@@ -34,6 +34,11 @@ _TEXT = (("Content-Type", "text/plain; charset=utf-8"),)
 _PREFIX, _SUFFIX = "/v1/groups/", "/ws"
 SHUTDOWN_GRACE = 15.0  # seconds to let queued closes reach the peers
 WRITE_TIMEOUT = 60.0  # a peer that does not take a frame in this time is dropped
+# A session that ends by itself (a policy close, a replacement) waits this long for its queued
+# frames and close to reach the peer, then the connection is aborted: a peer that reads nothing
+# must not hold the handler for WRITE_TIMEOUT. A shutdown waits SHUTDOWN_GRACE instead.
+CLOSE_WAIT = 5.0
+RETRY_AFTER = "30"  # seconds, sent with the 503 for a connection over the cap
 # A peer whose queued outbound bytes reach the high-water mark is not read from until its writer has
 # drained below it, so TCP pushes back on a sender that reads nothing. Past the hard cap (reachable
 # only through frames other members cause, such as forwards) the connection is aborted. The cap
@@ -147,10 +152,15 @@ class Peer:
         if transport is not None:
             transport.abort()
 
-    async def finish(self, closing: bool) -> None:
-        """closing: wait for the queued close to go out; otherwise cancel the writer."""
+    async def finish(self, closing: bool, bounded: bool = True) -> None:
+        """closing: wait for the queued close to go out, at most CLOSE_WAIT when `bounded`, then
+        abort the connection; otherwise cancel the writer."""
         if closing:
-            await asyncio.wait([self.writer])
+            await asyncio.wait([self.writer], timeout=CLOSE_WAIT if bounded else None)
+            if not self.writer.done():
+                self.abort()
+                self.writer.cancel()
+                await asyncio.wait([self.writer])
             return
         self.writer.cancel()
         await asyncio.wait([self.writer])
@@ -178,6 +188,14 @@ class RelayServer:
                       len(upgrades) == 1 and upgrades[0].lower() == "websocket",
                       self.config.source_url)
         if reply is None:
+            if len(self._peers) >= self.config.max_connections:
+                # Refused before the handshake completes: no socket state beyond this request. The
+                # peer address behind the reverse proxy is the proxy's, so there is no per-address
+                # limit.
+                return Response(503, HTTPStatus(503).phrase,
+                                Headers([*_TEXT, ("Retry-After", RETRY_AFTER),
+                                         ("Content-Length", "9"), ("Connection", "close")]),
+                                b"too busy\n")
             return None
         headers = Headers([*reply.headers, ("Content-Length", str(len(reply.body))),
                            ("Connection", "close")])
@@ -199,7 +217,7 @@ class RelayServer:
         while True:
             await peer.wake.wait()
             peer.wake.clear()
-            while session.catchup is not None:
+            while session.busy:
                 await peer.room.wait()
                 if peer.closing:
                     return
@@ -227,6 +245,7 @@ class RelayServer:
                             break
                         peer.wake.set()
                         await peer.room.wait()  # read the next frame only once the peer drained
+                        await asyncio.sleep(0)  # a buffered backlog must not hold the loop
                 except ConnectionClosed:
                     pass
             finally:
@@ -237,7 +256,8 @@ class RelayServer:
                     await asyncio.wait([pumping])
                 if session is not None:
                     self.relay.disconnect(session)
-                await peer.finish(session is not None and session.closing)
+                await peer.finish(session is not None and session.closing,
+                                  bounded=not self._stopping)
         finally:
             self._peers.discard(peer)
 

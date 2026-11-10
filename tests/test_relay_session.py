@@ -1,4 +1,6 @@
 """Hello, auth and frame checks of the relay engine (ADR-0009)."""
+import logging
+
 import pytest
 
 from edmrn.ext import crew_protocol as proto
@@ -71,6 +73,22 @@ def test_unknown_groups_leave_nothing_behind(h):
     c = h.create_group(g, leader)
     h.close(c)
     assert g in h.relay.groups
+
+
+def test_an_unauthenticated_connection_creates_no_group_object(h):
+    g = new_group()
+    conns = [h.open(g) for _ in range(5)]
+    assert h.relay.groups == {}
+    for c in conns:
+        h.close(c)
+    assert h.relay.groups == {}
+
+
+def test_an_unauthenticated_timeout_is_logged_at_debug_only(h, caplog):
+    caplog.set_level(logging.DEBUG, logger="edmrn_relay")
+    h.expire(h.open(new_group()))
+    ours = [r for r in caplog.records if "auth timeout" in r.getMessage()]
+    assert ours and all(r.levelno == logging.DEBUG for r in ours)
 
 
 def test_bad_signature_closes_4001(h):

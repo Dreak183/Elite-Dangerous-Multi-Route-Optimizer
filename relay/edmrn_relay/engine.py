@@ -28,6 +28,7 @@ log = logging.getLogger("edmrn_relay")
 AUTH_TIMEOUT = 10.0  # read at call time, so tests may monkeypatch it
 STATUS_INTERVAL = 30.0
 MAX_REFUSALS = 64
+STATUS_PAGE = 50  # status frames per pump step; a step stays far below the outbox headroom
 MAX_E_CHARS = -(-ev.MAX_ENVELOPE_BYTES * 4 // 3)
 MAX_S_CHARS = -(-proto.SIGNATURE_BYTES * 4 // 3)
 MAX_STATUS_CHARS = -(-proto.MAX_STATUS_BYTES * 4 // 3)
@@ -63,6 +64,14 @@ class Session:
     refused: dict[str, tuple[int, int]] = field(default_factory=dict)
     closing: bool = False
     catchup: CatchUp | None = None  # the `have` being answered, page by page (`Relay.pump`)
+    # statuses still to send after auth, by author, paged by `Relay.pump`; a newer live status of
+    # an author replaces its entry here, so an older one never follows a newer one
+    statuses: dict[str, tuple[bytes, bytes]] = field(default_factory=dict)
+
+    @property
+    def busy(self) -> bool:
+        """Something is left for `Relay.pump` to send."""
+        return self.catchup is not None or bool(self.statuses)
 
 
 @dataclass(eq=False)
@@ -175,6 +184,7 @@ class Relay:
         self.store = store
         self.config = config
         self.groups: dict[str, Group] = {}
+        self.unauthenticated: set[Session] = set()  # sessions that have no group object yet
         self._now = now
         self._token = token
 
@@ -215,9 +225,8 @@ class Relay:
     def connect(self, group_id: str, conn: Any) -> tuple[Session, list[Action]]:
         if not ev.is_uuid7(group_id):
             raise ValueError("group id is not a UUIDv7")
-        group = self.group(group_id)
         session = Session(group_id, conn, proto.b64(self._token()), self._now())
-        group.sessions.append(session)
+        self.unauthenticated.add(session)  # `_auth` gives it its group once the signature holds
         hello = proto.encode({"t": "hello", "v": proto.PROTOCOL_VERSION,
                               "source": self.config.source_url, "nonce": session.nonce})
         return session, [Send(session, hello)]
@@ -233,6 +242,8 @@ class Relay:
         self._persist_status(session)
         session.state = "closed"
         session.catchup = None
+        session.statuses = {}
+        self.unauthenticated.discard(session)
         group = self.groups.get(session.group_id)
         if group is None:
             return
@@ -259,19 +270,22 @@ class Relay:
     def shutdown(self) -> list[Action]:
         """Persist every status, then close every session with 1001."""
         actions: list[Action] = []
-        for group in list(self.groups.values()):
-            for session in list(group.sessions):
-                if session.state == "closed" or session.closing:
-                    continue
-                self._persist_status(session)
-                actions += self._close(session, CLOSE_GOING_AWAY, SHUTDOWN_REASON)
+        sessions = [s for g in self.groups.values() for s in g.sessions]
+        for session in sessions + list(self.unauthenticated):
+            if session.state == "closed" or session.closing:
+                continue
+            self._persist_status(session)
+            actions += self._close(session, CLOSE_GOING_AWAY, SHUTDOWN_REASON)
         log.info("shutdown sessions=%d", len(actions))
         return actions
 
     def _close(self, session: Session, code: int, reason: str) -> list[Action]:
         session.closing = True
         session.catchup = None
-        log.info("close %d %s author=%s", code, reason, _short(session.author))
+        session.statuses = {}
+        # a scanner that never authenticates must not fill the log
+        level = logging.DEBUG if reason == "auth timeout" else logging.INFO
+        log.log(level, "close %d %s author=%s", code, reason, _short(session.author))
         return [Close(session, code, reason)]
 
     # -- dispatch -------------------------------------------------------------------------
@@ -345,18 +359,26 @@ class Relay:
         session.status = (data, sig)  # T7
         group.status_at[author] = now
         text = proto.encode(proto.status_frame(data, sig))
-        return [Send(o, text) for o in group.sessions
-                if o is not session and o.state == "member" and not o.closing]
+        actions: list[Action] = []
+        for o in group.sessions:
+            if o is session or o.state != "member" or o.closing:
+                continue
+            if author in o.statuses:
+                o.statuses[author] = (data, sig)  # still queued for `o`: the newer one replaces it
+            else:
+                actions.append(Send(o, text))
+        return actions
 
-    def _statuses_at_auth(self, session: Session, group: Group) -> list[Action]:
-        """B1 S7.5: the statuses of the members present, then the stored ones of those absent."""
+    def _collect_statuses(self, session: Session, group: Group) -> dict[str, tuple[bytes, bytes]]:
+        """B1 S7.5: the statuses of the members present, then the stored ones of those absent.
+        Sent in pages by `pump`, not in the step that authenticates."""
         members = group.roster.members
 
         def active(author: str | None) -> bool:
             m = members.get(author)
             return m is not None and m.last_seq is None
 
-        actions: list[Action] = []
+        found: dict[str, tuple[bytes, bytes]] = {}
         live: set[str] = set()
         for other in group.sessions:
             if (other is session or other.state != "member" or other.closing
@@ -364,11 +386,11 @@ class Relay:
                 continue
             if other.status is not None:  # a member without one is served from the store below
                 live.add(other.author)
-                actions.append(Send(session, proto.encode(proto.status_frame(*other.status))))
+                found[other.author] = other.status
         for author, e, s in self.store.statuses(group.group_id):
             if author != session.author and author not in live and active(author):
-                actions.append(Send(session, proto.encode(proto.status_frame(e, s))))
-        return actions
+                found[author] = (e, s)
+        return found
 
     # -- catch-up -------------------------------------------------------------------------
 
@@ -393,6 +415,8 @@ class Relay:
         in ascending `seq`, so the receiver's highest stored `seq` per author never passes an
         envelope it lacks. `synced` comes in the step that finds nothing left, and the catch-up
         ends in that same step: engine calls do not interleave, so no envelope slips in between."""
+        if session.statuses:
+            return self._status_page(session)
         cursor = session.catchup
         if cursor is None:
             return []
@@ -401,6 +425,14 @@ class Relay:
         except Exception:
             log.exception("internal error author=%s", _short(session.author))
             return self._close(session, CLOSE_INTERNAL, "internal error")
+
+    def _status_page(self, session: Session) -> list[Action]:
+        """The next STATUS_PAGE statuses queued at auth, ahead of any catch-up page."""
+        if session.state != "member" or session.closing:
+            session.statuses = {}
+            return []
+        page = [session.statuses.pop(a) for a in list(session.statuses)[:STATUS_PAGE]]
+        return [Send(session, proto.encode(proto.status_frame(e, s))) for e, s in page]
 
     def _pump(self, session: Session, cursor: CatchUp) -> list[Action]:
         group = cursor.group
@@ -593,7 +625,6 @@ class Relay:
     # -- auth -----------------------------------------------------------------------------
 
     def _auth(self, session: Session, frame: dict) -> list[Action]:
-        group = self.group(session.group_id)
         author = frame.get("author")
         if frame.get("group") != session.group_id or not ev.is_author(author):
             return self._close(session, proto.CLOSE_BAD_AUTH, "bad auth")
@@ -604,6 +635,9 @@ class Relay:
         if (len(sig) != proto.SIGNATURE_BYTES
                 or not verify(author, sig, proto.auth_message(session.group_id, session.nonce))):
             return self._close(session, proto.CLOSE_BAD_AUTH, "bad signature")
+        group = self.group(session.group_id)  # only a session that proved a key reaches the store
+        self.unauthenticated.discard(session)
+        group.sessions.append(session)
         if group.leader is None:
             genesis = None
             if author in self.config.leaders:
@@ -641,7 +675,8 @@ class Relay:
         session.author = author
         text = proto.encode(proto.have_frame(self._listed_heads(group)))
         actions.append(Send(session, text))
-        return actions + self._statuses_at_auth(session, group)
+        session.statuses = self._collect_statuses(session, group)
+        return actions
 
     def _admit_join(self, session: Session, group: Group, raw: Any, author: str) -> bool:
         """U4: a join at auth must pass the envelope checks, name a live invite on the relay clock

@@ -16,7 +16,19 @@ an EDMRN client built for the Cloudflare relay talks to this relay unchanged.
 - R1. **Behaviour parity.** The relay implements Spec B1 S5 (invite page), S6 (frames), S7 (session,
   heads, catch-up, roster handling), S8 (status), S9 (error codes and close codes), S14 (quotas),
   S17 (routes) and S18 (checks, cleanup), with these amendments:
-  - S7.1: an unauthenticated socket is closed by a 10 s timer (no hibernation constraint).
+  - S7.1: an unauthenticated socket is closed by a 10 s timer (no hibernation constraint). It
+    holds no group state until its `auth` signature verifies, and its timeout is logged at debug
+    level only.
+  - S7.5: the statuses sent at auth are queued on the session and sent in pages of at most 50
+    frames, under the same outbox backpressure as catch-up pages and ahead of them. A newer live
+    status of an author replaces that author's queued entry.
+  - Connection limit: at most `--max-connections` (default 256) WebSocket connections are open at
+    once, authenticated or not; a further upgrade is refused with HTTP 503 and `Retry-After`
+    before the handshake completes. There is no per-address limit: behind the reverse proxy
+    every peer address is the proxy's.
+  - A session that ends by itself (policy close, replacement, auth timeout) waits at most 5 s for
+    its queued frames to reach the peer, then the connection is aborted. A shutdown waits for the
+    15 s close wait instead.
   - S7.2: the leader keys come from the configuration (`--leaders`, environment
     `EDMRN_RELAY_LEADERS`), not from a Worker variable.
   - S8: a connection's latest status lives in memory on that connection; it is written to the
@@ -32,7 +44,7 @@ an EDMRN client built for the Cloudflare relay talks to this relay unchanged.
   frame parsing (the `auth` frame) and the session engine live in the relay package.
 - R3. **Operation.** `python -m edmrn_relay` with `--host` (default `127.0.0.1`), `--port`
   (`8765`), `--db` (`./relay.db`), `--leaders`, `--source-url`, `--member-quota`,
-  `--group-quota`; each also from an `EDMRN_RELAY_*` environment variable. Logs go to stdout, one
+  `--group-quota`, `--max-connections`; each also from an `EDMRN_RELAY_*` environment variable. Logs go to stdout, one
   line per event, never envelope contents. SIGTERM/SIGINT close every socket with 1001 after
   persisting statuses. The SQLite file uses WAL; one connection on the event-loop thread.
 - R4. **Deployment.** `relay/Dockerfile` (python:3.13-slim, non-root user, `/data` volume),

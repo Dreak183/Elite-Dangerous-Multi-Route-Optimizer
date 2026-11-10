@@ -1,4 +1,5 @@
 """RelayStore: schema, migration and the engine's queries (self-hosted relay, ADR-0009)."""
+import logging
 import sqlite3
 
 import pytest
@@ -191,3 +192,16 @@ def test_heads_quota_and_status_are_isolated_per_group(store):
     assert store.quota_used(G1, 5, A) == 3
     assert store.take_past_quota(G2, 6) == [(5, 1)]
     assert store.quota_used(G1, 5, A) == 3
+
+
+def test_a_database_that_is_not_in_wal_mode_logs_a_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="edmrn_relay")
+    RelayStore(":memory:").close()  # an in-memory database cannot use the WAL
+    assert any("not wal" in r.getMessage() and r.levelno == logging.WARNING
+               for r in caplog.records)
+
+
+def test_a_wal_database_logs_no_warning(tmp_path, caplog):
+    caplog.set_level(logging.WARNING, logger="edmrn_relay")
+    RelayStore(tmp_path / "relay.db").close()
+    assert not caplog.records

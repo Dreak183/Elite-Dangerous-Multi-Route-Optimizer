@@ -75,6 +75,14 @@ def test_config_defaults_environment_and_flags(tmp_path):
     assert load_config(["--port", "9000"], env).port == 9000
 
 
+def test_config_max_connections():
+    assert RelayConfig().max_connections == 256
+    assert load_config([], {"EDMRN_RELAY_MAX_CONNECTIONS": "12"}).max_connections == 12
+    assert load_config(["--max-connections", "5"], {}).max_connections == 5
+    with pytest.raises(ConfigError):
+        load_config(["--max-connections", "0"], {})
+
+
 def test_config_leaders_are_split_and_checked():
     a, b, c = (key_for(n).author for n in ("leader", "alice", "bob"))
     assert load_config(["--leaders", f"{a}, {b}\n{c}"], {}).leaders == frozenset({a, b, c})

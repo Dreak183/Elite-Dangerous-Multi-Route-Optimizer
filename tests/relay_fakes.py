@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import threading
 import time
@@ -165,14 +166,14 @@ class Harness:
         True while the session still has a catch-up afterwards."""
         session = self.session(conn)
         self._deliver(self.relay.pump(session))
-        return session.catchup is not None
+        return session.busy
 
     def drain_catchups(self) -> None:
         """Run every catch-up in flight to its end, as an idle server would."""
         for group in list(self.relay.groups.values()):
             for session in list(group.sessions):
                 steps = 0
-                while session.catchup is not None:
+                while session.busy:
                     self._deliver(self.relay.pump(session))
                     steps += 1
                     assert steps < 100000, "a catch-up that does not end"
@@ -308,6 +309,9 @@ class ServerThread:
         self._loop = asyncio.new_event_loop()
         self._started = threading.Event()
         self._error: BaseException | None = None
+        # Collect on this thread first: garbage left by earlier Tk tests must not be finalised on the
+        # relay thread, where each Tk variable waits a second for a main loop that never runs.
+        gc.collect()
         self._thread = threading.Thread(target=self._run, name="edmrn-relay-test", daemon=True)
         self._thread.start()
         if not self._started.wait(10):
