@@ -13,6 +13,7 @@ Everything a new agent, developer or project manager needs, and nothing that dup
 | `cowork/` | `BACKLOG.md` — this project's research brief for Claude Cowork (rules: `../../cowork/INSTRUCTIONS.md`) | Handing research to Cowork |
 | `superpowers/specs/` | Approved design specs — the binding authority | Resolving what the system is supposed to do |
 | `superpowers/plans/` | Implementation plans — an argument from the spec, not authority | Executing tasks |
+| `gui-redesign/` | Package for the GUI redesign: design brief, functional reference of every screen, screenshots (`gui-redesign/README.md`) | Designing or implementing the new interface |
 
 ## Precedence when documents disagree
 

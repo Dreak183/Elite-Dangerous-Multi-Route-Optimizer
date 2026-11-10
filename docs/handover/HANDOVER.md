@@ -5,14 +5,16 @@
 - `main` holds API hardening, neutron save/resume, journal location, Spec A crew capture, Spec B1
   crew sync core, the laden jump range with the supercharged neutron start, and the self-hosted
   crew relay (ADR-0009, spec `../superpowers/specs/2026-11-08-self-hosted-relay-design.md`;
-  fast-forwarded 2026-11-10). Nothing is pushed.
-- **Branch `chore/review-followups` (on top of `main`, not merged, not pushed)** works off the
-  deferred review follow-ups: relay limits, crew client, ship range and neutron resume, API layer
-  and journal hooks. What is left of the follow-up lists is below.
-  - On the branch, `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests`:
-    `1353 passed` (2026-11-10, twice in a row). No Python linter is configured.
-  - Each area was written test-first by its own agent with mutation checks; the diffs were read,
-    not reviewed by a second agent, and nothing was probed against a running relay or the window.
+  fast-forwarded 2026-11-10) and the review follow-ups (relay limits, crew client, ship range and
+  neutron resume, API layer and journal hooks; fast-forwarded 2026-11-10). Nothing is pushed.
+  - `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests`: `1353 passed` (2026-11-10,
+    twice in a row, on the commit that is now `main`). No Python linter is configured.
+  - The follow-ups were written test-first by one agent per area with mutation checks; the diffs
+    were read, not reviewed by a second agent, and nothing was probed against a running relay.
+- **GUI redesign in preparation.** The commander has the interface redesigned by Claude Design and
+  implemented afterwards. `../gui-redesign/` is the package for the designer: brief, a functional
+  reference of every screen with element IDs, screenshots. The reference was derived by reading
+  code (five agents) and was not checked against the running window beyond the screenshots.
 - EDMRN develops independently; the remote `upstream` is its own repository (ADR-0010).
 - **Never executed:** `docker build`, `docker compose up`, Caddy, the systemd unit and Option B's
   uv commands (no Docker and no Linux on the development machine). The first run is the deploy
@@ -30,9 +32,12 @@
 
 1. Read `../../CLAUDE.md`, the ADRs (`../architecture/decisions/`), `../architecture/overview.md`
    and `../knowledge/upstream-baseline.md`.
-2. **Merge `chore/review-followups` into `main`** once the commander agrees (Open decisions);
-   `superpowers:finishing-a-development-branch`. A review that executes (relay probes on
-   127.0.0.1, `../how-to/run.md`) is still owed for the relay commit.
+2. **GUI redesign.** The commander hands `../gui-redesign/` to Claude Design. Before the result is
+   implemented, two decisions are due (Open decisions): the toolkit, and an ADR that lifts
+   ADR-0002's layout rule for the GUI files. `../gui-redesign/00-brief.md` section 4 lists
+   functional defects found on the way (dead controls, route advance bound to the active tab,
+   nothing restored after restart); none is fixed. A review that executes (relay probes on
+   127.0.0.1, `../how-to/run.md`) is still owed for the relay follow-up commit `e2152f5`.
 3. **Deploy session with the commander** (needs the commander), following
    `../how-to/deploy-relay.md`: server OS, Docker or not, an existing reverse proxy on 443, the DNS
    record for `galroute.the-hub.cloud`, and the leader key from Settings > Crew.... Decide there
@@ -66,18 +71,18 @@ The B1 requirements (group, invites, status, pause) are in the B1 spec.
 
 ## Open decisions
 
-- **Merge of `chore/review-followups` into `main`.** Recommendation: merge locally (fast-forward).
-- **EDTS as the reference for range and distance calculations.** The hub's `../../../CLAUDE.md`
-  names EDTS (`../../../knowledge/edts.md`) as the reference for jump range, fuel and distances;
-  `edmrn/ext/fsd.py` has its own model calibrated on `MaxJumpRange` and was never compared with
-  it. Recommendation: compare once and record divergences in `../knowledge/`. The hub's project
-  table still describes EDMRN as merging `upstream` regularly (ADR-0010 says otherwise; the hub
-  file is the commander's).
-
-- **The updater's target.** `updater.SimpleUpdateChecker` asks the original repository's GitHub
-  releases (`../knowledge/upstream-baseline.md`), so an EDMRN build announces the original's
-  releases. With ADR-0010 the target would be EDMRN's own repository, which has no releases.
-  Recommendation: point it at the own repository once a first release exists; until then leave it.
+- **GUI toolkit.** The brief assumes customtkinter stays and limits the designer to what it can
+  draw. Claude Design produces HTML-like designs; a web front end (for example pywebview) would
+  take them over almost unchanged but means rewriting every window, the tksheet tables, the
+  matplotlib map and the overlay. Recommendation: stay on customtkinter for this redesign.
+- **ADR-0002 and the GUI.** A redesign rewrites inherited files (`app.py`, `ui_components.py`,
+  `gui.py`, `overlay.py` and more), which ADR-0002 forbids and ADR-0010 says needs its own ADR and
+  ends cheap merges of the original. Recommendation: write that ADR before implementation starts.
+- **The updater's target** (ruled 2026-11-10): it keeps asking the original repository's releases
+  until EDMRN's own repository has a first release, then it is pointed there
+  (`../knowledge/upstream-baseline.md`).
+- **EDTS** (ruled 2026-11-10): not considered for now; it will complement EDMRN later and does not
+  steer current work. `edmrn/ext/fsd.py` keeps its own model.
 - **Galaxy Plotter.** It posts to the neutron endpoint, which ignores every ship parameter
   (`../knowledge/upstream-baseline.md`, checked live 2026-11-10); the tab returns a plain neutron
   route. Decide whether to rebuild it on Spansh's exact plotter (`/api/generic/route`, facts in
