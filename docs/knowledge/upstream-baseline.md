@@ -92,9 +92,13 @@ exchange. It also lists the upstream defects that our features would sit on top 
 - **Defect — no supercharge at the start:** the route is used as Spansh returns it, and Spansh's
   neutron plotter never supercharges at the start system (`../../../knowledge/bulk-data.md`,
   "Neutron route plotter") **[community]**.
-- **Galaxy Plotter endpoint:** `galaxy_plotter.GalaxyPlotter` posts its exact-plotter parameters
+- **Defect — Galaxy Plotter uses the neutron endpoint:** `galaxy_plotter.GalaxyPlotter` posts its exact-plotter parameters
   (`ship_build`, `cargo`, `already_supercharged`, …) to `/api/route`, the neutron plotter's endpoint
-  **[community]**; whether Spansh honours them there is unchecked.
+  **[community]**. Spansh ignores all of them there (`../../../knowledge/bulk-data.md`, "Neutron
+  route plotter"), so the Galaxy Plotter returns a plain neutron route: ship build, cargo, reserve
+  fuel, "already supercharged", injections and the refuel options have no effect. The exact plotter
+  is a different endpoint with different parameter names and a different result shape (same file,
+  "Exact (galaxy) plotter").
 - **Saving:** `save_neutron_route` writes `neutron_route.json` (waypoints, statuses, current index)
   only into `app.current_backup_folder`. That folder exists only after a CSV route was optimised or
   loaded, so a stand-alone neutron route is never saved. From, to, range and boost are not stored.

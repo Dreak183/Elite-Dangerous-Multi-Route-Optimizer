@@ -67,17 +67,14 @@ The B1 requirements (group, invites, status, pause) are in the B1 spec.
 
 ## Open decisions
 
-- **Merge of `feature/self-hosted-relay` into `main`.** Recommendation: merge locally (fast-forward,
-  as with the earlier phases); nothing is deployed by it.
-- **Own GitHub fork as `origin`.** The remote named `upstream` points at the commander's fork
-  `Dreak183/Elite-Dangerous-Multi-Route-Optimizer` (it carries `feature/crew-sync-core`), while
-  ADR-0002 expects `upstream` = NinurtaKalhu's original and the fork as `origin`. Recommendation:
-  `git remote rename upstream origin` and `git remote add upstream
-  https://github.com/NinurtaKalhu/Elite-Dangerous-Multi-Route-Optimizer.git`. Upstream PRs (rows
-  marked "yes" in `../architecture/overview.md`) and the updater's target wait for it.
-- **Galaxy Plotter endpoint (open question).** Upstream posts its exact-plotter parameters to
-  `/api/route`, the neutron plotter's endpoint (`../knowledge/upstream-baseline.md`); whether
-  Spansh honours them there is unchecked. Check before building on the Galaxy Plotter.
+- **The updater's target.** `updater.SimpleUpdateChecker` asks the original repository's GitHub
+  releases (`../knowledge/upstream-baseline.md`), so an EDMRN build announces the original's
+  releases. With ADR-0010 the target would be EDMRN's own repository, which has no releases.
+  Recommendation: point it at the own repository once a first release exists; until then leave it.
+- **Galaxy Plotter.** It posts to the neutron endpoint, which ignores every ship parameter
+  (`../knowledge/upstream-baseline.md`, checked live 2026-11-10); the tab returns a plain neutron
+  route. Decide whether to rebuild it on Spansh's exact plotter (`/api/generic/route`, facts in
+  `../../../knowledge/bulk-data.md`) — a feature of its own, needing a spec — or leave it.
 
 ## Preconditions before friend data enters `edmrn.db` (from the neutron review)
 

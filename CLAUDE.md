@@ -19,7 +19,9 @@ is where in what ship, which systems are explored, finds, the leader's route, ch
 exchanged as a signed event log (ADR-0005) through a relay on the commander's own server
 (ADR-0009). Exploring the system the commander is in stays with Elite Observatory.
 
-The fork stays close to upstream and merges `upstream/main` regularly (remote `upstream`).
+EDMRN develops independently. The remote `upstream` is EDMRN's own GitHub repository; the original
+is merged case by case and gets no PRs (ADR-0010). The code layout still keeps such merges cheap
+(ADR-0002).
 
 This folder is its own git repository (branch `main`) inside the `EDProjects` hub. The hub's
 `../CLAUDE.md` loads automatically and holds the rules shared by all projects.
