@@ -3,28 +3,25 @@
 ## Where things stand
 
 - `main` holds API hardening, neutron save/resume, journal location, Spec A crew capture, Spec B1
-  crew sync core, and the laden jump range with the supercharged neutron start (spec
-  `../superpowers/specs/2026-11-08-ship-range-and-neutron-start-design.md`, merged 2026-11-08).
-  - The supercharged start was checked live against Spansh: `Eol Prou WN-T d3-2412` → `Colonia` at
-    75 LY/×4 now plots 1 jump instead of 2.
-- **Branch `feature/self-hosted-relay` (25 commits ahead of `main`, not merged, not pushed) holds
-  the finished self-hosted crew relay** (ADR-0009, spec
-  `../superpowers/specs/2026-11-08-self-hosted-relay-design.md`): the Python relay in `relay/`, its
-  deployment files, a loopback test with two real clients (`tests/test_relay_loopback.py`), and the
-  removal of the Cloudflare Worker (`crew-relay/` is gone; its vectors are
-  `tests/vectors/crew_vectors.json`). The client protocol is unchanged.
-  - On the branch, `.venv/Scripts/python.exe -m pytest -q`: `1278 passed, 1 skipped`
-    (2026-11-10; other runs the same day gave `1279 passed`). The skip is a Tk test that
-    intermittently fails to find "init.tcl" (environment). No Python linter is configured.
-  - Reviewed per task and as a whole branch, with probes against the real server on 127.0.0.1
-    (flooding, large catch-up, hostile frames) and mutation checks.
-  - **Never executed:** `docker build`, `docker compose up`, Caddy, the systemd unit and Option B's
-    uv commands (no Docker and no Linux on the development machine). The first run is the deploy
-    session.
+  crew sync core, the laden jump range with the supercharged neutron start, and the self-hosted
+  crew relay (ADR-0009, spec `../superpowers/specs/2026-11-08-self-hosted-relay-design.md`;
+  fast-forwarded 2026-11-10). Nothing is pushed.
+- **Branch `chore/review-followups` (on top of `main`, not merged, not pushed)** works off the
+  deferred review follow-ups: relay limits, crew client, ship range and neutron resume, API layer
+  and journal hooks. What is left of the follow-up lists is below.
+  - On the branch, `.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests`:
+    `1353 passed` (2026-11-10, twice in a row). No Python linter is configured.
+  - Each area was written test-first by its own agent with mutation checks; the diffs were read,
+    not reviewed by a second agent, and nothing was probed against a running relay or the window.
+- EDMRN develops independently; the remote `upstream` is its own repository (ADR-0010).
+- **Never executed:** `docker build`, `docker compose up`, Caddy, the systemd unit and Option B's
+  uv commands (no Docker and no Linux on the development machine). The first run is the deploy
+  session.
 - **No human has looked at the window** since the location, neutron, B1 crew dialog and range
   features: header location, Neutron "Saved routes", a plot from an unknown start, Settings >
   Crew..., and the range label with its Auto switch under both range fields (the label is one line
-  in the half-width Neutron range frame; clipping is unchecked).
+  in the half-width Neutron range frame; clipping is unchecked). The Auto switch turns off on a
+  key that went down in the entry and changed its text — try typing, pasting and Tab.
 - Crew features: ADR-0005 (protocol; transport superseded by ADR-0009), ADR-0006, ADR-0007,
   ADR-0008; decomposition A capture → B1 sync core → relay port (ADR-0009) → B2 chat/route/
   expeditions/Discord → C window.
@@ -33,13 +30,15 @@
 
 1. Read `../../CLAUDE.md`, the ADRs (`../architecture/decisions/`), `../architecture/overview.md`
    and `../knowledge/upstream-baseline.md`.
-2. **Merge `feature/self-hosted-relay` into `main`** once the commander agrees (Open decisions);
-   `superpowers:finishing-a-development-branch`.
+2. **Merge `chore/review-followups` into `main`** once the commander agrees (Open decisions);
+   `superpowers:finishing-a-development-branch`. A review that executes (relay probes on
+   127.0.0.1, `../how-to/run.md`) is still owed for the relay commit.
 3. **Deploy session with the commander** (needs the commander), following
    `../how-to/deploy-relay.md`: server OS, Docker or not, an existing reverse proxy on 443, the DNS
    record for `galroute.the-hub.cloud`, and the leader key from Settings > Crew.... Decide there
-   whether the reverse proxy limits connections per address (the relay has no connection cap, see
-   the relay follow-ups).
+   whether the reverse proxy limits connections per client address: the relay caps only the total
+   (`EDMRN_RELAY_MAX_CONNECTIONS`), so unauthenticated connections from one address can fill the
+   cap for the 10 s auth timeout each; check what the chosen proxy offers for that.
 4. **Then Specs B2 and C (crew window).** Notes for B2 and C from Specs A and B1 and the relay:
    - After an `err rate` refusal the client does not resend its status; a refused status shows up
      only at the next value change (B2).
@@ -67,6 +66,14 @@ The B1 requirements (group, invites, status, pause) are in the B1 spec.
 
 ## Open decisions
 
+- **Merge of `chore/review-followups` into `main`.** Recommendation: merge locally (fast-forward).
+- **EDTS as the reference for range and distance calculations.** The hub's `../../../CLAUDE.md`
+  names EDTS (`../../../knowledge/edts.md`) as the reference for jump range, fuel and distances;
+  `edmrn/ext/fsd.py` has its own model calibrated on `MaxJumpRange` and was never compared with
+  it. Recommendation: compare once and record divergences in `../knowledge/`. The hub's project
+  table still describes EDMRN as merging `upstream` regularly (ADR-0010 says otherwise; the hub
+  file is the commander's).
+
 - **The updater's target.** `updater.SimpleUpdateChecker` asks the original repository's GitHub
   releases (`../knowledge/upstream-baseline.md`), so an EDMRN build announces the original's
   releases. With ADR-0010 the target would be EDMRN's own repository, which has no releases.
@@ -87,16 +94,11 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 - a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
   the process (ADR-0005's `event_id` is that identity).
 
-## Follow-ups from the relay reviews (deferred, none blocking the merge)
+## Follow-ups from the relay reviews (deferred, none blocking)
 
 - **Resource limits (`relay/edmrn_relay/server.py`, `engine.py`):**
-  - No cap on concurrent connections; each unauthenticated socket holds a file descriptor and an
-    empty in-memory group until its auth timeout.
-  - Statuses at auth are sent in one step; about 760 members each holding a maximal status would
-    exceed the 8 MiB outbox cap at connect.
-  - A closing session waits up to the 60 s write timeout for a peer that reads nothing.
-  - One connection's buffered backlog can hold the event loop for about 1 s (the handler does not
-    yield between buffered frames).
+  - No per-address connection limit (the relay sees only the proxy's address); the total cap can
+    be overshot by the handshakes in flight.
   - A link slower than about 25 KB/s under sustained traffic loses the keepalive and is closed with
     1011 (independent of the backpressure).
 - **Ordering:**
@@ -105,27 +107,25 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
   - An upload by another member between a session's auth and its first `have` is forwarded at once
     and can leave a per-author hole until the catch-up fills it (the client sends both back to
     back).
-  - `_judge` accepts a `seq` above head + 1 without a contiguity check; compare with Spec B1
-    before relying on gap-free logs.
+  - A status queued at auth for a member who leaves or is removed before its page goes out is
+    still sent.
 - **Logging:** an internal error logs a multi-line traceback, deviating from the spec's one line
-  per event (kept on purpose); every unauthenticated timeout logs an info line.
-- **Tests:** nothing pins the yield between catch-up pages or the queue being dropped on overflow;
-  the non-WAL warning branch of the store is untested; the loopback test's roster assertion could
-  pass without the relay (its status assertion covers the path).
+  per event (kept on purpose).
+- **Tests:** `test_a_non_reading_unauthenticated_garbage_flood_stays_bounded` takes about 11 s.
+  A thread started by a test can finalise Tk garbage of earlier tests and stall a second per
+  variable; `tests/relay_fakes.py` collects before it starts its relay thread, other
+  thread-starting fixtures do not.
 - **Deploy how-to:** Options A and B are unexecuted (see Where things stand).
 - **Plan text:** `../superpowers/plans/2026-11-08-self-hosted-relay.md` predates the review rulings
-  (30 s stop timeouts, uv interpreter directory, backpressure, paged catch-up); the spec,
-  `../architecture/overview.md`, `../how-to/deploy-relay.md` and the code are authoritative.
+  (30 s stop timeouts, uv interpreter directory, backpressure, paged catch-up, connection cap,
+  paged statuses); the spec, `../architecture/overview.md`, `../how-to/deploy-relay.md` and the
+  code are authoritative.
 
 ## Follow-ups from the ship range reviews (deferred, none blocking)
 
-- `tests/test_ship_panel.py` defines `test_each_range_entry_is_bound_to_its_own_variable` twice;
-  the first (no assertions) is shadowed. Delete it.
-- `edmrn/ext/fsd.py`: the "not explained by the table" warning says "assuming switched-on
-  boosters" even with none fitted, and `_warned` is keyed by item only; the outer catch-all logs at
-  DEBUG; the docstring's `knowledge/fsd-jump-range.md` means the hub's `../knowledge/`.
-- `edmrn/ext/ship_panel.py`: the typed-edit baseline is read once at construction; an outside write
-  to `jump_range` before the first tracker write makes the next keystroke count as an edit.
+- `edmrn/ext/ship_panel.py`: a programmatic write between a key going down and coming up in a
+  range entry counts as typing; a paste through the context menu does not switch Auto off.
+- `tests/test_ship_panel.py` imports `MANDALAY_BOOSTED` from `tests/test_fsd.py`.
 - The cold start accepts the newest journal file that holds a `Loadout`; after a 500,000-line split
   (`Continued`) the newer part has none, so star class and supercharge come from the older part
   until the next jump (the boost is gated on the current system).
@@ -133,7 +133,6 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
   system; the supercharge multiplies the range including the Guardian bonus.
 - The ship tracker follows whichever commander's events arrive, not upstream's
   `selected_commander` (same as the location tracker).
-- `tests/test_neutron.py` imports fixtures from `tests/test_neutron_start.py`.
 
 ## Follow-ups from the crew sync core reviews (deferred, none blocking)
 
@@ -152,33 +151,16 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
     writes `edmrn.db`; the relay sees an abnormal close instead of 1000).
   - `_me()` and `_roster_name()` read the commander key and `commander_name` separately (negligible
     race).
-  - `_who_key` in `CrewDialog` excludes the `Identity` object: if a key file is created after
-    `identity()` returned `None`, the "You" section stays stale until the next state or board
-    render.
 - **Sync, status and Discord (`edmrn/ext/crew_sync.py`, `crew_discord.py`):**
   - `CrewSync` state observers are called outside `_state_lock` and can arrive out of order (Tk
     handlers in `CrewDialog` re-read `sync.state`).
-  - Calling `CrewSync.stop()` from the sync thread itself raises `RuntimeError` on `Thread.join`
-    (caught/logged; guard `threading.current_thread()`).
-  - `websockets` 17.2 emits a `DeprecationWarning` when `websockets.sync.client.connect()` is
-    called without a `with` block or `legacy=True` (seen in `tests/test_relay_loopback.py`).
-  - A raising status source logs both `logger.exception` and a `log_once` warning on the first
-    failure; minor import order in `crew_sync.py:12`.
   - `retries=1` in `api.call` can double-post a Discord webhook message if the first attempt
     succeeded on Discord's side before a timeout or 502 (relevant for Spec B2's find mirror).
 - **Events, roster and vectors (`edmrn/ext/crew_events.py`, `crew_roster.py`, `tests/`):**
-  - `plausible_received` raises `TypeError` if passed a naive `now` datetime.
-  - `ascii_name` slices to 64 before `.strip()` (`' ' * 70 + 'z'` becomes `'CMDR'`).
-  - `load_json` reports `"0 KB"` if called with `limit < 1024`; `_edsy` regex is rebuilt per call
-    (function-local import to avoid a cycle); no direct round-trip test from `crew_status.edsy_url`
-    to `validate_status`.
-  - `_DECORATION` strips only ASCII whitespace (`<>`/`\``); NBSP, ZWSP, Discord spoiler/bold
-    markers or fenced language tags are refused; an over-long string starting with `edmrn-crew:1:`
-    says `"not an EDMRN crew invite"` rather than `"damaged"`.
-  - Non-canonical `"B" * 43` authors remain in `tests/test_crew_events.py` and
-    `tests/test_crew_roster.py` fixtures; minor spacing in `tests/test_crew_events.py` and
-    `tests/test_crew_vectors.py:96`; `make_crew_vectors.py` sanity guard compares raw cases only
-    against `group` bytes.
+  - `_DECORATION` strips only ASCII whitespace and `<>`/backticks; NBSP, ZWSP, Discord
+    spoiler/bold markers or fenced language tags are refused.
+  - Minor spacing in `tests/test_crew_events.py` and `tests/test_crew_vectors.py:96`;
+    `make_crew_vectors.py` sanity guard compares raw cases only against `group` bytes.
 - **Plan text:** `../superpowers/plans/2026-10-13-crew-sync-core.md` predates the review rulings
   and describes the removed Cloudflare Worker; the spec, ADR-0009 and the code are authoritative.
 
@@ -186,9 +168,7 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 
 - **Tests that cannot fail, or fail weakly:**
   - the stop-wake test catches its mutant only about a quarter of the time;
-  - nothing pins the app.py hook as "directly after" the location install;
-  - untested: individual commander/hull fill in `adopt`, the 1,000-drop overflow log, "broken key
-    logged once", and the Commander event's `Name` key.
+  - nothing pins the app.py hook as "directly after" the location install.
 - **Status:**
   - The ship group in `adopt` is guarded by `ship` alone (malformed Loadout only).
   - Hull fills individually even when the live ship differs.
@@ -198,11 +178,9 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
     dropped whole instead of losing only its coordinates.
   - An invalid signals draft can leave its biological find alone.
   - The seed hands drafts on outside its lock (affects `seq` order only).
-  - A negative `max_files` is not rejected.
 - **Key files:**
   - The exists-then-write check has no file lock, so two processes can race.
   - Write failures surface as `OSError` (the writer catches them).
-  - The `v` field accepts `true` and `1.0`.
 - **Store and log:**
   - `Store._probe` checks only `neutron_routes`.
   - `append_own` does not reject an own journal-kind draft with a non-matching preset id (no
@@ -213,54 +191,35 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 
 ## Follow-ups from the location reviews (deferred, none blocking)
 
-- The monitor's "folder was empty at start" flag is also set by a transient failed lookup; the next
-  lookup then replays the newest finished journal as live.
-- `os.stat(journal_path)` in the rotation gate is unguarded; an error delays rotation by ~4.6 s via
-  the retry path.
-- `run()`'s error path still sleeps 5 s, so `stop()` can take 5 s after an exception.
+- `tests/test_journal_monitor.py` takes about 35 s: the failed-lookup test waits through the idle
+  path's 5 s.
 - Test gaps: the 30 s rotation safety net; the I1 source-level test checks the keyword, not its
   value (`config.journal_path`).
 - Galaxy Plotter and Neutron read the start system from upstream's `get_current_system()` (newest
   journal file only), not from the tracker.
-- `app.py:401` does not `.strip()` the configured journal path like the other start sites.
 - The tracker follows every commander; upstream filters jumps by the selected commander.
 - After a cold start the journal folder is not re-read when the path changes at runtime.
-- Listener errors log `str(e)` without traceback or listener name.
 
 ## Follow-ups from the neutron-resume review (deferred, none blocking)
 
-- Test gap: no test fails if `_snapshot = snapshot` in the progress branch of `NeutronAutosave.check`
-  is removed. Pin it by changing a status, ticking once, then counting `update_neutron_progress`
-  calls over further unchanged ticks.
 - Reloading the same upstream CSV backup inserts a duplicate saved route each time.
 - Resuming while a Spansh calculation runs: the later result overwrites the resumed route. A
   second replot bypasses the disabled button.
 - On continue, advance or back, the From/To fields are not set.
 - Corruption that appears mid-session logs a warning every 2 s and never unmaps.
 - The 5 s SQLite busy timeout blocks the Tk thread while another process holds a lock.
-- Neutron `_key` does not strip spaces, `-` and `_` like upstream's `normalize`. The cost is "ask"
-  instead of "advance".
 
 ## Follow-ups from the API-hardening reviews (deferred, none blocking)
 
 - Autocomplete still sends upstream's ineffective `sort` (`system_autocomplete.py`). Spansh then
   ranks long procedural prefixes badly (`../../../knowledge/bulk-data.md`).
-- `api.call`:
-  - a tuple or `None` timeout raises a raw `TypeError`;
-  - huge JSON ints raise `OverflowError` in `_is_number`.
-- An EDAstro 4xx is hidden like a 404. It should note everything except 404.
-- System Info runs its sub-requests with retries one after another, about 3 min worst case.
-  Consider `retries=0` for the sub-parts.
 - Raw exception text remains on hard-to-reach upstream paths:
   - the Galaxy worker exception (also relabels the button "🚀 Calculate Exact Route");
   - Nearest's outer `Failed to search` and `Failed to display results`;
   - `update_ui` with non-dict list elements.
-- The updater:
-  - an unparseable `tag_name` still says "up to date";
-  - the auto and manual checks share state across threads.
-- The text "Unexpected error talking to …" is hard-coded in `app.py`, `neutron.py` and `updater.py`.
-  Use `str(ApiFailure(service, "unexpected"))`.
-- `neutron_manager` has its own journal-coords check; it should use `spansh.journal_start_coords`.
+- The updater's auto and manual checks share state across threads.
+- `spansh._is_coords` accepts NaN and infinite journal coordinates (`api._is_number` has the finite
+  check).
 - The live-check expectations assume that Spansh does not know `Blae Phoe XT-A e1459`.
 
 ## Traps
