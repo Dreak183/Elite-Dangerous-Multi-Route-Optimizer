@@ -230,7 +230,7 @@ class UIComponents:
         main_frame.columnconfigure(0, weight=3)
         main_frame.columnconfigure(1, weight=2)
         main_frame.rowconfigure(0, weight=1)
-        left_frame = ctk.CTkFrame(main_frame, corner_radius=10, fg_color=colors['frame'])
+        left_frame = ctk.CTkScrollableFrame(main_frame, corner_radius=10, fg_color=colors['frame'])
         left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         left_frame.columnconfigure(0, weight=1)
         left_frame.rowconfigure(6, weight=1)
@@ -409,6 +409,8 @@ class UIComponents:
             scrollbar_button_hover_color=colors['primary_hover']
         )
         self.app.neutron_scroll_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 12), padx=12)
+        from edmrn.ext.location_fill import add_neutron_tab_buttons
+        add_neutron_tab_buttons(self.app)
 
     def create_galaxy_plotter_tab(self):
         colors = self.app.theme_manager.get_theme_colors()
@@ -840,6 +842,8 @@ class UIComponents:
         
         self.app.galaxy_prev_btn.configure(state="disabled")
         self.app.galaxy_next_btn.configure(state="disabled")
+        from edmrn.ext.location_fill import add_galaxy_tab_buttons
+        add_galaxy_tab_buttons(self.app)
     
     def create_bottom_buttons(self):
         parent = self.app.content_root if hasattr(self.app, 'content_root') else self.app.root

@@ -289,6 +289,8 @@ class SystemInfoSection:
         fetch_btn = ctk.CTkButton(name_row, text="🔍", command=self.fetch_callback, width=40, height=32)
         self.theme_manager.apply_button_theme(fetch_btn, "secondary")
         fetch_btn.grid(row=0, column=1, sticky="w", padx=(0, 10))
+        from edmrn.ext.location_fill import add_system_info_button
+        add_system_info_button(app, self)
 
         self.system_info_status = ctk.CTkLabel(self.parent, text="Enter a system name and click Fetch Data", text_color=colors['text'], font=ctk.CTkFont(size=11))
 

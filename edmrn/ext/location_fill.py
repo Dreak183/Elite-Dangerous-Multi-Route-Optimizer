@@ -213,3 +213,49 @@ def add_coords_button(app, master, entries: tuple, *, name_entry=None,
     button.grid(**grid)
     Tooltip(button, COORDS_TOOLTIP)
     return button
+
+
+def add_neutron_tab_buttons(app) -> None:
+    try:
+        SystemFieldFill(app, app.neutron_from_autocomplete, check_spansh=True)
+        SystemFieldFill(app, app.neutron_to_autocomplete, check_spansh=True)
+        add_coords_button(
+            app, app.nearest_find_btn.master,
+            (app.nearest_x_entry, app.nearest_y_entry, app.nearest_z_entry),
+            row=0, column=8, padx=(0, 8), pady=6)
+    except Exception:
+        logger.exception("Could not add the location buttons to the Neutron tab")
+
+
+def add_galaxy_tab_buttons(app) -> None:
+    try:
+        SystemFieldFill(app, app.galaxy_source_autocomplete, check_spansh=True)
+        SystemFieldFill(app, app.galaxy_dest_autocomplete, check_spansh=True)
+    except Exception:
+        logger.exception("Could not add the location buttons to the Galaxy tab")
+
+
+def add_custom_route_buttons(tab) -> None:
+    try:
+        for field in (tab.starting_entry, tab.ending_entry, tab.system_entry):
+            SystemFieldFill(tab.app, field, check_spansh=False)
+    except Exception:
+        logger.exception("Could not add the location buttons to the Custom Route tab")
+
+
+def add_coords_dialog_button(app, frame, name_entry, entries: tuple) -> None:
+    try:
+        add_coords_button(app, frame, entries, name_entry=name_entry,
+                          row=0, column=2, padx=(4, 0), pady=4)
+    except Exception:
+        logger.exception("Could not add the location button to the coordinates dialog")
+
+
+def add_system_info_button(app, section) -> None:
+    try:
+        if app is None:
+            return
+        SystemFieldFill(app, section.system_info_entry, check_spansh=False,
+                        after_fill=lambda _name: section.fetch_callback())
+    except Exception:
+        logger.exception("Could not add the location button to System Info")

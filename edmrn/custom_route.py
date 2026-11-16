@@ -631,6 +631,8 @@ class CustomRouteTab:
         )
         self.app.theme_manager.apply_button_theme(self.copy_btn, "secondary")
         self.copy_btn.pack(side="left")
+        from edmrn.ext.location_fill import add_custom_route_buttons
+        add_custom_route_buttons(self)
 
     def _detect_current_location(self):
         def detect():
@@ -711,6 +713,8 @@ class CustomRouteTab:
         z_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=4)
 
         frame.columnconfigure(1, weight=1)
+        from edmrn.ext.location_fill import add_coords_dialog_button
+        add_coords_dialog_button(self.app, frame, name_entry, (x_entry, y_entry, z_entry))
 
         def add():
             try:
