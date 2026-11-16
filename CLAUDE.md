@@ -48,6 +48,9 @@ Tests: pytest under `tests/` (upstream ships none).
 - **Crew data travels only as ADR-0005's signed event log.** No second sync path, no transport outside it.
 - **Tests never touch the real journal folder.** Upstream derives it from `~`; redirect
   `HOME`/`USERPROFILE` and pass explicit paths.
+- **The pytest suite in `.venv` is the verification.** Features and changes are not verified by
+  building the executable (PyInstaller); no build runs unless the commander asks for a release
+  (ruled 2026-11-17: a build costs time and tokens and adds nothing the tests do not cover).
 - **Secrets stay in `.env`** (git-ignored, read access denied in `.claude/settings.json`).
 - **Documentation is part of the change** — same commit (`docs/README.md`).
 - **Hand over early** (`docs/handover/protocol.md`).

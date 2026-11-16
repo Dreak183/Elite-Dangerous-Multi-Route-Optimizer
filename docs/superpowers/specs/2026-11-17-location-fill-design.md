@@ -16,7 +16,7 @@ note. Coordinate fields ("Find Nearest System", Custom Route "Add by Coords") mu
 although the journal holds the exact position.
 
 The commander also wants a first test version: EDMRN as it stands, without the crew relay, usable
-in-game and startable as a Windows program.
+in-game, started from the repository's Python environment (`../../how-to/run.md`).
 
 ## Requirements
 
@@ -108,10 +108,9 @@ in-game and startable as a Windows program.
 - T2. Live check: the Spansh check runs once against the real service for a known system (`Sol`)
   and for the unknown test system (`Blae Phoe XT-A e1459`, `../../how-to/run.md`), and the
   sentences match L4.
-- T3. Windows build: `edmrn.spec` builds a single-file executable with PyInstaller, and the
-  executable starts isolated. How to build it and what a tester checks lives in
-  `../../how-to/build.md`. The crew relay is out of scope: crew capture runs locally, sync stays off
-  without a group.
+- T3. No executable is built (ruled by the commander 2026-11-17: the pytest suite is the
+  verification, `../../../CLAUDE.md`). The crew relay is out of scope: crew capture runs locally,
+  sync stays off without a group.
 
 ## Non-goals
 

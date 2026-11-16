@@ -299,8 +299,7 @@ git commit -m "feat(location): location buttons in Neutron, Galaxy, Custom Route
 ### Task 5: First test version (orchestrator; needs screenshots and judgement)
 
 **Files:**
-- Create: `docs/how-to/build.md`
-- Modify: `docs/how-to/run.md` (live check: add the Spansh check), `docs/how-to/README.md` if it lists the how-tos
+- Modify: `docs/how-to/run.md` (live check: add the Spansh check)
 - Modify: only what the smoke check proves broken (layout of the new buttons)
 
 - [ ] **Step 1: Smoke run (spec T1).** Isolated home with a fake journal (`LoadGame`, then an
@@ -312,10 +311,7 @@ git commit -m "feat(location): location buttons in Neutron, Galaxy, Custom Route
 - [ ] **Step 2: Live check (spec T2)** of `check_plot_system` for `Sol` and `Blae Phoe XT-A e1459`;
   extend the live-check script in `docs/how-to/run.md` with these two lines and their expected
   output.
-- [ ] **Step 3: Windows build (spec T3).** `.venv/Scripts/python.exe -m PyInstaller edmrn.spec --noconfirm`;
-  start the executable isolated; the log holds no `Traceback`. Write `docs/how-to/build.md` (command,
-  output location, isolated start, what a tester checks in-game). Never stage the executable.
-- [ ] **Step 4: Commit** the docs and fixes with explicit paths.
+- [ ] **Step 3: Commit** the docs and fixes with explicit paths. No executable is built (spec T3).
 
 ### Task 6: Milestone sweep and handover (orchestrator)
 
