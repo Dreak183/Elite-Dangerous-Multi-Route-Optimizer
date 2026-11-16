@@ -1,8 +1,9 @@
-"""Location button for the route plotter's fields.
+"""Location buttons for the route plotter's fields.
 
-Implements docs/superpowers/specs/2026-11-17-location-fill-design.md, requirements L1-L6 (and L11
-for the layout): a `📍` button beside a system field fills it with the commander's current system
-from the journal; optionally Spansh is asked off the Tk thread whether it knows the system.
+Implements docs/superpowers/specs/2026-11-17-location-fill-design.md: system fields (L1-L6, L11), a
+`📍` button beside a field fills it with the commander's current system from the journal, optionally
+asking Spansh off the Tk thread whether it knows the system; coordinate fields (L7-L9); and the hook
+functions the upstream builders call (L3, L7).
 """
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from edmrn.ext.location import LocationState
-from edmrn.ext.start_check import StartCheck, check_plot_system
+from edmrn.ext.start_check import StartCheck, check_plot_system, failure_result
+from edmrn.ext.api import ApiFailure
 from edmrn.logger import get_logger
 
 logger = get_logger('LocationFill')
@@ -24,6 +26,8 @@ CHECKING = "Checking '{system}' at Spansh..."
 SYSTEM_TOOLTIP = "Fill in your current system from the journal"
 COORDS_TOOLTIP = "Fill in your current coordinates from the journal"
 BUTTON_TEXT = "📍"
+BUTTON_WIDTH = 28
+BUTTON_FONT_SIZE = 15
 
 CHECKING_COLOR = "gray60"
 KNOWN_COLOR = "#4CAF50"
@@ -48,6 +52,16 @@ def format_coord(value: float) -> str:
 
 def thread_runner(fn: Callable[[], None]) -> None:
     threading.Thread(target=fn, name="edmrn-location-check", daemon=True).start()
+
+
+def _make_button(app, master, command) -> ctk.CTkButton:
+    button = ctk.CTkButton(master, text=BUTTON_TEXT, width=BUTTON_WIDTH,
+                           font=ctk.CTkFont(size=BUTTON_FONT_SIZE), command=command)
+    try:
+        app.theme_manager.apply_button_theme(button, "secondary")
+    except Exception:
+        logger.debug("Could not theme the location button", exc_info=True)
+    return button
 
 
 class Tooltip:
@@ -113,13 +127,22 @@ class SystemFieldFill:
         field.entry.pack_forget()
         field.columnconfigure(0, weight=1)
         field.entry.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
-        self.button = ctk.CTkButton(field, text=BUTTON_TEXT, width=32, command=self.fill)
+        self.button = _make_button(app, field, self.fill)
         self.button.grid(row=0, column=1, padx=(2, 2), pady=2)
         Tooltip(self.button, SYSTEM_TOOLTIP)
         self.hint = ctk.CTkLabel(field, text="", wraplength=300, justify="left", anchor="w")
         self.hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
         self.hint.grid_remove()
         field.entry_var.trace_add("write", self._on_write)
+        field.bind("<Configure>", self._on_field_configure, add="+")
+
+    def _on_field_configure(self, event):
+        # customtkinter scales wraplength itself; event.width is in device pixels
+        wrap = max(80, int(event.width / self.field._get_widget_scaling()) - 8)
+        try:
+            self.hint.configure(wraplength=wrap)
+        except tk.TclError:
+            pass
 
     def _on_write(self, *_):
         if self._subject is not None and self.field.get() != self._subject:
@@ -158,8 +181,11 @@ class SystemFieldFill:
                 result = self._check(system, coords)
             except Exception:
                 logger.exception("Spansh check for %r failed", system)
-                return
-            self.app.root.after(0, self._apply, generation, system, result)
+                result = failure_result(system, ApiFailure("Spansh", "unexpected"))
+            try:
+                self.app.root.after(0, self._apply, generation, system, result)
+            except Exception:
+                logger.debug("Could not hand the Spansh result to Tk (shutting down?)", exc_info=True)
 
         self._runner(job)
 
@@ -168,7 +194,8 @@ class SystemFieldFill:
             if generation != self._generation or self.field.get().strip() != system:
                 return
             if result.name != system:
-                self._subject = result.name   # before the write, so the write keeps the hint
+                self._subject = result.name   # the write's trace hides the hint unless the text is the subject;
+                                              # _show_hint right after shows the result
                 self.field.set(result.name)
             self._show_hint(result.hint, KNOWN_COLOR if result.known else WARNING_COLOR, result.name)
         except tk.TclError:
@@ -198,18 +225,21 @@ def fill_coordinates(app, entries: tuple, name_entry=None, *,
     if state.coords is None:
         warn(NO_COORDINATES.format(system=state.system))
         return False
-    for entry, value in zip(entries, state.coords):
-        _set_entry(entry, format_coord(value))
-    if name_entry is not None:
-        _set_entry(name_entry, state.system)
+    try:
+        for entry, value in zip(entries, state.coords):
+            _set_entry(entry, format_coord(value))
+        if name_entry is not None:
+            _set_entry(name_entry, state.system)
+    except tk.TclError:
+        logger.debug("A coordinate entry was destroyed while filling", exc_info=True)
+        return False
     return True
 
 
 def add_coords_button(app, master, entries: tuple, *, name_entry=None,
                       warn: Optional[Callable[[str], None]] = None, **grid) -> ctk.CTkButton:
-    button = ctk.CTkButton(
-        master, text=BUTTON_TEXT, width=32,
-        command=lambda: fill_coordinates(app, entries, name_entry, warn=warn))
+    button = _make_button(
+        app, master, lambda: fill_coordinates(app, entries, name_entry, warn=warn))
     button.grid(**grid)
     Tooltip(button, COORDS_TOOLTIP)
     return button
@@ -252,7 +282,7 @@ def add_galaxy_tab_buttons(app) -> None:
 
 def add_custom_route_buttons(tab) -> None:
     try:
-        for field in (tab.starting_entry, tab.ending_entry, tab.system_entry):
+        for field in (tab.starting_entry, tab.system_entry):
             SystemFieldFill(tab.app, field, check_spansh=False)
     except Exception:
         logger.exception("Could not add the location buttons to the Custom Route tab")

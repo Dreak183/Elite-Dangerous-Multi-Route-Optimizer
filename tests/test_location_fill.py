@@ -1,16 +1,19 @@
-"""Location button for system fields (docs/superpowers/specs/2026-11-17-location-fill-design.md, L1-L6, L11)."""
+"""Location buttons (docs/superpowers/specs/2026-11-17-location-fill-design.md).
+
+Covers system fields (L1-L6, L11), coordinate fields (L7-L9) and the hook functions (L3, L7).
+"""
 import tkinter as tk
 from types import SimpleNamespace
 
 import pytest
 
-from edmrn.ext.location import LocationState
-from edmrn.ext.location_fill import (
-    BUTTON_TEXT, CHECKING, NO_COORDINATES, UNKNOWN_LOCATION, SystemFieldFill, add_coords_button,
-    current_location, fill_coordinates, format_coord)
-from edmrn.ext.start_check import StartCheck
-
 ctk = pytest.importorskip("customtkinter")
+
+from edmrn.ext.location import LocationState  # noqa: E402
+from edmrn.ext.location_fill import (  # noqa: E402
+    BUTTON_TEXT, BUTTON_WIDTH, CHECKING, NO_COORDINATES, UNKNOWN_LOCATION, SystemFieldFill,
+    add_coords_button, current_location, fill_coordinates, format_coord)
+from edmrn.ext.start_check import StartCheck  # noqa: E402
 
 SYSTEM = "Blae Phoe XT-A e1459"
 COORDS = (768.375, -565.90625, 14325.34375)
@@ -108,6 +111,56 @@ def test_layout(rig):
     assert r.fill.button.cget("text") == BUTTON_TEXT == "📍"
     assert not r.visible
     assert r.fill.hint.cget("wraplength") == 300
+    assert BUTTON_WIDTH == 28
+    assert r.fill.button.cget("width") == 28
+    assert r.fill.button.cget("font").cget("size") == 15
+
+
+class FakeThemeManager:
+    def __init__(self):
+        self.calls = []
+
+    def apply_button_theme(self, button, button_type):
+        self.calls.append((button, button_type))
+
+
+def test_hint_wraps_to_field_width(rig):
+    r = rig()
+    scaling = r.field._get_widget_scaling()
+    r.fill._on_field_configure(SimpleNamespace(width=240))
+    assert r.fill.hint.cget("wraplength") == max(80, int(240 / scaling) - 8)
+    r.fill._on_field_configure(SimpleNamespace(width=50))
+    assert r.fill.hint.cget("wraplength") == 80
+
+
+def test_system_button_follows_theme(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    field = AutocompleteEntry(_tk_root)
+    field.pack()
+    theme = FakeThemeManager()
+    app = SimpleNamespace(root=ImmediateRoot(), theme_manager=theme,
+                          location_tracker=SimpleNamespace(state=LocationState()))
+    try:
+        fill = SystemFieldFill(app, field, check_spansh=False)
+        assert theme.calls == [(fill.button, "secondary")]
+    finally:
+        field.destroy()
+
+
+def test_theme_failure_is_ignored(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    field = AutocompleteEntry(_tk_root)
+    field.pack()
+
+    class Broken:
+        def apply_button_theme(self, *a):
+            raise RuntimeError("boom")
+    app = SimpleNamespace(root=ImmediateRoot(), theme_manager=Broken(),
+                          location_tracker=SimpleNamespace(state=LocationState()))
+    try:
+        SystemFieldFill(app, field, check_spansh=False)
+    finally:
+        field.destroy()
 
 
 def test_unknown_location(rig):
@@ -195,11 +248,33 @@ def test_result_after_destroy_is_ignored(rig):
     r.jobs[0]()
 
 
-def test_job_exception_does_not_escape(rig):
+def test_job_exception_shows_a_sentence(rig):
     r = rig(results=[])   # check raises IndexError
     r.fill.fill()
     r.jobs[0]()
-    assert r.text == CHECKING.format(system=SYSTEM)
+    assert r.text == f"⚠ Could not check '{SYSTEM}' at Spansh: Unexpected error talking to Spansh."
+    assert r.color == WARN_COLOR and r.visible
+
+
+def test_fill_hides_previous_hint_without_check(rig):
+    r = rig(state=LocationState(), check_spansh=False)
+    r.field.set(SYSTEM)
+    r.fill.fill()
+    assert r.text == UNKNOWN_LOCATION and r.visible
+    r.app.location_tracker.state = LocationState(system=SYSTEM, coords=COORDS)
+    r.fill.fill()
+    assert not r.visible
+
+
+def test_scheduling_after_shutdown_is_ignored(rig):
+    r = rig(results=[StartCheck(SYSTEM, "✓ known", True)])
+
+    class DeadRoot:
+        def after(self, *a):
+            raise RuntimeError("main thread is not in main loop")
+    r.app.root = DeadRoot()
+    r.fill.fill()
+    r.jobs[0]()
 
 
 def _coord_app(state=None):
@@ -248,6 +323,47 @@ def test_coordinates_without_coords(_tk_root):
     assert warned == ["Current coordinates unknown - the journal has no position for 'Docked Only' yet."]
     assert warned == [NO_COORDINATES.format(system="Docked Only")]
     assert [e.get() for e in entries] == ["", "", ""]
+    frame.destroy()
+
+
+def test_coordinates_go_through_format_coord(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    app = _coord_app(LocationState(system=SYSTEM, coords=(1.0, 0.123456789, -0.000001)))
+    assert fill_coordinates(app, entries) is True
+    assert [e.get() for e in entries] == ["1", "0.12346", "0"]
+    frame.destroy()
+
+
+def test_coordinates_destroyed_entry_returns_false(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    entries[1].destroy()
+    assert fill_coordinates(_coord_app(), entries) is False
+    frame.destroy()
+
+
+def test_coordinates_default_warning(_tk_root, monkeypatch):
+    import edmrn.gui
+    shown = []
+    monkeypatch.setattr(edmrn.gui, "WarningDialog", lambda *a: shown.append(a))
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    app = _coord_app(LocationState())
+    assert fill_coordinates(app, entries) is False
+    assert shown == [(app, "Current Location", UNKNOWN_LOCATION)]
+    frame.destroy()
+
+
+def test_coords_button_follows_theme(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    theme = FakeThemeManager()
+    app = _coord_app()
+    app.theme_manager = theme
+    button = add_coords_button(app, frame, entries, row=0, column=0)
+    assert theme.calls == [(button, "secondary")]
+    assert button.cget("width") == 28
     frame.destroy()
 
 

@@ -30,7 +30,7 @@ def _unknown(system: str, reason: str) -> StartCheck:
     return StartCheck(system, f"⚠ '{system}' is not known to Spansh, and {reason}.", False)
 
 
-def _failed(system: str, failure: ApiFailure) -> StartCheck:
+def failure_result(system: str, failure: ApiFailure) -> StartCheck:
     return StartCheck(system, f"⚠ Could not check '{system}' at Spansh: {failure}", False)
 
 
@@ -52,7 +52,7 @@ def check_plot_system(system: str, coords: Optional[tuple], *, call=call) -> Sta
             f"⚠ '{system}' is not known to Spansh - using the nearest known system "
             f"'{nearest['name']}' ({nearest['distance']:.1f} ly away).", False)
     except ApiError as e:
-        return _failed(system, e.failure)
+        return failure_result(system, e.failure)
     except Exception:
         logger.exception("Spansh check for %r failed unexpectedly", system)
-        return _failed(system, ApiFailure("Spansh", "unexpected"))
+        return failure_result(system, ApiFailure("Spansh", "unexpected"))

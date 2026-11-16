@@ -1,12 +1,14 @@
 """Hook functions and hook lines for the location buttons (spec L3, L7, L10)."""
 import inspect
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from edmrn.ext.location import LocationState
 from edmrn.ext.location_fill import (
-    BUTTON_TEXT, add_coords_dialog_button, add_neutron_tab_buttons, add_system_info_button)
+    BUTTON_TEXT, add_coords_dialog_button, add_custom_route_buttons, add_galaxy_tab_buttons,
+    add_neutron_tab_buttons, add_system_info_button)
 
 ctk = pytest.importorskip("customtkinter")
 
@@ -149,5 +151,51 @@ def test_coords_dialog_hook_names_row(_tk_root):
         frm.destroy()
 
 
-def test_hook_failure_does_not_raise():
-    assert add_neutron_tab_buttons(SimpleNamespace()) is None
+def test_hook_failure_does_not_raise(caplog):
+    with caplog.at_level(logging.ERROR):
+        assert add_neutron_tab_buttons(SimpleNamespace()) is None
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors and errors[0].exc_info is not None
+
+
+def test_custom_route_has_two_buttons(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    frm = ctk.CTkFrame(_tk_root)
+    frm.pack()
+    tab = SimpleNamespace(app=_app(), starting_entry=AutocompleteEntry(frm),
+                          ending_entry=AutocompleteEntry(frm), system_entry=AutocompleteEntry(frm))
+    try:
+        add_custom_route_buttons(tab)
+        assert len(_buttons(tab.starting_entry)) == 1
+        assert len(_buttons(tab.system_entry)) == 1
+        assert _buttons(tab.ending_entry) == []
+    finally:
+        frm.destroy()
+
+
+class _Recorder:
+    calls = []
+
+    def __init__(self, app, field, *, check_spansh, **kw):
+        _Recorder.calls.append((field, check_spansh))
+
+
+def test_spansh_check_wiring(monkeypatch):
+    from edmrn.ext import location_fill
+    monkeypatch.setattr(location_fill, "SystemFieldFill", _Recorder)
+    monkeypatch.setattr(location_fill, "add_coords_button", lambda *a, **k: None)
+    monkeypatch.setattr(location_fill, "_size_scroll_column", lambda w: None)
+    f = {n: object() for n in ("nf", "nt", "gs", "gd", "cs", "ce", "cy", "si")}
+    app = SimpleNamespace(
+        neutron_from_autocomplete=f["nf"], neutron_to_autocomplete=f["nt"],
+        galaxy_source_autocomplete=f["gs"], galaxy_dest_autocomplete=f["gd"],
+        nearest_find_btn=SimpleNamespace(master=None), nearest_x_entry=None,
+        nearest_y_entry=None, nearest_z_entry=None)
+    _Recorder.calls = []
+    add_neutron_tab_buttons(app)
+    add_galaxy_tab_buttons(app)
+    add_custom_route_buttons(SimpleNamespace(app=app, starting_entry=f["cs"], ending_entry=f["ce"],
+                                             system_entry=f["cy"]))
+    add_system_info_button(app, SimpleNamespace(system_info_entry=f["si"], fetch_callback=None))
+    assert _Recorder.calls == [(f["nf"], True), (f["nt"], True), (f["gs"], True), (f["gd"], True),
+                               (f["cs"], False), (f["cy"], False), (f["si"], False)]
