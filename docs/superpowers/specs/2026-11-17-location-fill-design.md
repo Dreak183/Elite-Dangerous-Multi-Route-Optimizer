@@ -39,12 +39,14 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
   |---|---|---|
   | Neutron Highway | From System, To System | Spansh check (L4) |
   | Galaxy Plotter | Source System, Destination System | Spansh check (L4) |
-  | Custom Route | Starting System, Ending System, Add System | nothing more; Set or Add stays the commander's click |
+  | Custom Route | Starting System, Add System | nothing more; Set or Add stays the commander's click |
   | System Info | the system name field | fetches the system's data, as the 🔍 button does |
 
   Route Optimization's "Starting System" gets no button: the optimizer accepts only a system of the
   loaded CSV, and its "🎯 Find Nearest" already picks the CSV system nearest to the current
-  position. (Ruling.)
+  position. Custom Route's "Ending System" gets none either: its top row has room for two buttons at
+  the default window size, a third cuts off "Add by Coords", and a route rarely ends where the
+  commander is. (Rulings.)
 - L4. **Spansh check** (plotter fields). The button writes the current system name into the field at
   once, shows `Checking '<system>' at Spansh...` under it, and asks Spansh in the background:
   1. Spansh's system search knows the name (exact, case-insensitive match, the same check as

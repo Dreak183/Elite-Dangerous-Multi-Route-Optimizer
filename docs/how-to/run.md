@@ -94,35 +94,45 @@ EDSM and EDAstro still answer in the shapes `edmrn/ext/` expects. Run it after c
 `edmrn/ext/api.py`, `spansh.py` or `system_info.py`, and after an upstream merge that touches a
 call site.
 
-The test system is `Blae Phoe XT-A e1459` (768.375, -565.90625, 14325.34375). Spansh does not know
-it and EDSM does (`../../../knowledge/bulk-data.md`, "Spansh API").
+A start Spansh does not know is simulated with a name no service knows, `Xqzzy Nonsense 404`, at the
+coordinates of `Blae Phoe XT-A e1459` (768.375, -565.90625, 14325.34375), the way the journal hands
+EDMRN the coordinates of an undiscovered system. Real systems become known once a player reports
+them (`../../../knowledge/bulk-data.md`, "Spansh API"), so a real unknown system does not stay
+unknown.
 
 Save this script outside the repository, for example as `$H/live_check.py`:
 
 ```python
 import os, sys
+sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.getcwd())
 from types import SimpleNamespace
 from edmrn.ext.api import lookup_system, nearest_known_system
+from edmrn.ext.start_check import check_plot_system
 from edmrn.ext.system_info import fetch_system_data
 from edmrn.custom_route import CustomRouteManager
 from edmrn.neutron import NeutronRouter
 from edmrn.galaxy_plotter import GalaxyPlotter
 
 BLAE = "Blae Phoe XT-A e1459"
-for name in (BLAE, "Sol", "Xqzzy Nonsense 404"):
+HERE = (768.375, -565.90625, 14325.34375)
+UNKNOWN = "Xqzzy Nonsense 404"
+for name in (BLAE, "Sol", UNKNOWN):
     r = lookup_system(name)
     print("lookup", name, "->", r.coords, r.source, r.message)
 print("nearest 0,0,0 ->", nearest_known_system(0, 0, 0))
+for name, coords in (("Sol", (0.0, 0.0, 0.0)), (UNKNOWN, HERE), (UNKNOWN, None)):
+    c = check_plot_system(name, coords)
+    print("check", name, coords, "->", c.name, c.known, c.hint)
 mgr = CustomRouteManager(SimpleNamespace(journal_monitor=None))
 print("custom add", BLAE, "->", mgr.add_system(BLAE), mgr.systems[-1] if mgr.systems else mgr.lookup_errors)
-print("custom add nonsense ->", mgr.add_system("Xqzzy Nonsense 404"), mgr.lookup_errors)
+print("custom add nonsense ->", mgr.add_system(UNKNOWN), mgr.lookup_errors)
 sol = fetch_system_data("Sol")
 print("system info Sol ->", sol.get("error"), sol.get("name"), len(sol.get("bodies", [])), "bodies", sol.get("notes"))
-print("system info nonsense ->", fetch_system_data("Xqzzy Nonsense 404"))
-n = NeutronRouter().calculate_route(BLAE, "Sol", 50.0, progress_callback=lambda m: print("  neutron:", m))
+print("system info nonsense ->", fetch_system_data(UNKNOWN))
+n = NeutronRouter().calculate_route(UNKNOWN, "Sol", 50.0, progress_callback=lambda m: print("  neutron:", m), start_coords=HERE)
 print("neutron ->", n.get("success"), n.get("error"), n.get("note"), len(n.get("waypoints", [])), "waypoints")
-g = GalaxyPlotter().plot_route(BLAE, "Sol", ship_build="", range_ly=50.0, progress_callback=lambda m: print("  galaxy:", m.replace("\n", " | ")))
+g = GalaxyPlotter().plot_route(UNKNOWN, "Sol", ship_build="", range_ly=50.0, progress_callback=lambda m: print("  galaxy:", m.replace("\n", " | ")), start_coords=HERE)
 print("galaxy ->", g.get("error"), g.get("note"), len(g.get("result", {}).get("system_jumps", [])), "jumps")
 os._exit(0)
 ```
@@ -135,19 +145,24 @@ H="$(mktemp -d)"
 HOME="$H" USERPROFILE="$H" APPDATA="$H" LOCALAPPDATA="$H" timeout 900 .venv/Scripts/python.exe -I -u "$H/live_check.py"
 ```
 
-Expected (2026-10-11; waypoint and jump counts vary with Spansh's data):
-- `lookup Blae Phoe XT-A e1459 -> (768.375, -565.90625, 14325.34375) EDSM None`.
+Expected (2026-11-17; waypoint and jump counts vary with Spansh's data):
+- `lookup Blae Phoe XT-A e1459 -> (768.375, -565.90625, 14325.34375) Spansh None`.
 - `lookup Sol -> (0.0, 0.0, 0.0) Spansh None`.
 - The nonsense name gives
   `None None System 'Xqzzy Nonsense 404' was not found at Spansh or EDSM. Check the spelling.`
 - `nearest 0,0,0 -> ('Sol', 0.0)`.
-- Custom Route adds Blae Phoe with the EDSM coordinates; the nonsense name gives `False` and the
-  same sentence.
+- The location check: `Sol ... -> Sol True ✓ 'Sol' is known to Spansh.`; the nonsense name at
+  Blae Phoe's coordinates `-> Blae Phoe XT-A e1459 False ⚠ 'Xqzzy Nonsense 404' is not known to
+  Spansh - using the nearest known system 'Blae Phoe XT-A e1459' (0.0 ly away).`; without
+  coordinates `-> Xqzzy Nonsense 404 False ⚠ 'Xqzzy Nonsense 404' is not known to Spansh, and the
+  journal has no coordinates for it.`
+- Custom Route adds Blae Phoe with its coordinates; the nonsense name gives `False` and the
+  lookup's not-found sentence.
 - System Info for Sol: no error and about 40 bodies. For the nonsense name:
   `{'error': "System 'Xqzzy Nonsense 404' is not known to EDSM."}`.
 - Neutron and Galaxy each succeed with the note
-  `Start system 'Blae Phoe XT-A e1459' is not known to Spansh yet - plotted from nearest known
-  system 'Blae Phoe SS-B d751' (10.6 ly away).`.
+  `Start system 'Xqzzy Nonsense 404' is not known to Spansh yet - plotted from nearest known
+  system 'Blae Phoe XT-A e1459' (0.0 ly away).`.
 
 A line that reads `... is overloaded (HTTP 502). Try again in a minute.` or `... did not answer
 within ...` is Spansh under load, not a defect: rerun later. Any `Traceback`, any HTML in a
@@ -157,8 +172,12 @@ Then start the app isolated (section "Start it isolated" above) and check its ou
 under `$H/EDMRN_Route_Data/logs/` for `Traceback`.
 
 If someone can look at the window, also check by hand:
-- **Neutron and Galaxy:** plot from `Blae Phoe XT-A e1459` to `Sol`; both show the substitution
-  note. While Galaxy runs, its button is disabled.
+- **Location buttons:** with a journal that places the commander in a system, `📍` fills Neutron
+  From/To, Galaxy Source/Destination (each with a Spansh hint under the field), Custom Route
+  Starting System and Add System, System Info (and fetches), the Find Nearest X/Y/Z row and the
+  Custom Route "Add by Coords" dialog.
+- **Neutron and Galaxy:** plot from `Blae Phoe XT-A e1459` to `Sol`. While Galaxy runs, its button
+  is disabled.
 - **Typed unknown start:** Neutron from `Xqzzy Nonsense 404` shows
   `Spansh rejected the request: Could not find starting system`.
 - **Custom Route:** add `Blae Phoe XT-A e1459`.
