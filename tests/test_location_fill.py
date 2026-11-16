@@ -1,11 +1,13 @@
 """Location button for system fields (docs/superpowers/specs/2026-11-17-location-fill-design.md, L1-L6, L11)."""
+import tkinter as tk
 from types import SimpleNamespace
 
 import pytest
 
 from edmrn.ext.location import LocationState
 from edmrn.ext.location_fill import (
-    BUTTON_TEXT, CHECKING, UNKNOWN_LOCATION, SystemFieldFill, current_location, format_coord)
+    BUTTON_TEXT, CHECKING, NO_COORDINATES, UNKNOWN_LOCATION, SystemFieldFill, add_coords_button,
+    current_location, fill_coordinates, format_coord)
 from edmrn.ext.start_check import StartCheck
 
 ctk = pytest.importorskip("customtkinter")
@@ -198,3 +200,64 @@ def test_job_exception_does_not_escape(rig):
     r.fill.fill()
     r.jobs[0]()
     assert r.text == CHECKING.format(system=SYSTEM)
+
+
+def _coord_app(state=None):
+    state = LocationState(system=SYSTEM, coords=COORDS) if state is None else state
+    return SimpleNamespace(root=ImmediateRoot(), location_tracker=SimpleNamespace(state=state))
+
+
+def test_coordinates_fill(_tk_root):
+    frame = ctk.CTkFrame(_tk_root)
+    entries = tuple(ctk.CTkEntry(frame) for _ in range(3))
+    assert fill_coordinates(_coord_app(), entries) is True
+    assert [e.get() for e in entries] == ["768.375", "-565.90625", "14325.34375"]
+    frame.destroy()
+
+
+def test_coordinates_replace_text(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    name = tk.Entry(frame)
+    for e in entries:
+        e.insert(0, "1")
+    name.insert(0, "old")
+    assert fill_coordinates(_coord_app(), entries, name) is True
+    assert [e.get() for e in entries] == ["768.375", "-565.90625", "14325.34375"]
+    assert name.get() == SYSTEM
+    frame.destroy()
+
+
+def test_coordinates_without_location(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    entries[0].insert(0, "5")
+    warned = []
+    assert fill_coordinates(_coord_app(LocationState()), entries, warn=warned.append) is False
+    assert warned == [UNKNOWN_LOCATION]
+    assert [e.get() for e in entries] == ["5", "", ""]
+    frame.destroy()
+
+
+def test_coordinates_without_coords(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    warned = []
+    app = _coord_app(LocationState(system="Docked Only", coords=None))
+    assert fill_coordinates(app, entries, warn=warned.append) is False
+    assert warned == ["Current coordinates unknown - the journal has no position for 'Docked Only' yet."]
+    assert warned == [NO_COORDINATES.format(system="Docked Only")]
+    assert [e.get() for e in entries] == ["", "", ""]
+    frame.destroy()
+
+
+def test_add_coords_button(_tk_root):
+    frame = tk.Frame(_tk_root)
+    entries = tuple(tk.Entry(frame) for _ in range(3))
+    button = add_coords_button(_coord_app(), frame, entries, warn=lambda m: None, row=0, column=8)
+    info = button.grid_info()
+    assert info["row"] == 0 and info["column"] == 8
+    assert button.cget("text") == "📍"
+    button.invoke()
+    assert [e.get() for e in entries] == ["768.375", "-565.90625", "14325.34375"]
+    frame.destroy()

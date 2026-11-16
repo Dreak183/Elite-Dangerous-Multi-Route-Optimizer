@@ -173,3 +173,43 @@ class SystemFieldFill:
             self._show_hint(result.hint, KNOWN_COLOR if result.known else WARNING_COLOR, result.name)
         except tk.TclError:
             pass
+
+
+def _default_warn(app) -> Callable[[str], None]:
+    def warn(message: str) -> None:
+        from edmrn.gui import WarningDialog   # lazy: importing the GUI module is heavy
+        WarningDialog(app, "Current Location", message)
+    return warn
+
+
+def _set_entry(entry, text: str) -> None:
+    entry.delete(0, "end")
+    entry.insert(0, text)
+
+
+def fill_coordinates(app, entries: tuple, name_entry=None, *,
+                     warn: Optional[Callable[[str], None]] = None) -> bool:
+    """Write the current X, Y, Z (and system name) into the entries; False with a warning if unknown."""
+    warn = warn or _default_warn(app)
+    state = current_location(app)
+    if state is None:
+        warn(UNKNOWN_LOCATION)
+        return False
+    if state.coords is None:
+        warn(NO_COORDINATES.format(system=state.system))
+        return False
+    for entry, value in zip(entries, state.coords):
+        _set_entry(entry, format_coord(value))
+    if name_entry is not None:
+        _set_entry(name_entry, state.system)
+    return True
+
+
+def add_coords_button(app, master, entries: tuple, *, name_entry=None,
+                      warn: Optional[Callable[[str], None]] = None, **grid) -> ctk.CTkButton:
+    button = ctk.CTkButton(
+        master, text=BUTTON_TEXT, width=32,
+        command=lambda: fill_coordinates(app, entries, name_entry, warn=warn))
+    button.grid(**grid)
+    Tooltip(button, COORDS_TOOLTIP)
+    return button
