@@ -31,6 +31,9 @@ Reading notes for the implementer:
   supercharged-start correction.
 
 - **Layout today**: two columns (weights 3 : 2) inside one frame (`ui_components.py:229-232`).
+  The left column scrolls vertically, so "Find Nearest System" and the statistics stay reachable
+  at the default window size (`screenshots/03-neutron-highway.png` predates this and shows them
+  clipped).
 
 ```
 +-------------------------------------------------+-------------------------+
@@ -82,6 +85,11 @@ Reading notes for the implementer:
 | NEU-26 | `Neutron Systems:` | label | Heading of the list. | always | ui_components.py:400 |
 | NEU-27 | (list) | scrollable frame of one label per waypoint | The route, see "Data shown". Rows are not clickable in effect (cursor `hand2`, no handler). | always | ui_components.py:403-411; neutron_manager.py:274-323 |
 | NEU-28 | `No neutron route calculated` | label inside NEU-27 | Empty state of the list. Only appears after `update_neutron_systems_list` ran with no route; the list is empty (blank) before that. | no route and list refreshed | neutron_manager.py:284-291 |
+| NEU-29 | `📍`, tooltip `Fill in your current system from the journal` | button (width 28, inside NEU-03 at its right end) | Writes the current system (location tracker) into NEU-03, then checks it at Spansh in the background; an unknown system is replaced by Spansh's nearest known system (location fill spec L4). Without a known location: NEU-30 shows `Current system unknown - no location in the journal yet.` | always | location_fill.py (`add_neutron_tab_buttons`, `SystemFieldFill`) |
+| NEU-30 | `Checking '<system>' at Spansh...`, then `✓ '<system>' is known to Spansh.` (green) or a `⚠ ...` sentence (orange) | label under NEU-03, wraps to the field width | Result of NEU-29. Hidden while empty; disappears as soon as NEU-03's text changes away from the system it speaks about. | after NEU-29 | location_fill.py |
+| NEU-31 | `📍` | button inside NEU-05 | As NEU-29, for the destination. | always | location_fill.py |
+| NEU-32 | as NEU-30 | label under NEU-05 | Result of NEU-31. | after NEU-31 | location_fill.py |
+| NEU-33 | `📍`, tooltip `Fill in your current coordinates from the journal` | button right of NEU-22 | Writes the current system's coordinates into NEU-19..21 (at most five decimals). Without a location or coordinates: warning dialog `Current Location`. | always | location_fill.py (`add_coords_button`) |
 
 Saved routes dialog (modal-like `CTkToplevel`, 640x420, single instance; reopening lifts the
 existing one) `neutron_resume.py:266-335`:
@@ -335,6 +343,10 @@ commander is not on the saved route; `neutron_resume.py:228-254`):
 | GAL-39 | `Console` | label | Heading of the console. | always | ui_components.py:810 |
 | GAL-40 | initial text (see States) | read-only textbox (height 140, wrap word) | Instructions, progress lines, route summary, notes and errors. | always | ui_components.py:813-816 |
 | GAL-41 | `Show full log` / `Hide log` | button | Toggles the console height between 140 and 320 px. | always | ui_components.py:818-839 |
+| GAL-42 | `📍` | button inside GAL-04 | As NEU-29, for the source. | always | location_fill.py (`add_galaxy_tab_buttons`) |
+| GAL-43 | as NEU-30 | label under GAL-04 | Result of GAL-42. | after GAL-42 | location_fill.py |
+| GAL-44 | `📍` | button inside GAL-07 | As NEU-29, for the destination. | always | location_fill.py |
+| GAL-45 | as NEU-30 | label under GAL-07 | Result of GAL-44. | after GAL-44 | location_fill.py |
 
 ### Inputs and validation
 
@@ -507,6 +519,7 @@ History:   read-only text or "No System History data."
 | SYS-30 | inner tab `System History` | tab | GMP text, see Data shown. Rebuilt on each fetch. | always | :300, 774-853 |
 | SYS-31 | `No System History data.` | label | Empty state of SYS-30. | no GMP text | :794, 809 |
 | SYS-32 | (read-only text, Consolas 14, wrap word) | textbox | GMP entry text, see Data shown. | GMP text present | :798-806 |
+| SYS-33 | `📍`, tooltip `Fill in your current system from the journal` | button inside SYS-01 | Writes the current system into SYS-01 and fetches it, as SYS-02 does. No Spansh check. | always | location_fill.py (`add_system_info_button`) |
 
 The tksheet tables also enable cell editing, cut/paste/delete/undo, row and column drag and
 column resize (`edmrn_sheet.py:41-60`); edits are cosmetic and lost on refresh.

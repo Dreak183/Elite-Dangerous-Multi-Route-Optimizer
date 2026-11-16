@@ -69,7 +69,8 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
   Ruling: the field shows the substituted system instead of keeping the current one and leaving the
   substitution to the plot. The commander sees before plotting what the route starts from, and the
   plot does not first fail with 400. Typed names keep the plot-time fallback unchanged.
-- L5. The hint is a one-line label directly under the field, hidden while empty. It disappears as soon
+- L5. The hint is a label directly under the field that wraps to the field's width, hidden while
+  empty. It disappears as soon
   as the field's text is no longer the name the hint speaks about (typing, a suggestion, Reverse, a
   resumed route, the substitution note after a plot). A check result arrives only if no later click
   on the same button started a newer one and the field still holds the name that was checked;

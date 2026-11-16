@@ -587,6 +587,8 @@ Starting System: [auto-detected    ][Set] Ending System: [Optional destination][
 | CR-26 | `No route` / `<i>/<n> - <system>` | label | Current waypoint | always | custom_route.py:614-619, 1032-1036 |
 | CR-27 | `Next >` | button | Moves the current waypoint forward one | disabled at the last index | custom_route.py:621-626, 824-831, 1047-1049 |
 | CR-28 | `Copy System` | button | Copies the current waypoint name to the clipboard (`pyperclip`, else Tk clipboard); logs `Copied system: <name>` | route has a current waypoint | custom_route.py:628-633, 833-853 |
+| CR-29 | `📍`, tooltip `Fill in your current system from the journal` | button inside CR-02 | Writes the current system into CR-02; Set stays a separate click. Without a known location a hint under the field reads `Current system unknown - no location in the journal yet.` CR-05 has no such button (the row has no room at the default width) | always | location_fill.py (`add_custom_route_buttons`) |
+| CR-30 | `📍` | button inside CR-08 | As CR-29, for the system to add; Add stays a separate click (the current system then gets its journal coordinates, also when no service knows it) | always | location_fill.py |
 
 Add by Coordinates dialog (CR-D; plain Tk window `Add System by Coordinates`, 350x200, modal):
 
@@ -595,6 +597,7 @@ Add by Coordinates dialog (CR-D; plain Tk window `Add System by Coordinates`, 35
 | CR-D1 | `System Name:` | entry | Name | custom_route.py:697-699 |
 | CR-D2 | `X:` / `Y:` / `Z:` | three entries | Coordinates in light-years, parsed as float | custom_route.py:701-711 |
 | CR-D3 | `Add` | button | Adds the system without any lookup and closes; non-numeric input: WarningDialog `Invalid Input` / `Please enter valid numeric coordinates.`; empty name: nothing happens (dialog stays) | custom_route.py:715-729 |
+| CR-D4 | `📍`, tooltip `Fill in your current coordinates from the journal` | button right of CR-D1 | Writes the current system's name and coordinates into CR-D1 and CR-D2; without a location or coordinates: WarningDialog `Current Location` | location_fill.py (`add_coords_dialog_button`) |
 
 Autocomplete (AC, used by CR-02, CR-05, CR-08, and the Neutron/Galaxy tabs): see section 9.
 

@@ -61,8 +61,6 @@ Facts, not taste; details and sources in the reference files.
 - **Features are invisible.** The whole crew function is reached through one button on the last
   card of the last tab (`screenshots/08-settings.png`, `09-crew-dialog.png`). "Saved routes" is a
   button without any hint of how many routes are saved.
-- **Content is clipped at the default window size** (1196×730 logical px): the "Find Nearest
-  System" row in Neutron Highway is cut off at the bottom (`screenshots/03-neutron-highway.png`).
 - **Eight top-level tabs mix three kinds of things**: four ways to make a route, one way to follow
   it, one lookup, and two utility pages (Log, Settings).
 - **The same function exists several times** with separate controls and separate state: range
