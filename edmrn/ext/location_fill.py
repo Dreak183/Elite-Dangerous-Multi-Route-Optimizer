@@ -214,6 +214,20 @@ def add_coords_button(app, master, entries: tuple, *, name_entry=None,
     Tooltip(button, COORDS_TOOLTIP)
     return button
 
+def _size_scroll_column(widget) -> None:
+    """Give the scrollable column the width of its content.
+
+    A CTkScrollableFrame requests its canvas width (default 200), not its content's, which would
+    narrow the column the grid weights gave upstream's layout (spec L11).
+    """
+    column = widget.master
+    while column is not None and not isinstance(column, ctk.CTkScrollableFrame):
+        column = getattr(column, "master", None)
+    if column is None:
+        return
+    column.update_idletasks()
+    column.configure(width=column.winfo_reqwidth() / column._get_widget_scaling())
+
 
 def add_neutron_tab_buttons(app) -> None:
     try:
@@ -223,6 +237,7 @@ def add_neutron_tab_buttons(app) -> None:
             app, app.nearest_find_btn.master,
             (app.nearest_x_entry, app.nearest_y_entry, app.nearest_z_entry),
             row=0, column=8, padx=(0, 8), pady=6)
+        _size_scroll_column(app.nearest_find_btn)
     except Exception:
         logger.exception("Could not add the location buttons to the Neutron tab")
 

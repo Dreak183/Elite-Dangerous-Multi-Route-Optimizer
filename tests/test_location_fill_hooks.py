@@ -100,8 +100,39 @@ def test_system_info_hook_fetches(_tk_root):
         field.destroy()
 
 
-def test_system_info_hook_without_app_does_nothing():
-    assert add_system_info_button(None, SimpleNamespace()) is None
+def test_system_info_hook_without_app_does_nothing(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    field = AutocompleteEntry(_tk_root)
+    field.pack()
+    section = SimpleNamespace(system_info_entry=field, fetch_callback=lambda: None)
+    try:
+        assert add_system_info_button(None, section) is None
+        assert _buttons(field) == []
+    finally:
+        field.destroy()
+
+
+def test_neutron_hook_sizes_scroll_column_to_content(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    left = ctk.CTkScrollableFrame(_tk_root)
+    left.pack()
+    wide = ctk.CTkFrame(left, width=500, height=20)
+    wide.grid(row=0, column=0)
+    wide.grid_propagate(False)
+    app = _app()
+    app.neutron_from_autocomplete = AutocompleteEntry(left)
+    app.neutron_from_autocomplete.grid(row=1, column=0)
+    app.neutron_to_autocomplete = AutocompleteEntry(left)
+    app.neutron_to_autocomplete.grid(row=2, column=0)
+    nearest = ctk.CTkFrame(left)
+    nearest.grid(row=3, column=0)
+    app.nearest_x_entry, app.nearest_y_entry, app.nearest_z_entry = (ctk.CTkEntry(nearest) for _ in range(3))
+    app.nearest_find_btn = ctk.CTkButton(nearest, text="FIND")
+    try:
+        add_neutron_tab_buttons(app)
+        assert left.cget("width") >= 500 / left._get_widget_scaling() - 1
+    finally:
+        left.destroy()
 
 
 def test_coords_dialog_hook_names_row(_tk_root):
