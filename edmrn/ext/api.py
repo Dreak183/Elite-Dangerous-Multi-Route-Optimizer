@@ -278,6 +278,17 @@ def lookup_system(name: str, *, call=call) -> Lookup:
     return Lookup.failed(name, failures) if failures else Lookup.not_found(name)
 
 
+def spansh_coords(name: str, *, call=call) -> Optional[tuple]:
+    """Coordinates if Spansh knows the system by exactly this name (case-insensitive), else None.
+
+    Service failures raise ApiError.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    return _spansh_coords(name, call)
+
+
 def nearest_system(x, y, z, *, call=call) -> Optional[dict]:
     """Spansh's nearest known system to the coordinates as {name, x, y, z, distance}, else None.
 
