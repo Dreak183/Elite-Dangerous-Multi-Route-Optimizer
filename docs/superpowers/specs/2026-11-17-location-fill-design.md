@@ -41,12 +41,18 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
   | Galaxy Plotter | Source System, Destination System | Spansh check (L4) |
   | Custom Route | Starting System, Add System | nothing more; Set or Add stays the commander's click |
   | System Info | the system name field | fetches the system's data, as the 🔍 button does |
+  | Route Optimization | Starting System (Optional) | when a CSV is loaded and does not list the system, a console line says so (L3a) |
 
-  Route Optimization's "Starting System" gets no button: the optimizer accepts only a system of the
-  loaded CSV, and its "🎯 Find Nearest" already picks the CSV system nearest to the current
-  position. Custom Route's "Ending System" gets none either: its top row has room for two buttons at
-  the default window size, a third cuts off "Add by Coords", and a route rarely ends where the
-  commander is. (Rulings.)
+  Custom Route's "Ending System" gets no button: its top row has room for two at the default window
+  size, and a route rarely ends where the commander is. (Ruling.) Custom Route's two fields give up
+  the button's width from their entry, so the row keeps upstream's width and "Add by Coords" stays
+  whole (L11).
+- L3a. Route Optimization's optimizer accepts only a start that the loaded CSV lists and otherwise
+  picks one itself; "🎯 Find Nearest" picks the CSV system nearest to the current position. The
+  location button writes the current system as it is (asked for by the commander 2026-11-17). When
+  a CSV is loaded and its "System Name" column does not list the system (case-insensitive), the
+  Console gets `'<system>' is not in the loaded CSV - the optimizer will choose the start; 🎯 Find
+  Nearest picks the CSV system nearest to you.`
 - L4. **Spansh check** (plotter fields). The button writes the current system name into the field at
   once, shows `Checking '<system>' at Spansh...` under it, and asks Spansh in the background:
   1. Spansh's system search knows the name (exact, case-insensitive match, the same check as
@@ -96,11 +102,14 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
 
 ### Layout
 
-- L10. The Neutron Highway tab's left column scrolls. At the default window size it cut off the
-  "Find Nearest System" row and hid the statistics below it entirely (`../../gui-redesign/00-brief.md`
-  section 4); the hint lines add height. (Ruling: a scrolling column over a larger default window,
-  which would not fit small screens.)
+- L10. The Neutron Highway tab's left column scrolls. At the default window size upstream's column
+  cut off the "Find Nearest System" row and hid the statistics below it entirely; the hint lines add
+  height. (Ruling: a scrolling column over a larger default window, which would not fit small
+  screens.) The column keeps upstream's width; its status and statistics lines wrap to the column
+  instead of being cut off at its edges.
 - L11. Everything else keeps upstream's layout; the buttons sit inside the existing field widgets.
+  A hint never changes the width of its field or of the field beside it: Neutron's From/To and
+  Galaxy's Source/Destination columns stay equal.
 
 ### First test version
 
@@ -109,8 +118,7 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
   Plotter, Custom Route and System Info are inspected in screenshots at the default window size;
   the app's log holds no `Traceback`.
 - T2. Live check: the Spansh check runs once against the real service for a known system (`Sol`)
-  and for the unknown test system (`Blae Phoe XT-A e1459`, `../../how-to/run.md`), and the
-  sentences match L4.
+  and for an invented name at real coordinates (`../../how-to/run.md`), and the sentences match L4.
 - T3. No executable is built (ruled by the commander 2026-11-17: the pytest suite is the
   verification, `../../../CLAUDE.md`). The crew relay is out of scope: crew capture runs locally,
   sync stays off without a group.
@@ -120,7 +128,6 @@ in-game, started from the repository's Python environment (`../../how-to/run.md`
 - Following a route regardless of the active tab, and every other defect in
   `../../gui-redesign/00-brief.md` section 4 beyond L10: the GUI redesign decides them.
 - Replacing upstream's start-system defaults when Calculate is clicked with an empty From field.
-- A location button on Route Optimization's start field (L3).
 - Changing the updater's target (ruled 2026-11-10, handover).
 
 ## Error handling
