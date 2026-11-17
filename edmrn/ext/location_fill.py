@@ -346,7 +346,11 @@ def add_optimizer_start_button(app) -> None:
             system = state.system
             app.starting_system.set(system)
             listed = getattr(app, "start_systems_list", None)
-            if isinstance(listed, list) and listed and                     system.strip().casefold() not in {str(n).strip().casefold() for n in listed}:
+            known = (
+                {str(n).strip().casefold() for n in listed}
+                if isinstance(listed, list) else set()
+            )
+            if known and system.strip().casefold() not in known:
                 app._log(NOT_IN_CSV.format(system=system))
 
         button = _make_button(app, app.start_entry.master, fill_start)
