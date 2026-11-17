@@ -14,8 +14,8 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 from edmrn.ext.location import LocationState
-from edmrn.ext.start_check import StartCheck, check_plot_system, failure_result
 from edmrn.ext.api import ApiFailure
+from edmrn.ext.start_check import StartCheck, check_plot_system, failure_result
 from edmrn.logger import get_logger
 
 logger = get_logger('LocationFill')
@@ -28,6 +28,10 @@ COORDS_TOOLTIP = "Fill in your current coordinates from the journal"
 BUTTON_TEXT = "📍"
 BUTTON_WIDTH = 28
 BUTTON_FONT_SIZE = 15
+BUTTON_PADX = 2   # SystemFieldFill grids the button with padx=(2, 2)
+FIELD_COLUMNS_UNIFORM = "edmrn-location-fields"
+NOT_IN_CSV = ("'{system}' is not in the loaded CSV - the optimizer will choose the start; "
+              "🎯 Find Nearest picks the CSV system nearest to you.")
 
 CHECKING_COLOR = "gray60"
 KNOWN_COLOR = "#4CAF50"
@@ -128,7 +132,7 @@ class SystemFieldFill:
         field.columnconfigure(0, weight=1)
         field.entry.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
         self.button = _make_button(app, field, self.fill)
-        self.button.grid(row=0, column=1, padx=(2, 2), pady=2)
+        self.button.grid(row=0, column=1, padx=(BUTTON_PADX, BUTTON_PADX), pady=2)
         Tooltip(self.button, SYSTEM_TOOLTIP)
         self.hint = ctk.CTkLabel(field, text="", wraplength=300, justify="left", anchor="w")
         self.hint.grid(row=1, column=0, columnspan=2, sticky="w", padx=4)
@@ -244,6 +248,7 @@ def add_coords_button(app, master, entries: tuple, *, name_entry=None,
     Tooltip(button, COORDS_TOOLTIP)
     return button
 
+
 def _size_scroll_column(widget) -> None:
     """Give the scrollable column the width of its content.
 
@@ -259,33 +264,96 @@ def _size_scroll_column(widget) -> None:
     column.configure(width=column.winfo_reqwidth() / column._get_widget_scaling())
 
 
-def add_neutron_tab_buttons(app) -> None:
+def _equalize_field_columns(field) -> None:
+    """Keep the two field columns equal, so a hint's width never moves the divider (spec L11)."""
+    field.master.master.columnconfigure((0, 1), uniform=FIELD_COLUMNS_UNIFORM)
+
+
+def _follow_width(master, *labels) -> Callable:
+    """Wrap the labels to the width of `master`; returns the bound `<Configure>` handler."""
+    def on_configure(event):
+        wrap = max(100, int(event.width / master._get_widget_scaling()) - 16)
+        for label in labels:
+            try:
+                label.configure(wraplength=wrap)
+            except tk.TclError:
+                pass
+    master.bind("<Configure>", on_configure, add="+")
+    return on_configure
+
+
+def _guarded(what: str, fn: Callable[[], None]) -> None:
     try:
+        fn()
+    except Exception:
+        logger.exception("Could not %s", what)
+
+
+def add_neutron_tab_buttons(app) -> None:
+    def buttons():
         SystemFieldFill(app, app.neutron_from_autocomplete, check_spansh=True)
         SystemFieldFill(app, app.neutron_to_autocomplete, check_spansh=True)
         add_coords_button(
             app, app.nearest_find_btn.master,
             (app.nearest_x_entry, app.nearest_y_entry, app.nearest_z_entry),
             row=0, column=8, padx=(0, 8), pady=6)
-        _size_scroll_column(app.nearest_find_btn)
-    except Exception:
-        logger.exception("Could not add the location buttons to the Neutron tab")
+
+    def wrapping():
+        for label in (app.neutron_info_label, app.neutron_stats_label, app.neutron_progress_label):
+            _follow_width(label.master, label)
+
+    _guarded("add the location buttons to the Neutron tab", buttons)
+    _guarded("equalize the Neutron field columns",
+             lambda: _equalize_field_columns(app.neutron_from_autocomplete))
+    _guarded("wrap the Neutron status lines", wrapping)
+    _guarded("size the Neutron column", lambda: _size_scroll_column(app.nearest_find_btn))
 
 
 def add_galaxy_tab_buttons(app) -> None:
-    try:
+    def buttons():
         SystemFieldFill(app, app.galaxy_source_autocomplete, check_spansh=True)
         SystemFieldFill(app, app.galaxy_dest_autocomplete, check_spansh=True)
-    except Exception:
-        logger.exception("Could not add the location buttons to the Galaxy tab")
+
+    _guarded("add the location buttons to the Galaxy tab", buttons)
+    _guarded("equalize the Galaxy field columns",
+             lambda: _equalize_field_columns(app.galaxy_source_autocomplete))
+
+
+def _give_up_button_width(field, button) -> None:
+    """The entry gives up the button's footprint, so the row keeps upstream's width (spec L11)."""
+    field.update_idletasks()
+    scaling = field._get_widget_scaling()
+    footprint = (button.winfo_reqwidth() + 2 * BUTTON_PADX * scaling) / scaling
+    field.entry.configure(width=max(40, field.entry.cget("width") - round(footprint)))
 
 
 def add_custom_route_buttons(tab) -> None:
     try:
         for field in (tab.starting_entry, tab.system_entry):
-            SystemFieldFill(tab.app, field, check_spansh=False)
+            fill = SystemFieldFill(tab.app, field, check_spansh=False)
+            _guarded("shrink a Custom Route entry", lambda: _give_up_button_width(field, fill.button))
     except Exception:
         logger.exception("Could not add the location buttons to the Custom Route tab")
+
+
+def add_optimizer_start_button(app) -> None:
+    try:
+        def fill_start():
+            state = current_location(app)
+            if state is None:
+                app._log(UNKNOWN_LOCATION)
+                return
+            system = state.system
+            app.starting_system.set(system)
+            listed = getattr(app, "start_systems_list", None)
+            if isinstance(listed, list) and listed and                     system.strip().casefold() not in {str(n).strip().casefold() for n in listed}:
+                app._log(NOT_IN_CSV.format(system=system))
+
+        button = _make_button(app, app.start_entry.master, fill_start)
+        button.grid(row=0, column=2, padx=(2, 0))
+        Tooltip(button, SYSTEM_TOOLTIP)
+    except Exception:
+        logger.exception("Could not add the location button to Route Optimization")
 
 
 def add_coords_dialog_button(app, frame, name_entry, entries: tuple) -> None:

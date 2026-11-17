@@ -97,3 +97,22 @@ def no_leftover_sync_threads():
     import threading
     alive = [t.name for t in threading.enumerate() if t.name == "edmrn-crew-sync" and t.is_alive()]
     assert not alive, "a test left the crew sync thread running; call group.stop()"
+
+
+@pytest.fixture(scope="session")
+def tk_root():
+    """One withdrawn customtkinter root for every test that needs real widgets.
+
+    Several roots in one process intermittently fail with "Can't find a usable tk.tcl".
+    """
+    ctk = pytest.importorskip("customtkinter")
+    try:
+        root = ctk.CTk()
+    except Exception as e:  # tkinter.TclError without a display
+        pytest.skip(f"no Tk display: {e}")
+    root.withdraw()
+    yield root
+    try:
+        root.destroy()
+    except Exception:
+        pass

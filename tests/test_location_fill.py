@@ -1,6 +1,7 @@
 """Location buttons (docs/superpowers/specs/2026-11-17-location-fill-design.md).
 
-Covers system fields (L1-L6, L11), coordinate fields (L7-L9) and the hook functions (L3, L7).
+Covers system fields (L1-L6, L11) and coordinate fields (L7-L9); the hook functions and hook lines
+are in test_location_fill_hooks.py.
 """
 import tkinter as tk
 from types import SimpleNamespace
@@ -26,18 +27,13 @@ class ImmediateRoot:
         fn(*args)
 
 
-@pytest.fixture(scope="module")
-def _tk_root():
-    try:
-        r = ctk.CTk()
-    except Exception as e:  # tkinter.TclError without a display
-        pytest.skip(f"no Tk display: {e}")
-    r.withdraw()
-    yield r
-    try:
-        r.destroy()
-    except Exception:
-        pass
+@pytest.fixture
+def _tk_root(tk_root):
+    """A per-test container on the shared root: its leftovers die with it."""
+    container = ctk.CTkFrame(tk_root)
+    container.pack()
+    yield container
+    container.destroy()
 
 
 class Rig:
@@ -131,6 +127,12 @@ def test_hint_wraps_to_field_width(rig):
     assert r.fill.hint.cget("wraplength") == max(80, int(240 / scaling) - 8)
     r.fill._on_field_configure(SimpleNamespace(width=50))
     assert r.fill.hint.cget("wraplength") == 80
+
+
+def test_field_configure_is_bound(rig):
+    # a canvas <Configure> does not fire while the root is withdrawn, so pin the binding script
+    r = rig()
+    assert "_on_field_configure" in r.field._canvas.bind("<Configure>")
 
 
 def test_system_button_follows_theme(_tk_root):
@@ -243,9 +245,18 @@ def test_hint_clears_when_text_changes(rig):
 
 def test_result_after_destroy_is_ignored(rig):
     r = rig(results=[StartCheck(SYSTEM, "✓ known", True)])
+    queued = []
+
+    class QueueRoot:
+        def after(self, ms, fn, *args):
+            queued.append((fn, args))
+    r.app.root = QueueRoot()
     r.fill.fill()
-    r.field.destroy()
     r.jobs[0]()
+    assert len(queued) == 1
+    r.field.destroy()
+    fn, args = queued[0]
+    fn(*args)   # _apply on a destroyed field must not raise
 
 
 def test_job_exception_shows_a_sentence(rig):

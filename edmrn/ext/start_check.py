@@ -1,7 +1,7 @@
 """Spansh check for route-plotter fields filled from the current location.
 
 Implements docs/superpowers/specs/2026-11-17-location-fill-design.md, requirement L4: a field
-holds the current system if Spansh knows it, else Spansh's nearest known system, with a one-line
+holds the current system if Spansh knows it, else Spansh's nearest known system, with a
 hint saying which.
 """
 from __future__ import annotations

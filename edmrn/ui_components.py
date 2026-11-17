@@ -164,6 +164,8 @@ class UIComponents:
         )
         self.app.theme_manager.apply_button_theme(self.app.start_dropdown_btn, "primary")
         self.app.start_dropdown_btn.grid(row=0, column=1)
+        from edmrn.ext.location_fill import add_optimizer_start_button
+        add_optimizer_start_button(self.app)
         
         self.app.start_dropdown_frame = None
         self.app.start_systems_list = []

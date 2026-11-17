@@ -7,8 +7,8 @@ import pytest
 
 from edmrn.ext.location import LocationState
 from edmrn.ext.location_fill import (
-    BUTTON_TEXT, add_coords_dialog_button, add_custom_route_buttons, add_galaxy_tab_buttons,
-    add_neutron_tab_buttons, add_system_info_button)
+    BUTTON_TEXT, NOT_IN_CSV, UNKNOWN_LOCATION, add_coords_dialog_button, add_custom_route_buttons,
+    add_galaxy_tab_buttons, add_neutron_tab_buttons, add_optimizer_start_button, add_system_info_button)
 
 ctk = pytest.importorskip("customtkinter")
 
@@ -21,18 +21,13 @@ class ImmediateRoot:
         fn(*args)
 
 
-@pytest.fixture(scope="module")
-def _tk_root():
-    try:
-        r = ctk.CTk()
-    except Exception as e:  # tkinter.TclError without a display
-        pytest.skip(f"no Tk display: {e}")
-    r.withdraw()
-    yield r
-    try:
-        r.destroy()
-    except Exception:
-        pass
+@pytest.fixture
+def _tk_root(tk_root):
+    """A per-test container on the shared root: its leftovers die with it."""
+    container = ctk.CTkFrame(tk_root)
+    container.pack()
+    yield container
+    container.destroy()
 
 
 def _app():
@@ -52,6 +47,7 @@ def test_hook_lines_in_upstream_builders():
     neutron = inspect.getsource(UIComponents.create_neutron_tab)
     assert "add_neutron_tab_buttons(self.app)" in neutron
     assert "ctk.CTkScrollableFrame(main_frame" in neutron
+    assert "add_optimizer_start_button(self.app)" in inspect.getsource(UIComponents.create_optimizer_tab)
     assert "add_galaxy_tab_buttons(self.app)" in inspect.getsource(UIComponents.create_galaxy_plotter_tab)
     assert "add_custom_route_buttons(self)" in inspect.getsource(CustomRouteTab._build_ui)
     assert "add_coords_dialog_button(self.app, frame, name_entry, (x_entry, y_entry, z_entry))" in \
@@ -197,5 +193,173 @@ def test_spansh_check_wiring(monkeypatch):
     add_custom_route_buttons(SimpleNamespace(app=app, starting_entry=f["cs"], ending_entry=f["ce"],
                                              system_entry=f["cy"]))
     add_system_info_button(app, SimpleNamespace(system_info_entry=f["si"], fetch_callback=None))
+    assert add_optimizer_start_button(SimpleNamespace()) is None   # logs, no raise
     assert _Recorder.calls == [(f["nf"], True), (f["nt"], True), (f["gs"], True), (f["gd"], True),
                                (f["cs"], False), (f["cy"], False), (f["si"], False)]
+
+
+def _optimizer_app(state, listed=None):
+    app = _app()
+    app.location_tracker.state = state
+    app.starting_system = SimpleNamespace(value=None, set=lambda v: setattr(app.starting_system, "value", v))
+    app.logs = []
+    app._log = app.logs.append
+    if listed is not None:
+        app.start_systems_list = listed
+    return app
+
+
+@pytest.fixture
+def optimizer(_tk_root):
+    container = ctk.CTkFrame(_tk_root)
+    container.pack()
+    ctk.CTkButton(container, text="v").grid(row=0, column=1)
+
+    def make(state=LocationState(system=SYSTEM, coords=COORDS), listed=None):
+        app = _optimizer_app(state, listed)
+        app.start_entry = ctk.CTkEntry(container)
+        app.start_entry.grid(row=0, column=0)
+        add_optimizer_start_button(app)
+        return app, _buttons(container)[0]
+    yield make
+    container.destroy()
+
+
+def test_optimizer_button_placement(optimizer):
+    app, button = optimizer()
+    info = button.grid_info()
+    assert (int(info["row"]), int(info["column"])) == (0, 2)
+    assert button.cget("text") == "📍"
+
+
+def test_optimizer_fills_start_without_csv(optimizer):
+    app, button = optimizer()
+    button.invoke()
+    assert app.starting_system.value == SYSTEM
+    assert app.logs == []
+
+
+def test_optimizer_logs_when_csv_lacks_system(optimizer):
+    app, button = optimizer(listed=["Sol", "Colonia"])
+    button.invoke()
+    assert app.starting_system.value == SYSTEM
+    assert app.logs == [NOT_IN_CSV.format(system=SYSTEM)]
+    assert app.logs[0] == (f"'{SYSTEM}' is not in the loaded CSV - the optimizer will choose the start; "
+                           "🎯 Find Nearest picks the CSV system nearest to you.")
+
+
+def test_optimizer_silent_when_csv_lists_system_any_case(optimizer):
+    app, button = optimizer(listed=["Sol", f"  {SYSTEM.upper()} "])
+    button.invoke()
+    assert app.starting_system.value == SYSTEM
+    assert app.logs == []
+
+
+def test_optimizer_silent_for_empty_csv_list(optimizer):
+    app, button = optimizer(listed=[])
+    button.invoke()
+    assert app.logs == []
+
+
+def test_optimizer_unknown_location(optimizer):
+    app, button = optimizer(state=LocationState(), listed=["Sol"])
+    button.invoke()
+    assert app.starting_system.value is None
+    assert app.logs == [UNKNOWN_LOCATION]
+
+
+def _two_field_frame(root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    outer = ctk.CTkFrame(root)
+    outer.pack()
+    outer.columnconfigure((0, 1), weight=1)
+    fields = []
+    for column in (0, 1):
+        frame = ctk.CTkFrame(outer)
+        frame.grid(row=0, column=column, sticky="ew")
+        field = AutocompleteEntry(frame)
+        field.pack(fill="x")
+        fields.append(field)
+    return outer, fields
+
+
+def _realized_widths(root, *widgets):
+    for _ in range(3):
+        root.update_idletasks()
+    return [w.master.winfo_width() for w in widgets]
+
+
+@pytest.mark.parametrize("hook, names", [
+    (add_neutron_tab_buttons, ("neutron_from_autocomplete", "neutron_to_autocomplete")),
+    (add_galaxy_tab_buttons, ("galaxy_source_autocomplete", "galaxy_dest_autocomplete"))])
+def test_hint_never_changes_column_widths(_tk_root, hook, names):
+    outer, (left, right) = _two_field_frame(_tk_root)
+    app = _app()
+    for name, field in zip(names, (left, right)):
+        setattr(app, name, field)
+    app.nearest_find_btn = None   # the Neutron coordinates step fails and is logged; irrelevant here
+    try:
+        hook(app)
+        before = _realized_widths(_tk_root, left, right)
+        left.winfo_children()
+        hint = [c for c in left.winfo_children() if isinstance(c, ctk.CTkLabel)][0]
+        hint.configure(text="x" * 200, wraplength=600)
+        hint.grid()
+        after = _realized_widths(_tk_root, left, right)
+        assert after[1] == before[1]
+        assert after[0] == after[1]
+    finally:
+        outer.destroy()
+
+
+def test_custom_route_row_keeps_upstream_width(_tk_root):
+    from edmrn.autocomplete_entry import AutocompleteEntry
+    holder = ctk.CTkFrame(_tk_root)
+    holder.pack()
+    bare = AutocompleteEntry(holder)
+    bare.pack()
+    start, add = AutocompleteEntry(holder), AutocompleteEntry(holder)
+    start.pack()
+    add.pack()
+    tab = SimpleNamespace(app=_app(), starting_entry=start, ending_entry=None, system_entry=add)
+    try:
+        add_custom_route_buttons(tab)
+        for field in (start, add):
+            field.update_idletasks()
+            assert abs(field.winfo_reqwidth() - bare.winfo_reqwidth()) <= 1
+            assert field.entry.cget("width") < bare.entry.cget("width")
+    finally:
+        holder.destroy()
+
+
+def test_neutron_status_lines_wrap_to_their_frame(_tk_root):
+    from edmrn.ext.location_fill import _follow_width
+    frame = ctk.CTkFrame(_tk_root)
+    frame.pack()
+    labels = [ctk.CTkLabel(frame, text="x", wraplength=0) for _ in range(3)]
+    try:
+        handler = _follow_width(frame, *labels)
+        scaling = frame._get_widget_scaling()
+        handler(SimpleNamespace(width=400))
+        assert [l.cget("wraplength") for l in labels] == [int(400 / scaling) - 16] * 3
+        handler(SimpleNamespace(width=40))
+        assert [l.cget("wraplength") for l in labels] == [100] * 3
+        assert "on_configure" in frame._canvas.bind("<Configure>")
+    finally:
+        frame.destroy()
+
+
+def test_neutron_hook_wraps_status_labels(_tk_root):
+    app = _app()
+    frames = []
+    for name in ("neutron_info_label", "neutron_stats_label", "neutron_progress_label"):
+        frame = ctk.CTkFrame(_tk_root)
+        frames.append(frame)
+        setattr(app, name, ctk.CTkLabel(frame, text="x"))
+    try:
+        add_neutron_tab_buttons(app)   # other steps fail and are logged; the wrapping step still runs
+        for frame in frames:
+            assert "on_configure" in frame._canvas.bind("<Configure>")
+    finally:
+        for frame in frames:
+            frame.destroy()
