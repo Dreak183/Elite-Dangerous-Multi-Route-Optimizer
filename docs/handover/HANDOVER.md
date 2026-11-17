@@ -11,6 +11,15 @@
     twice in a row, on the commit that is now `main`). No Python linter is configured.
   - The follow-ups were written test-first by one agent per area with mutation checks; the diffs
     were read, not reviewed by a second agent, and nothing was probed against a running relay.
+- `main` also holds the location fill buttons (📍 on system and X/Y/Z fields, Spansh check with
+  nearest-known fallback; spec `../superpowers/specs/2026-11-17-location-fill-design.md`),
+  fast-forwarded 2026-11-17 after a final review with mutation checks: `1411 passed`. One run
+  showed `1410 passed, 1 skipped` (an intermittent Tk-root skip, not pinned down).
+  - **The commander has not looked at the layout** (hint wrapping, themed buttons, Custom Route
+    row, the 📍 on Route Optimization's start field); smoke runs checked function, not looks.
+  - The commander reported Spansh suggestions no longer appearing while typing; not reproduced
+    (typing "Colon" opens the dropdown in Neutron, Galaxy and System Info, also after 📍). Which
+    field and which steps are still to be asked.
 - **GUI redesign in preparation.** The commander has the interface redesigned by Claude Design and
   implemented afterwards. `../gui-redesign/` is the package for the designer: brief, a functional
   reference of every screen with element IDs, screenshots. The reference was derived by reading
@@ -39,8 +48,12 @@
    nothing restored after restart); none is fixed. A review that executes (relay probes on
    127.0.0.1, `../how-to/run.md`) is still owed for the relay follow-up commit `e2152f5`.
 3. **Deploy session with the commander** (needs the commander), following
-   `../how-to/deploy-relay.md`: server OS, Docker or not, an existing reverse proxy on 443, the DNS
-   record for `galroute.the-hub.cloud`, and the leader key from Settings > Crew.... Decide there
+   `../how-to/deploy-relay.md`. Ruled 2026-11-17: Debian/Ubuntu server, Option A (Docker Compose
+   with Caddy), the hoster's firewall admits TCP 22, 80, 443 and UDP 443 inbound and drops the
+   rest; `main` is pushed to `upstream` (`Dreak183/Elite-Dangerous-Multi-Route-Optimizer`, the
+   commander's own repository; never to the original) and cloned on the server; Claude runs the
+   commands over SSH from the session. Still needed: the SSH host and user, the DNS record for
+   `galroute.the-hub.cloud`, and the leader key from Settings > Crew.... Decide there
    whether the reverse proxy limits connections per client address: the relay caps only the total
    (`EDMRN_RELAY_MAX_CONNECTIONS`), so unauthenticated connections from one address can fill the
    cap for the 10 s auth timeout each; check what the chosen proxy offers for that.
@@ -98,6 +111,21 @@ The neutron store validates types and numbers, not content. For crew data, Spec 
 - strict `route_id` types;
 - a stable record identity. `INTEGER PRIMARY KEY` reuses ids after a delete, so ids must not leave
   the process (ADR-0005's `event_id` is that identity).
+
+## Follow-ups from the location fill reviews (deferred, none blocking)
+
+- `edmrn/ext/location_fill.py`:
+  - `_give_up_button_width` rounds the button footprint in unscaled units; at a DPI scaling other
+    than the test machine's the Custom Route row can be 1–2 px off upstream's width (untested).
+  - It calls `update_idletasks()` during tab construction, processing idle tasks app-wide.
+  - `_follow_width`'s 16 px margin ignores the stats frame's 1 px border.
+  - Theme-manager absence is handled by catching `AttributeError`; a `getattr` first would
+    separate real failures.
+- The 📍 on Route Optimization's start field widens `top_frame` column 2 by about 32 px; no test
+  checks that the row still fits the default 1200x730 window.
+- Tests: some only check that nothing raises (theme failure, after shutdown, wiring without
+  `caplog`); `pytest.importorskip` in `tests/test_location_fill_hooks.py` follows the `edmrn`
+  imports and has no effect.
 
 ## Follow-ups from the relay reviews (deferred, none blocking)
 
